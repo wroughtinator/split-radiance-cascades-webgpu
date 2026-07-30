@@ -156,7 +156,7 @@ function morton3(x, y, z) {
 
 export function buildBVH(triangles, maxLeaf = 4) {
   if (!triangles.length) {
-    return { nodes: new Float32Array(16), triangles: new Float32Array(20), nodeCount: 1 };
+    return { nodes: new Float32Array(16), triangles: new Float32Array(28), nodeCount: 1 };
   }
   const bounds = { min: [Infinity,Infinity,Infinity], max: [-Infinity,-Infinity,-Infinity] };
   const refs = triangles.map((t, index) => {
@@ -199,10 +199,14 @@ export function buildBVH(triangles, maxLeaf = 4) {
     nu[o+3]=n.leaf?(0x80000000|n.left)>>>0:n.left>>>0;
     nu[o+7]=n.right>>>0;
   });
-  const triData=new Float32Array(ordered.length*20);
+  const triData=new Float32Array(ordered.length*28);
   ordered.forEach((t,i)=>{
-    const o=i*20;
-    triData.set([...t.a,0,...t.b,0,...t.c,0,...t.albedo,0,...t.emissive,0],o);
+    const o=i*28;
+    const uvs=t.uvs||[[0,0],[0,0],[0,0]];
+    triData.set([
+      ...t.a,0,...t.b,0,...t.c,0,...t.albedo,0,...t.emissive,0,
+      ...uvs[0],...uvs[1],...uvs[2],t.material??-1,t.alphaCutoff??0,
+    ],o);
   });
   return {nodes:new Float32Array(nodeData),triangles:triData,nodeCount:nodes.length,triangleCount:ordered.length};
 }

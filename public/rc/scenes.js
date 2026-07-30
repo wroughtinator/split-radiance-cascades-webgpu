@@ -28,7 +28,7 @@ class Geometry {
   }
 
   vertex(p, n, albedo, emissive) {
-    this.vertices.push(...p, ...n, ...albedo, ...emissive);
+    this.vertices.push(...p, ...n, ...albedo, ...emissive, 0, 0, -1, 0);
     for (let i = 0; i < 3; i++) {
       this.boundsMin[i] = Math.min(this.boundsMin[i], p[i]);
       this.boundsMax[i] = Math.max(this.boundsMax[i], p[i]);
@@ -141,7 +141,7 @@ class Geometry {
     const bvh = buildBVH(this.triangles);
     return {
       vertices: new Float32Array(this.vertices),
-      vertexCount: this.vertices.length / 12,
+      vertexCount: this.vertices.length / 16,
       ...bvh,
       boundsMin: this.boundsMin,
       boundsMax: this.boundsMax,
@@ -185,7 +185,7 @@ async function loadPackedSponzaGeometry() {
       const stream = response.body.pipeThrough(new DecompressionStream("gzip"));
       const packed = await new Response(stream).arrayBuffer();
       const header = new Uint32Array(packed, 0, 8);
-      if (header[0] !== 0x31424352 || header[1] !== 1) {
+      if (header[0] !== 0x31424352 || header[1] !== 2) {
         throw new Error("The Sponza geometry package is invalid or uses an unsupported version.");
       }
       const [, , vertexFloats, nodeFloats, triangleFloats, vertexCount, nodeCount, triangleCount] = header;
@@ -216,7 +216,7 @@ async function loadPackedSponzaGeometry() {
 
 export const SCENE_INFO = [
   {name:"Color bleed laboratory",short:"Lab",description:"Near-field red/green transfer, hard occluders, emissive geometry, and moving dual lights."},
-  {name:"Sponza atrium (paper scene)",short:"Sponza",description:"The official 262k-triangle Crytek Sponza geometry used by the paper, with material-average colors and full software-BVH traversal."},
+  {name:"Sponza atrium (paper scene)",short:"Sponza",description:"The official 262k-triangle Crytek Sponza geometry and base-color materials used for the paper comparison, with full software-BVH traversal."},
   {name:"Concave canyon heightfield",short:"Canyon",description:"A 72×72 terrain mesh with nested craters, ravines, overhangs, and a moving low sun."},
   {name:"Dense lantern forest",short:"Forest",description:"Thousands of thin triangles, deep occlusion, high-frequency foliage, and colored moving lanterns."},
   {name:"Multi-level atrium",short:"Atrium",description:"Stairs, balconies, skylight transfer, curved sculptures, and cross-floor indirect illumination."},
@@ -363,11 +363,11 @@ export function createScene(index) {
     return loadPackedSponzaGeometry().then((geometry) => ({
       id: index,
       ...SCENE_INFO[index],
-      camera: [3.0, 4.65, 0],
-      target: [-4.0, 3.4, 0],
+      camera: [-8.0, 8.5, -0.5],
+      target: [5.0, 2.0, -0.5],
       baseSpacing: 0.82,
-      env: [0.16, 0.19, 0.25],
-      sun: 4.2,
+      env: [0.55, 0.65, 0.82],
+      sun: 5.2,
       geometry,
       radius: Math.hypot(...geometry.boundsMax.map((value, axis) => (value - geometry.boundsMin[axis]) * 0.5)),
     }));

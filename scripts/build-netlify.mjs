@@ -13,6 +13,7 @@ await mkdir(output, { recursive: true });
 await cp(path.join(root, "public", "rc"), path.join(output, "rc"), { recursive: true });
 await mkdir(path.join(output, "models"), { recursive: true });
 await cp(path.join(root, "public", "models", "sponza.rcb"), path.join(output, "models", "sponza.rcb"));
+await cp(path.join(root, "public", "models", "sponza-atlas.webp"), path.join(output, "models", "sponza-atlas.webp"));
 await cp(path.join(root, "public", "models", "SPONZA-LICENSE.md"), path.join(output, "models", "SPONZA-LICENSE.md"));
 await cp(path.join(root, "public", "favicon.svg"), path.join(output, "favicon.svg"));
 await cp(path.join(root, "public", "og.png"), path.join(output, "og.png"));
@@ -53,4 +54,5 @@ const html = await readFile(path.join(output, "index.html"), "utf8");
 for (const required of ["/rc/engine.js", "/rc/app.css", "/og.png", "id=\"viewport\"", "id=\"run-validation\""]) {
   if (!html.includes(required)) throw new Error(`Static build is missing ${required}`);
 }
+await readFile(path.join(output, "models", "sponza-atlas.webp"));
 console.log(`Netlify bundle ready: ${output}`);

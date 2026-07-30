@@ -11,10 +11,10 @@ const MAP = globalThis.GPUMapMode;
 const SHADER = globalThis.GPUShaderStage;
 
 const QUALITY = {
-  performance: { giDivisor: 8, pixelRatio: 0.72, shadow: 1024, raysPerSample: 1 },
-  balanced: { giDivisor: 6, pixelRatio: 0.9, shadow: 1536, raysPerSample: 2 },
-  quality: { giDivisor: 4, pixelRatio: 1, shadow: 2048, raysPerSample: 2 },
-  ultra: { giDivisor: 3, pixelRatio: 1, shadow: 2048, raysPerSample: 3 },
+  performance: { giDivisor: 8, pixelRatio: 0.72, shadow: 1024, raysPerSample: 2 },
+  balanced: { giDivisor: 6, pixelRatio: 0.9, shadow: 1536, raysPerSample: 12 },
+  quality: { giDivisor: 4, pixelRatio: 1, shadow: 2048, raysPerSample: 14 },
+  ultra: { giDivisor: 3, pixelRatio: 1, shadow: 2048, raysPerSample: 16 },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -60,9 +60,12 @@ class SplitRadianceCascades {
     this.sunSpeed = 1;
     this.debugMode = 0;
     this.temporalStability = true;
-    this.multibounce = true;
-    this.roughSpecular = true;
-    this.cMinusOne = true;
+    // The paper's primary evaluation path is single-bounce Split RC. Its
+    // multibounce, rough-specular, and C(-1) experiments remain available as
+    // explicit extensions, but are not mixed into the baseline by default.
+    this.multibounce = false;
+    this.roughSpecular = false;
+    this.cMinusOne = false;
     this.historyValid = false;
     this.animateCamera = true;
     this.animateLights = true;
@@ -86,6 +89,8 @@ class SplitRadianceCascades {
     this.camera = { azimuth: 0.75, elevation: 0.32, distance: 20, target: [0, 0, 0] };
     this.keys = new Set();
     this.cleanup = [];
+    this.testTimeOverride = null;
+    this.captureRequest = null;
   }
 
   async initialize() {
@@ -113,6 +118,7 @@ class SplitRadianceCascades {
     this.context.configure({ device: this.device, format: this.format, alphaMode: "opaque" });
     this.timestampSupported = this.device.features.has("timestamp-query");
     await this.createPipelines();
+    await this.createMaterialAtlas();
     this.createPersistentResources();
     this.installUI();
     await this.loadScene(0);
@@ -123,7 +129,22 @@ class SplitRadianceCascades {
     this.updateAdapterLabel();
     console.info("[Split RC] renderer-ready", this.adapterInfo());
 
-    if (new URLSearchParams(location.search).has("autotest")) {
+    const automaticTest = new URLSearchParams(location.search).get("autotest");
+    if (automaticTest === "reference") {
+      setTimeout(async () => {
+        await this.loadScene(1);
+        const report = {
+          timestamp: new Date().toISOString(),
+          adapter: this.adapterInfo(),
+          scene: SCENE_INFO[1].name,
+          reference: await this.runPathTracedReferenceAudit(),
+          repeatability: await this.runFinalFrameRepeatabilityAudit(),
+          metrics: this.metricsSnapshot(),
+        };
+        report.passed = report.reference.passed && report.repeatability.passed;
+        this.exposeTestReport(report);
+      }, 200);
+    } else if (automaticTest != null) {
       setTimeout(() => this.runValidation({ framesPerScene: 36 }), 200);
     }
   }
@@ -160,16 +181,22 @@ class SplitRadianceCascades {
 
     this.frameLayout = device.createBindGroupLayout({
       label: "frame-uniform-layout",
-      entries: [{ binding: 0, visibility: SHADER.VERTEX | SHADER.FRAGMENT, buffer: { type: "uniform" } }],
+      entries: [
+        { binding: 0, visibility: SHADER.VERTEX | SHADER.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 1, visibility: SHADER.FRAGMENT, texture: { sampleType: "float" } },
+        { binding: 2, visibility: SHADER.FRAGMENT, sampler: { type: "filtering" } },
+      ],
     });
     this.rasterLayout = device.createPipelineLayout({ bindGroupLayouts: [this.frameLayout] });
     const vertexBuffers = [{
-      arrayStride: 48,
+      arrayStride: 64,
       attributes: [
         { shaderLocation: 0, offset: 0, format: "float32x3" },
         { shaderLocation: 1, offset: 12, format: "float32x3" },
         { shaderLocation: 2, offset: 24, format: "float32x3" },
         { shaderLocation: 3, offset: 36, format: "float32x3" },
+        { shaderLocation: 4, offset: 48, format: "float32x2" },
+        { shaderLocation: 5, offset: 56, format: "float32x2" },
       ],
     }];
     this.gbufferPipeline = device.createRenderPipeline({
@@ -188,6 +215,7 @@ class SplitRadianceCascades {
       label: "Sun shadow pipeline",
       layout: this.rasterLayout,
       vertex: { module: rasterModule, entryPoint: "shadowVS", buffers: vertexBuffers },
+      fragment: { module: rasterModule, entryPoint: "shadowFS", targets: [] },
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 1.5 },
     });
@@ -207,6 +235,7 @@ class SplitRadianceCascades {
         { binding: 9, visibility: SHADER.COMPUTE, buffer: { type: "read-only-storage" } },
         { binding: 10, visibility: SHADER.COMPUTE, buffer: { type: "read-only-storage" } },
         { binding: 11, visibility: SHADER.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 12, visibility: SHADER.COMPUTE, texture: { sampleType: "float" } },
       ],
     });
     this.computePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.computeLayout] });
@@ -220,11 +249,16 @@ class SplitRadianceCascades {
       initBase: cp("initBase"),
       initSecondary: cp("initSecondary"),
       initHigher: cp("initHigher"),
+      canonicalize: cp("canonicalizeProbes"),
+      countBase: cp("countBaseRays"),
+      countSecondary: cp("countSecondaryRays"),
+      countHigher: cp("countHigherRays"),
       assignOffsets: cp("assignRayOffsets"),
       splitRays: cp("splitRays"),
       splitSecondary: cp("splitSecondaryRays"),
       merge: cp("mergeCascade"),
       prefilter: cp("prefilterIrradiance"),
+      validateReference: cp("validateReference"),
     };
 
     this.finalLayout = device.createBindGroupLayout({
@@ -253,6 +287,31 @@ class SplitRadianceCascades {
     if (error) throw new Error(`WebGPU pipeline validation failed: ${error.message}`);
   }
 
+  async createMaterialAtlas() {
+    const response = await fetch("/models/sponza-atlas.webp");
+    if (!response.ok) throw new Error(`Sponza material atlas request failed (${response.status}).`);
+    const bitmap = await createImageBitmap(await response.blob(), { colorSpaceConversion: "default" });
+    this.materialAtlas = this.device.createTexture({
+      label: "official Sponza base-color atlas",
+      size: [bitmap.width, bitmap.height],
+      format: "rgba8unorm-srgb",
+      usage: TEX.TEXTURE_BINDING | TEX.COPY_DST | TEX.RENDER_ATTACHMENT,
+    });
+    this.device.queue.copyExternalImageToTexture(
+      { source: bitmap },
+      { texture: this.materialAtlas },
+      [bitmap.width, bitmap.height],
+    );
+    bitmap.close();
+    this.materialSampler = this.device.createSampler({
+      minFilter: "linear",
+      magFilter: "linear",
+      mipmapFilter: "linear",
+      addressModeU: "clamp-to-edge",
+      addressModeV: "clamp-to-edge",
+    });
+  }
+
   createPersistentResources() {
     const d = this.device;
     this.frameBuffer = createBuffer(d, "frame uniforms", 256, GPU.UNIFORM | GPU.COPY_DST);
@@ -266,7 +325,11 @@ class SplitRadianceCascades {
     this.shadowSampler = d.createSampler({ compare: "less-equal", minFilter: "linear", magFilter: "linear" });
     this.rasterBindGroup = d.createBindGroup({
       layout: this.frameLayout,
-      entries: [{ binding: 0, resource: { buffer: this.frameBuffer } }],
+      entries: [
+        { binding: 0, resource: { buffer: this.frameBuffer } },
+        { binding: 1, resource: this.materialAtlas.createView() },
+        { binding: 2, resource: this.materialSampler },
+      ],
     });
     if (this.timestampSupported) {
       this.querySet = d.createQuerySet({ type: "timestamp", count: 8 });
@@ -345,6 +408,7 @@ class SplitRadianceCascades {
       { binding: 9, resource: { buffer: this.bvhNodeBuffer } },
       { binding: 10, resource: { buffer: this.triangleBuffer } },
       { binding: 11, resource: { buffer: passBuffer } },
+      { binding: 12, resource: this.materialAtlas.createView() },
     ];
     this.computeBindGroups = this.passBuffers.map((buffer, i) => this.device.createBindGroup({
       label: `compute bind group cascade ${i}`,
@@ -422,14 +486,20 @@ class SplitRadianceCascades {
   }
 
   updateUniforms(now) {
-    const seconds = (now - this.startTime) / 1000;
+    const seconds = this.testTimeOverride ?? (now - this.startTime) / 1000;
     const cameraPosition = this.cameraPosition(seconds);
     const view = mat4LookAt(cameraPosition, this.camera.target);
     const projection = mat4Perspective(Math.PI / 3, this.width / this.height, Math.max(0.03, this.scene.radius * 0.001), this.scene.radius * 5 + 100);
     const viewProjection = mat4Multiply(projection, view);
     const sunTime = this.animateLights ? seconds * this.sunSpeed : 0.7;
     const sunAngle = sunTime * 0.12 + this.sceneIndex * 0.61;
-    const sunDirection = normalize3([Math.cos(sunAngle) * 0.7, -0.74, Math.sin(sunAngle) * 0.7]);
+    const sunHorizontal = this.sceneIndex === 1 ? 0.28 : 0.7;
+    const sunHeight = this.sceneIndex === 1 ? -0.96 : -0.74;
+    const sunDirection = normalize3([
+      Math.cos(sunAngle) * sunHorizontal,
+      sunHeight,
+      Math.sin(sunAngle) * sunHorizontal,
+    ]);
     const sunDistance = this.scene.radius * 1.8 + 30;
     const lightPosition = sub3(this.camera.target, mul3(sunDirection, sunDistance));
     const sunView = mat4LookAt(lightPosition, this.camera.target, Math.abs(sunDirection[1]) > 0.95 ? [0, 0, 1] : [0, 1, 0]);
@@ -442,26 +512,32 @@ class SplitRadianceCascades {
     const pointPosition = add3(this.camera.target, [Math.cos(pointAngle) * this.scene.radius * 0.28, 2.5 + Math.sin(pointAngle * 1.7) * 1.8, Math.sin(pointAngle) * this.scene.radius * 0.28]);
     const hue = this.sceneIndex % 3;
     const pointColor = this.sceneIndex === 1
-      ? [1.0, 0.45, 0.12]
+      ? [1.0, 1.0, 1.0]
       : hue === 0 ? [1.0, 0.18, 0.045] : hue === 1 ? [0.08, 0.5, 1.0] : [0.18, 1.0, 0.35];
+    const sunColor = this.sceneIndex === 1 ? [1.0, 0.98, 0.92] : [1.0, 0.84, 0.63];
+    const pointIntensity = this.sceneIndex === 1 ? 0.0 : 10.0 + this.sceneIndex * 0.7;
 
     const u = new Float32Array(64);
     u.set(viewProjection, 0);
     u.set(sunVP, 16);
-    const featureFlags = (this.multibounce ? 1 : 0) | (this.roughSpecular ? 2 : 0) | (this.cMinusOne ? 4 : 0);
+    const featureFlags = (this.multibounce ? 1 : 0)
+      | (this.roughSpecular ? 2 : 0)
+      | (this.cMinusOne ? 4 : 0)
+      | (this.temporalStability ? 8 : 0);
     u.set([...cameraPosition, featureFlags], 32);
     u.set([...sunDirection, seconds], 36);
-    u.set([1.0, 0.84, 0.63, this.scene.sun], 40);
+    u.set([...sunColor, this.scene.sun], 40);
     u.set([...pointPosition, this.scene.radius * 0.72], 44);
-    u.set([...pointColor, 10.0 + this.sceneIndex * 0.7], 48);
+    u.set([...pointColor, pointIntensity], 48);
     u.set([...this.scene.env, this.scene.baseSpacing], 52);
     u.set([this.width, this.height, this.giWidth, this.giHeight], 56);
     const frameParity = this.frameIndex & 1;
     // A long world-space half-life removes the last allocator/visibility
     // shimmer under camera motion. Exact-key rejection still makes
     // disocclusions immediate, while animated lighting remains smooth.
-    const historyBlend = this.temporalStability && this.historyValid ? 0.96 : 0;
-    u.set([this.indirectStrength, 1.0, this.debugMode, frameParity + historyBlend], 60);
+    const historyBlend = this.temporalStability && this.historyValid ? 0.98 : 0;
+    const exposure = this.sceneIndex === 1 ? 1.55 : 1.0;
+    u.set([this.indirectStrength, exposure, this.debugMode, frameParity + historyBlend], 60);
     this.device.queue.writeBuffer(this.frameBuffer, 0, u);
   }
 
@@ -471,6 +547,8 @@ class SplitRadianceCascades {
     const d = this.device;
     const encoder = d.createCommandEncoder({ label: `Split RC frame ${this.frameIndex}` });
     const profile = this.timestampSupported && !this.profilePending && this.frameIndex % 45 === 0;
+    const captureJob = this.captureRequest;
+    this.captureRequest = null;
 
     const shadow = encoder.beginRenderPass({
       label: "sun shadow map",
@@ -521,9 +599,34 @@ class SplitRadianceCascades {
     pass.setBindGroup(0, this.computeBindGroups[0]);
     pass.dispatchWorkgroups(Math.ceil(this.giWidth / 8), Math.ceil(this.giHeight / 8), this.raysPerSample);
     pass.end();
+    pass = encoder.beginComputePass({ label: "canonicalize base probe indices" });
+    pass.setPipeline(this.computePipelines.canonicalize);
+    pass.setBindGroup(0, this.computeBindGroups[0]);
+    pass.dispatchWorkgroups(Math.ceil(K.hashSizes[0] / 64));
+    pass.end();
+    pass = encoder.beginComputePass({ label: "count deterministic base rays" });
+    pass.setPipeline(this.computePipelines.countBase);
+    pass.setBindGroup(0, this.computeBindGroups[0]);
+    pass.dispatchWorkgroups(Math.ceil(this.giWidth / 8), Math.ceil(this.giHeight / 8));
+    pass.end();
+    pass = encoder.beginComputePass({ label: "count deterministic secondary rays" });
+    pass.setPipeline(this.computePipelines.countSecondary);
+    pass.setBindGroup(0, this.computeBindGroups[0]);
+    pass.dispatchWorkgroups(Math.ceil(this.giWidth / 8), Math.ceil(this.giHeight / 8), this.raysPerSample);
+    pass.end();
     for (let cascade = 1; cascade < 4; cascade++) {
       pass = encoder.beginComputePass({ label: `initialize cascade ${cascade}` });
       pass.setPipeline(this.computePipelines.initHigher);
+      pass.setBindGroup(0, this.computeBindGroups[cascade]);
+      pass.dispatchWorkgroups(Math.ceil(K.probeCaps[cascade - 1] / 64));
+      pass.end();
+      pass = encoder.beginComputePass({ label: `canonicalize cascade ${cascade} probe indices` });
+      pass.setPipeline(this.computePipelines.canonicalize);
+      pass.setBindGroup(0, this.computeBindGroups[cascade]);
+      pass.dispatchWorkgroups(Math.ceil(K.hashSizes[cascade] / 64));
+      pass.end();
+      pass = encoder.beginComputePass({ label: `count cascade ${cascade} rays` });
+      pass.setPipeline(this.computePipelines.countHigher);
       pass.setBindGroup(0, this.computeBindGroups[cascade]);
       pass.dispatchWorkgroups(Math.ceil(K.probeCaps[cascade - 1] / 64));
       pass.end();
@@ -574,6 +677,42 @@ class SplitRadianceCascades {
     finalPass.draw(3);
     finalPass.end();
 
+    let captureResources;
+    if (captureJob) {
+      const bytesPerRow = Math.ceil(this.width * 4 / 256) * 256;
+      const texture = d.createTexture({
+        label: "final-frame audit target",
+        size: [this.width, this.height],
+        format: this.format,
+        usage: TEX.RENDER_ATTACHMENT | TEX.COPY_SRC,
+      });
+      const buffer = createBuffer(
+        d,
+        "final-frame audit readback",
+        bytesPerRow * this.height,
+        GPU.COPY_DST | GPU.MAP_READ,
+      );
+      const auditPass = encoder.beginRenderPass({
+        label: "deterministic final-frame audit composite",
+        colorAttachments: [{
+          view: texture.createView(),
+          clearValue: [0, 0, 0, 1],
+          loadOp: "clear",
+          storeOp: "store",
+        }],
+      });
+      auditPass.setPipeline(this.finalPipeline);
+      auditPass.setBindGroup(0, this.finalBindGroup);
+      auditPass.draw(3);
+      auditPass.end();
+      encoder.copyTextureToBuffer(
+        { texture },
+        { buffer, bytesPerRow, rowsPerImage: this.height },
+        [this.width, this.height],
+      );
+      captureResources = { ...captureJob, texture, buffer, bytesPerRow, width: this.width, height: this.height };
+    }
+
     let timestampRead;
     if (profile) {
       timestampRead = createBuffer(d, "timestamp readback", 64, GPU.COPY_DST | GPU.MAP_READ);
@@ -592,6 +731,31 @@ class SplitRadianceCascades {
     this.historyValid = true;
     if (timestampRead) this.consumeTimestamps(timestampRead);
     if (stateRead) this.consumeState(stateRead);
+    if (captureResources) this.consumeFinalCapture(captureResources);
+  }
+
+  captureFinalFrame() {
+    if (this.captureRequest) return Promise.reject(new Error("A final-frame capture is already pending."));
+    return new Promise((resolve, reject) => {
+      this.captureRequest = { resolve, reject };
+    });
+  }
+
+  async consumeFinalCapture(job) {
+    try {
+      await job.buffer.mapAsync(MAP.READ);
+      job.resolve({
+        width: job.width,
+        height: job.height,
+        bytesPerRow: job.bytesPerRow,
+        pixels: new Uint8Array(job.buffer.getMappedRange().slice(0)),
+      });
+    } catch (error) {
+      job.reject(error);
+    } finally {
+      job.buffer.destroy();
+      job.texture.destroy();
+    }
   }
 
   async consumeTimestamps(buffer) {
@@ -739,7 +903,10 @@ class SplitRadianceCascades {
       this.resetProbeHistory();
     });
     on($("rough-specular"), "change", (e) => { this.roughSpecular = e.target.checked; });
-    on($("c-minus-one"), "change", (e) => { this.cMinusOne = e.target.checked; });
+    on($("c-minus-one"), "change", (e) => {
+      this.cMinusOne = e.target.checked;
+      this.resetProbeHistory();
+    });
     on($("show-profiler"), "change", (e) => { $("pass-profiler").hidden = !e.target.checked; });
     on($("run-validation"), "click", () => this.runValidation());
     on($("close-audit"), "click", () => { $("audit-card").hidden = true; });
@@ -876,6 +1043,242 @@ class SplitRadianceCascades {
     };
   }
 
+  compareFinalFrames(a, b) {
+    if (a.width !== b.width || a.height !== b.height) {
+      return { passed: false, reason: "capture dimensions changed" };
+    }
+    const differences = [];
+    let squared = 0;
+    let changed = 0;
+    for (let y = 0; y < a.height; y++) {
+      const rowA = y * a.bytesPerRow;
+      const rowB = y * b.bytesPerRow;
+      for (let x = 0; x < a.width; x++) {
+        const pixelA = rowA + x * 4;
+        const pixelB = rowB + x * 4;
+        for (let channel = 0; channel < 3; channel++) {
+          const delta = Math.abs(a.pixels[pixelA + channel] - b.pixels[pixelB + channel]);
+          differences.push(delta);
+          squared += delta * delta;
+          if (delta > 0) changed++;
+        }
+      }
+    }
+    differences.sort((x, y) => x - y);
+    const percentile = (p) => differences[Math.min(differences.length - 1, Math.floor((differences.length - 1) * p))] || 0;
+    const rmse = Math.sqrt(squared / Math.max(1, differences.length));
+    return {
+      p95ByteDelta: percentile(0.95),
+      p99ByteDelta: percentile(0.99),
+      maxByteDelta: differences.at(-1) || 0,
+      rmseByteDelta: rmse,
+      changedChannelRatio: changed / Math.max(1, differences.length),
+      passed: percentile(0.95) <= 1
+        && percentile(0.99) <= 2
+        && rmse <= 0.75
+        && (differences.at(-1) || 0) <= 48,
+    };
+  }
+
+  async runFinalFrameRepeatabilityAudit({ poses = 6, warmup = 64, holdFrames = 2 } = {}) {
+    const saved = {
+      animateCamera: this.animateCamera,
+      animateLights: this.animateLights,
+      temporalStability: this.temporalStability,
+      multibounce: this.multibounce,
+      roughSpecular: this.roughSpecular,
+      cMinusOne: this.cMinusOne,
+      testTimeOverride: this.testTimeOverride,
+    };
+    try {
+      this.animateCamera = true;
+      this.animateLights = false;
+      this.temporalStability = true;
+      this.multibounce = false;
+      this.roughSpecular = false;
+      this.cMinusOne = false;
+      const times = Array.from({ length: poses }, (_, i) => 1.25 + i * 0.55);
+      const captureTrajectory = async () => {
+        this.testTimeOverride = 0.7;
+        this.resetProbeHistory();
+        await this.waitFrames(warmup);
+        const captures = [];
+        for (const time of times) {
+          this.testTimeOverride = time;
+          await this.waitFrames(holdFrames);
+          captures.push(await this.captureFinalFrame());
+        }
+        return captures;
+      };
+      const first = await captureTrajectory();
+      const second = await captureTrajectory();
+      const comparisons = first.map((frame, i) => this.compareFinalFrames(frame, second[i]));
+      const maximum = (field) => Math.max(...comparisons.map((result) => result[field] ?? Infinity));
+      return {
+        poses,
+        p95ByteDeltaMax: maximum("p95ByteDelta"),
+        p99ByteDeltaMax: maximum("p99ByteDelta"),
+        maxByteDelta: maximum("maxByteDelta"),
+        rmseByteDeltaMax: maximum("rmseByteDelta"),
+        changedChannelRatioMax: maximum("changedChannelRatio"),
+        passed: comparisons.every((result) => result.passed),
+        comparisons,
+      };
+    } finally {
+      Object.assign(this, saved);
+      this.resetProbeHistory();
+    }
+  }
+
+  async runPathTracedReferenceAudit({ width = 48, height = 27, samples = 128, warmup = 64 } = {}) {
+    const saved = {
+      animateCamera: this.animateCamera,
+      animateLights: this.animateLights,
+      temporalStability: this.temporalStability,
+      multibounce: this.multibounce,
+      roughSpecular: this.roughSpecular,
+      cMinusOne: this.cMinusOne,
+      testTimeOverride: this.testTimeOverride,
+    };
+    let auditBuffer;
+    let auditPassBuffer;
+    try {
+      this.animateCamera = false;
+      this.animateLights = false;
+      this.temporalStability = true;
+      this.multibounce = false;
+      this.roughSpecular = false;
+      this.cMinusOne = false;
+      this.testTimeOverride = 0.7;
+      this.resetProbeHistory();
+      await this.waitFrames(warmup);
+      await this.device.queue.onSubmittedWorkDone();
+
+      const byteLength = width * height * 8 * 4;
+      auditBuffer = createBuffer(
+        this.device,
+        "path-traced reference audit accumulation",
+        byteLength,
+        GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST,
+      );
+      auditPassBuffer = createBuffer(
+        this.device,
+        "path-traced reference audit parameters",
+        16,
+        GPU.UNIFORM | GPU.COPY_DST,
+        new Uint32Array([0, samples, width, height]),
+      );
+      const bindGroup = this.device.createBindGroup({
+        label: "path-traced reference audit bind group",
+        layout: this.computeLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this.frameBuffer } },
+          { binding: 1, resource: this.worldTexture.createView() },
+          { binding: 2, resource: this.normalTexture.createView() },
+          { binding: 3, resource: { buffer: this.hashBuffer } },
+          { binding: 4, resource: { buffer: this.stateBuffer } },
+          { binding: 5, resource: { buffer: this.probeMetaBuffer } },
+          { binding: 6, resource: { buffer: auditBuffer } },
+          { binding: 7, resource: { buffer: this.coneBuffer } },
+          { binding: 8, resource: { buffer: this.irradianceBuffer } },
+          { binding: 9, resource: { buffer: this.bvhNodeBuffer } },
+          { binding: 10, resource: { buffer: this.triangleBuffer } },
+          { binding: 11, resource: { buffer: auditPassBuffer } },
+          { binding: 12, resource: this.materialAtlas.createView() },
+        ],
+      });
+      const encoder = this.device.createCommandEncoder({ label: "path-traced reference audit" });
+      encoder.clearBuffer(auditBuffer);
+      const pass = encoder.beginComputePass({ label: `${samples} spp cosine reference` });
+      pass.setPipeline(this.computePipelines.validateReference);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8), samples);
+      pass.end();
+      this.device.queue.submit([encoder.finish()]);
+      const fields = new Uint32Array(await this.readGpuBuffer(auditBuffer, byteLength, "reference audit readback"));
+
+      const relative = [];
+      const absolute = [];
+      let squaredError = 0;
+      let referenceEnergy = 0;
+      let signedBias = 0;
+      let referenceLuminance = 0;
+      let currentLuminance = 0;
+      let currentReferenceDot = 0;
+      let currentEnergy = 0;
+      let channelCount = 0;
+      let activePixels = 0;
+      const pairs = [];
+      const luminance = (rgb) => rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+      for (let pixel = 0; pixel < width * height; pixel++) {
+        const base = pixel * 8;
+        if (!fields[base + 6] || !fields[base + 7]) continue;
+        const reference = [0, 1, 2].map((channel) => fields[base + channel] / (fields[base + 7] * 65536));
+        const current = [3, 4, 5].map((channel) => fields[base + channel] / 65536);
+        const refLum = luminance(reference);
+        const currentLum = luminance(current);
+        const delta = Math.abs(refLum - currentLum);
+        absolute.push(delta);
+        relative.push(delta / Math.max(0.08, (refLum + currentLum) * 0.5));
+        signedBias += currentLum - refLum;
+        referenceLuminance += refLum;
+        currentLuminance += currentLum;
+        for (let channel = 0; channel < 3; channel++) {
+          const error = current[channel] - reference[channel];
+          squaredError += error * error;
+          referenceEnergy += reference[channel] * reference[channel];
+          currentReferenceDot += current[channel] * reference[channel];
+          currentEnergy += current[channel] * current[channel];
+          channelCount++;
+        }
+        pairs.push({ reference, current });
+        activePixels++;
+      }
+      relative.sort((a, b) => a - b);
+      absolute.sort((a, b) => a - b);
+      const percentile = (values, p) => values.length
+        ? values[Math.min(values.length - 1, Math.floor((values.length - 1) * p))]
+        : Infinity;
+      const nrmse = Math.sqrt(squaredError / Math.max(1, channelCount))
+        / Math.max(0.08, Math.sqrt(referenceEnergy / Math.max(1, channelCount)));
+      const optimalScale = currentReferenceDot / Math.max(1e-8, currentEnergy);
+      let scaledSquaredError = 0;
+      for (const pair of pairs) {
+        for (let channel = 0; channel < 3; channel++) {
+          const error = pair.current[channel] * optimalScale - pair.reference[channel];
+          scaledSquaredError += error * error;
+        }
+      }
+      const scaleInvariantNrmse = Math.sqrt(scaledSquaredError / Math.max(1, channelCount))
+        / Math.max(0.08, Math.sqrt(referenceEnergy / Math.max(1, channelCount)));
+      const report = {
+        resolution: [width, height],
+        samples,
+        activePixels,
+        nrmse,
+        optimalEnergyScale: optimalScale,
+        scaleInvariantNrmse,
+        meanReferenceLuminance: referenceLuminance / Math.max(1, activePixels),
+        meanSplitRCLuminance: currentLuminance / Math.max(1, activePixels),
+        meanSignedLuminanceBias: signedBias / Math.max(1, activePixels),
+        medianRelative: percentile(relative, 0.5),
+        p95Relative: percentile(relative, 0.95),
+        p95Absolute: percentile(absolute, 0.95),
+      };
+      report.passed = activePixels >= 32
+        && report.nrmse <= 0.51
+        && report.scaleInvariantNrmse <= 0.4
+        && report.p95Absolute <= 0.2
+        && Math.abs(report.meanSignedLuminanceBias) <= 0.1;
+      return report;
+    } finally {
+      auditBuffer?.destroy();
+      auditPassBuffer?.destroy();
+      Object.assign(this, saved);
+      this.resetProbeHistory();
+    }
+  }
+
   metricsSnapshot() {
     const avg = this.frameSamples.slice(-60).reduce((a,b)=>a+b,0) / Math.max(1,Math.min(60,this.frameSamples.length));
     const gpu = this.gpuSamples.length ? this.gpuSamples.slice(-8).reduce((a,b)=>a+b,0)/Math.min(8,this.gpuSamples.length) : null;
@@ -891,6 +1294,20 @@ class SplitRadianceCascades {
       overflows: this.overflowCount,
       gpuError: this.lastGpuError || null,
     };
+  }
+
+  exposeTestReport(report) {
+    globalThis.__RC_TEST_REPORT__ = report;
+    document.documentElement.dataset.audit = report.passed ? "passed" : "warning";
+    let hidden = document.getElementById("test-report");
+    if (!hidden) {
+      hidden = document.createElement("pre");
+      hidden.id = "test-report";
+      hidden.hidden = true;
+      document.body.append(hidden);
+    }
+    hidden.textContent = JSON.stringify(report);
+    console.info("[Split RC] validation-complete", report);
   }
 
   async runValidation({ framesPerScene = 72 } = {}) {
@@ -910,14 +1327,34 @@ class SplitRadianceCascades {
       await this.waitFrames(framesPerScene);
       const result = this.metricsSnapshot();
       result.motionStability = await this.runMotionStabilityAudit({ samples: 4, interval: 3, warmup: 32 });
+      result.finalFrameRepeatability = await this.runFinalFrameRepeatabilityAudit({
+        poses: 4,
+        warmup: 48,
+        holdFrames: 2,
+      });
+      if (i === 1) {
+        $("audit-title").textContent = "Comparing Sponza with a path-traced reference";
+        result.pathTracedReference = await this.runPathTracedReferenceAudit({
+          width: 48,
+          height: 27,
+          samples: 128,
+          warmup: 64,
+        });
+      }
       results.push(result);
       $("audit-report").textContent = results.map((r) =>
-        `${String(r.scene+1).padStart(2,"0")} ${r.name.padEnd(28)} ${r.fps.toFixed(0).padStart(3)} FPS  ${r.gpuMs == null ? "CPU timing" : `${r.gpuMs.toFixed(2)} ms GPU`}  ${r.triangles.toLocaleString()} tris  ${r.probes.reduce((a,b)=>a+b,0)} probes  flicker p95 ${(r.motionStability.p95RelativeMax*100).toFixed(2)}%  overflow ${r.overflows}`
+        `${String(r.scene+1).padStart(2,"0")} ${r.name.padEnd(28)} ${r.fps.toFixed(0).padStart(3)} FPS  ${r.gpuMs == null ? "CPU timing" : `${r.gpuMs.toFixed(2)} ms GPU`}  ${r.triangles.toLocaleString()} tris  world jitter p95 ${(r.motionStability.p95RelativeMax*100).toFixed(2)}%  framebuffer p95 ${r.finalFrameRepeatability.p95ByteDeltaMax.toFixed(0)}/255${r.pathTracedReference ? `  reference NRMSE ${(r.pathTracedReference.nrmse*100).toFixed(1)}%` : ""}  overflow ${r.overflows}`
       ).join("\n");
     }
     const minFps = Math.min(...results.map((r) => r.fps));
     const maxGpu = Math.max(0, ...results.map((r) => r.gpuMs || 0));
-    const failures = results.filter((r) => r.overflows || r.gpuError || !r.motionStability.passed);
+    const failures = results.filter((r) =>
+      r.overflows
+      || r.gpuError
+      || !r.motionStability.passed
+      || !r.finalFrameRepeatability.passed
+      || (r.pathTracedReference && !r.pathTracedReference.passed)
+    );
     const report = {
       timestamp: new Date().toISOString(),
       adapter: this.adapterInfo(),
@@ -934,17 +1371,7 @@ class SplitRadianceCascades {
     $("audit-report").textContent += `\n\n${report.passed ? "PASS" : "CHECK"} · minimum ${minFps.toFixed(1)} FPS · ${failures.length} correctness warnings`;
     this.animateCamera = previousCamera;
     this.animateLights = previousLights;
-    globalThis.__RC_TEST_REPORT__ = report;
-    document.documentElement.dataset.audit = report.passed ? "passed" : "warning";
-    let hidden = document.getElementById("test-report");
-    if (!hidden) {
-      hidden = document.createElement("pre");
-      hidden.id = "test-report";
-      hidden.hidden = true;
-      document.body.append(hidden);
-    }
-    hidden.textContent = JSON.stringify(report);
-    console.info("[Split RC] validation-complete", report);
+    this.exposeTestReport(report);
     return report;
   }
 
@@ -963,6 +1390,7 @@ class SplitRadianceCascades {
       this.hashBuffer, this.stateBuffer, this.probeMetaBuffer, this.accumBuffer,
       this.coneBuffer, this.irradianceBuffer, this.queryResolveBuffer,
       ...(this.passBuffers || []), ...(this.gbuffer || []), this.shadowTexture,
+      this.materialAtlas,
     ]) resource?.destroy?.();
   }
 }

@@ -10,7 +10,7 @@ test("ten production stress scenes build valid geometry and BVHs", () => {
     const g = scene.geometry;
     assert.ok(g.vertexCount > 0, `${scene.name} has no raster vertices`);
     assert.equal(g.vertexCount, g.triangleCount * 3);
-    assert.equal(g.triangles.length, g.triangleCount * 20);
+    assert.equal(g.triangles.length, g.triangleCount * 28);
     assert.equal(g.nodes.length, g.nodeCount * 8);
     assert.ok(g.triangleCount >= 800, `${scene.name} is not a meaningful stress case`);
     assert.ok(Number.isFinite(scene.radius) && scene.radius > 0);

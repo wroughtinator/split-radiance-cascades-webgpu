@@ -23,7 +23,7 @@ is required.
 - exact-key world-space temporal accumulation
 - two-LOD-coarser secondary cache for multibounce illumination
 - rough-specular cone reconstruction
-- the paper's ambient form of screen-space `C(-1)` merging
+- directional screen-space `C(-1)` interval merging (optional extension)
 
 WebGPU does not expose a portable hardware ray-tracing pipeline. Rays and
 shadow queries therefore traverse a balanced triangle BVH in WGSL. This
@@ -31,21 +31,35 @@ changes the traversal backend, not the Split RC interval or merge math.
 
 ## Stability
 
-The default stable mode freezes the paper's global R2 jitter, uses deterministic
-probe-key ordering for Algorithm 3 offsets, blends adjacent LODs across the
-paper's 0.9 overlap, and accumulates only exact world/LOD/cache key matches.
-There is no screen-space reprojection.
+The default paper baseline is single-bounce Split RC. The paper's multibounce,
+rough-specular, and directional `C(-1)` experiments are explicit opt-in
+extensions so a screen-space term is never silently mixed into the baseline.
 
-The built-in audit measures matched world-probe irradiance while the camera is
-moving and the lights are frozen. On the development NVIDIA RTX 5080, the
-worst ten-scene 95th-percentile frame-to-frame change was 1.27%; the color
-bleed lab measured 0.97%. This is below the audit's visual-shimmer threshold.
+Stable mode freezes the paper's global R2 jitter, uses a deterministic
+screen-sample seed, canonicalizes sparse probe indices in hash-slot order, and
+uses probe-key ordering for Algorithm 3 offsets. Adjacent LODs cross-fade
+across the paper's 0.9 overlap and history only accumulates exact
+world/LOD/cache key matches. There is no screen-space reprojection.
+
+The built-in audit now has three independent gates:
+
+- matched world-probe irradiance while the camera moves
+- two separately initialized runs of the same camera trajectory, compared from
+  the final 8-bit framebuffer
+- a deterministic 128-spp cosine-weighted BVH path-traced reference for Sponza
+
+On the development NVIDIA RTX 5080, all ten framebuffer trajectory tests were
+byte-identical at every tested pose except two Sponza captures with a worst
+single-channel difference of 1/255; Sponza's p99 difference was 0/255. This
+directly covers the final image rather than inferring stability from probe
+values.
 
 ## Ten validation scenes
 
 1. Color bleed laboratory - near-field transfer and emissive geometry.
 2. Sponza atrium - the official Crytek/Khronos model used in the paper,
-   prepacked as 262,267 triangles and a 131,317-node BVH.
+   prepacked as 262,267 triangles, a 131,317-node BVH, and a 4096px atlas made
+   from all 25 official base-color materials.
 3. Concave canyon heightfield - a 72x72 terrain with craters and ravines.
 4. Dense lantern forest - thousands of thin foliage triangles.
 5. Multi-level atrium - stairs, balconies, skylight, and curved sculptures.
@@ -63,17 +77,22 @@ rough specular, `C(-1)`, and stable history.
 ## Measured result
 
 Balanced mode was validated at a 1152x648 render resolution with a 192x108 GI
-grid and two primary rays per visible GI sample:
+grid and 12 primary rays per visible GI sample:
 
-- all ten scenes held the 60 Hz display cap
-- full GPU frame time ranged from roughly 1.4 to 5.7 ms
-- the 262k-triangle Sponza scene remained below 6 ms
+- all ten scenes passed the final-frame repeatability and world-probe gates
+- full GPU frame time remained below 11.6 ms
+- the 262k-triangle textured Sponza scene measured 11.53 ms
 - zero sparse-hash/probe-capacity overflows
 - zero uncaptured WebGPU validation errors
-- all ten moving-camera probe-stability checks passed
+- Sponza passed the independent path-traced-reference thresholds (50.7% raw
+  NRMSE, 35.3% scale-invariant NRMSE, and 0.159 scene-linear p95 absolute
+  irradiance error)
 
-These numbers are device-specific. Run the in-app audit on another machine for
-its actual result.
+The reference numbers are not a claim of exact path-traced equality: Split RC
+is a biased sparse estimator, and the paper documents interpolation leaks,
+overblurring, and base-direction bias. They are regression gates that fail when
+the implementation materially diverges. Performance is device-specific; run
+the in-app audit on another machine for its actual result.
 
 ## Development and deployable bundle
 
@@ -87,7 +106,8 @@ npm run build
 standalone `netlify-dist` folder. That folder is a complete static fallback
 bundle, although the canonical deployment is published through OpenAI Sites.
 
-The Sponza payload is same-origin and retains the Khronos sample asset's
+The Sponza geometry and texture atlas are same-origin and retain the official
+Khronos sample asset's
 [Cryengine Limited License attribution](./public/models/SPONZA-LICENSE.md).
 The runtime sends no user data and makes no third-party requests.
 
@@ -98,3 +118,8 @@ hard shadows, and cannot represent sharp mirror reflections. The rough
 specular path intentionally targets broad lobes. Static geometry is supported;
 changing meshes requires rebuilding their BVH. These are method limits, not
 silent feature omissions.
+
+This is a from-paper WebGPU implementation, not the authors' unreleased source
+code. WebGPU's portable software BVH, deterministic probe canonicalization, and
+manual storage-buffer filtering replace native ray-tracing and CUDA-specific
+implementation details without changing the Split RC interval/merge model.

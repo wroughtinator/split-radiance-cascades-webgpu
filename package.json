@@ -9,6 +9,8 @@
     "dev": "vinext dev",
     "build": "vinext build && node scripts/build-netlify.mjs",
     "build:netlify": "node scripts/build-netlify.mjs",
+    "build:sponza": "node scripts/build-sponza.mjs",
+    "fetch:sponza-textures": "node scripts/fetch-sponza-textures.mjs",
     "start": "vinext start",
     "test": "node --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",

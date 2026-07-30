@@ -1,5 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
+import sharp from "sharp";
 import { buildBVH, normalize3 } from "../public/rc/math.js";
 
 const SOURCE_ROOT = new URL("../vendor/sponza/", import.meta.url);
@@ -9,10 +11,16 @@ const SOURCE_BIN = new URL("Sponza.bin", SOURCE_ROOT);
 // The custom extension is intentional: static servers must not auto-apply a
 // Content-Encoding header because the browser explicitly decompresses this blob.
 const OUTPUT = new URL("sponza.rcb", OUTPUT_ROOT);
+const ATLAS_OUTPUT = new URL("sponza-atlas.webp", OUTPUT_ROOT);
+const TEXTURE_ROOT = new URL("textures/", SOURCE_ROOT);
+const ATLAS_SIZE = 4096;
+const ATLAS_GRID = 5;
+const ATLAS_CELL = 819;
+const ATLAS_PADDING = 4;
+const ATLAS_CONTENT = ATLAS_CELL - ATLAS_PADDING * 2;
 
-// Linear-space averages of the 25 base-color textures. These were computed once
-// from the official Khronos sample asset. Keeping them in the packer avoids
-// shipping 67 large source textures while preserving the scene's material regions.
+// Linear-space averages of the 25 base-color textures. These are only fallbacks
+// for primitives without texture coordinates; normal rendering uses the atlas.
 const MATERIAL_COLORS = [
   [0.0281, 0.0262, 0.0123], [0.0783, 0.0580, 0.0609], [0.3333, 0.3333, 0.3333],
   [0.1079, 0.1020, 0.0024], [0.0511, 0.0410, 0.0262], [0.1884, 0.1673, 0.1269],
@@ -64,19 +72,69 @@ const scale = nodeScale(gltf);
 const primitiveData = [];
 let triangleCount = 0;
 
+const atlasLayers = [];
+for (let materialIndex = 0; materialIndex < gltf.materials.length; materialIndex++) {
+  const material = gltf.materials[materialIndex];
+  const textureIndex = material.pbrMetallicRoughness?.baseColorTexture?.index;
+  const sourceIndex = textureIndex == null ? null : gltf.textures[textureIndex]?.source;
+  const uri = sourceIndex == null ? null : gltf.images[sourceIndex]?.uri;
+  if (!uri) continue;
+  const tile = await sharp(await readFile(new URL(uri, TEXTURE_ROOT)))
+    .resize(ATLAS_CONTENT, ATLAS_CONTENT, { fit: "fill" })
+    .extend({
+      top: ATLAS_PADDING,
+      bottom: ATLAS_PADDING,
+      left: ATLAS_PADDING,
+      right: ATLAS_PADDING,
+      extendWith: "copy",
+    })
+    .png()
+    .toBuffer();
+  atlasLayers.push({
+    input: tile,
+    left: (materialIndex % ATLAS_GRID) * ATLAS_CELL,
+    top: Math.floor(materialIndex / ATLAS_GRID) * ATLAS_CELL,
+  });
+}
+await sharp({
+  create: {
+    width: ATLAS_SIZE,
+    height: ATLAS_SIZE,
+    channels: 4,
+    background: { r: 255, g: 255, b: 255, alpha: 1 },
+  },
+}).composite(atlasLayers).webp({ quality: 92, alphaQuality: 100, smartSubsample: true })
+  .toFile(fileURLToPath(ATLAS_OUTPUT));
+
 for (const mesh of gltf.meshes) {
   for (const primitive of mesh.primitives) {
     if ((primitive.mode ?? 4) !== 4) continue;
     const positions = accessorReader(gltf, binary, primitive.attributes.POSITION);
     const normals = accessorReader(gltf, binary, primitive.attributes.NORMAL);
+    const texcoords = primitive.attributes.TEXCOORD_0 == null
+      ? null
+      : accessorReader(gltf, binary, primitive.attributes.TEXCOORD_0);
     const indices = primitive.indices == null ? null : accessorReader(gltf, binary, primitive.indices);
     const indexCount = indices?.count ?? positions.count;
+    const materialIndex = primitive.material || 0;
+    const material = gltf.materials[materialIndex] || {};
+    const factor = material.pbrMetallicRoughness?.baseColorFactor?.slice(0, 3) || [1, 1, 1];
+    const alphaCutoff = material.alphaMode === "MASK" ? (material.alphaCutoff ?? 0.5) : 0;
     triangleCount += Math.floor(indexCount / 3);
-    primitiveData.push({ positions, normals, indices, indexCount, material: primitive.material || 0 });
+    primitiveData.push({
+      positions,
+      normals,
+      texcoords,
+      indices,
+      indexCount,
+      material: materialIndex,
+      factor,
+      alphaCutoff,
+    });
   }
 }
 
-const vertices = new Float32Array(triangleCount * 3 * 12);
+const vertices = new Float32Array(triangleCount * 3 * 16);
 const triangles = new Array(triangleCount);
 const boundsMin = [Infinity, Infinity, Infinity];
 const boundsMax = [-Infinity, -Infinity, -Infinity];
@@ -84,21 +142,29 @@ let vertexOffset = 0;
 let triangleOffset = 0;
 
 for (const primitive of primitiveData) {
-    const materialAverage = MATERIAL_COLORS[primitive.material] || [0.18, 0.18, 0.18];
-    // The renderer uses a compact material-average representation instead of the
-    // source texture set. Lift the average toward perceptual space so carved
-    // recesses retain readable contrast at the demo's single exposure.
-    const albedo = materialAverage.map((value) => Math.min(0.8, Math.pow(value, 0.62) * 1.1));
+  const fallback = MATERIAL_COLORS[primitive.material] || [0.18, 0.18, 0.18];
+  const albedo = primitive.texcoords ? primitive.factor : fallback;
   for (let index = 0; index + 2 < primitive.indexCount; index += 3) {
     const points = new Array(3);
+    const uvs = new Array(3);
     for (let corner = 0; corner < 3; corner++) {
       const sourceIndex = primitive.indices ? primitive.indices.read(index + corner) : index + corner;
       const sourcePosition = primitive.positions.read(sourceIndex);
       const position = sourcePosition.map((value, axis) => value * scale[axis]);
       const normal = normalize3(primitive.normals.read(sourceIndex).map((value, axis) => value / scale[axis]));
+      const uv = primitive.texcoords?.read(sourceIndex) || [0, 0];
       points[corner] = position;
-      vertices.set([...position, ...normal, ...albedo, 0, 0, 0], vertexOffset);
-      vertexOffset += 12;
+      uvs[corner] = uv;
+      vertices.set([
+        ...position,
+        ...normal,
+        ...albedo,
+        0, 0, 0,
+        ...uv,
+        primitive.texcoords ? primitive.material : -1,
+        primitive.alphaCutoff,
+      ], vertexOffset);
+      vertexOffset += 16;
       for (let axis = 0; axis < 3; axis++) {
         boundsMin[axis] = Math.min(boundsMin[axis], position[axis]);
         boundsMax[axis] = Math.max(boundsMax[axis], position[axis]);
@@ -110,6 +176,9 @@ for (const primitive of primitiveData) {
       c: points[2],
       albedo,
       emissive: [0, 0, 0],
+      uvs,
+      material: primitive.texcoords ? primitive.material : -1,
+      alphaCutoff: primitive.alphaCutoff,
     };
   }
 }
@@ -123,11 +192,11 @@ const headerU32 = new Uint32Array(packed, 0, 8);
 const headerF32 = new Float32Array(packed, 32, 6);
 headerU32.set([
   0x31424352,
-  1,
+  2,
   vertices.length,
   bvh.nodes.length,
   bvh.triangles.length,
-  vertices.length / 12,
+  vertices.length / 16,
   bvh.nodeCount,
   bvh.triangleCount,
 ]);
@@ -147,4 +216,5 @@ console.log(JSON.stringify({
   bvhNodes: bvh.nodeCount,
   uncompressedBytes: packed.byteLength,
   compressedBytes: compressed.byteLength,
+  atlas: ATLAS_OUTPUT.pathname,
 }, null, 2));

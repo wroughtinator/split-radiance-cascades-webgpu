@@ -28,12 +28,16 @@ struct FrameUniforms {
   controls: vec4f,
 };
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
+@group(0) @binding(1) var albedoAtlas: texture_2d<f32>;
+@group(0) @binding(2) var atlasSampler: sampler;
 
 struct VertexIn {
   @location(0) position: vec3f,
   @location(1) normal: vec3f,
   @location(2) albedo: vec3f,
   @location(3) emissive: vec3f,
+  @location(4) uv: vec2f,
+  @location(5) materialCutoff: vec2f,
 };
 struct VertexOut {
   @builtin(position) clip: vec4f,
@@ -41,6 +45,8 @@ struct VertexOut {
   @location(1) normal: vec3f,
   @location(2) albedo: vec3f,
   @location(3) emissive: vec3f,
+  @location(4) uv: vec2f,
+  @location(5) @interpolate(flat) materialCutoff: vec2f,
 };
 @vertex fn gbufferVS(v: VertexIn) -> VertexOut {
   var o: VertexOut;
@@ -49,6 +55,8 @@ struct VertexOut {
   o.normal = normalize(v.normal);
   o.albedo = v.albedo;
   o.emissive = v.emissive;
+  o.uv = v.uv;
+  o.materialCutoff = v.materialCutoff;
   return o;
 }
 struct GBufferOut {
@@ -56,15 +64,39 @@ struct GBufferOut {
   @location(1) normal: vec4f,
   @location(2) world: vec4f,
 };
+fn atlasUv(uv:vec2f,material:f32)->vec2f{
+  let index=u32(max(0.0,material)+0.5);
+  let cell=vec2u(index%5u,index/5u);
+  return (vec2f(cell)*819.0+vec2f(4.0)+fract(uv)*811.0)/4096.0;
+}
+fn materialSample(uv:vec2f,material:f32)->vec4f{
+  let sampled=textureSample(albedoAtlas,atlasSampler,atlasUv(uv,material));
+  return select(sampled,vec4f(1),material<0.0);
+}
 @fragment fn gbufferFS(v: VertexOut, @builtin(front_facing) frontFacing: bool) -> GBufferOut {
   var o: GBufferOut;
-  o.albedo = vec4f(v.albedo, max(max(v.emissive.r, v.emissive.g), v.emissive.b));
+  let surface=materialSample(v.uv,v.materialCutoff.x);
+  if(v.materialCutoff.y>0.0&&surface.a<v.materialCutoff.y){discard;}
+  o.albedo = vec4f(v.albedo*surface.rgb, max(max(v.emissive.r, v.emissive.g), v.emissive.b));
   o.normal = vec4f(normalize(select(-v.normal, v.normal, frontFacing)), 1.0);
   o.world = vec4f(v.world, 1.0);
   return o;
 }
-@vertex fn shadowVS(v: VertexIn) -> @builtin(position) vec4f {
-  return frame.sunViewProj * vec4f(v.position, 1.0);
+struct ShadowOut {
+  @builtin(position) clip: vec4f,
+  @location(0) uv: vec2f,
+  @location(1) @interpolate(flat) materialCutoff: vec2f,
+};
+@vertex fn shadowVS(v: VertexIn) -> ShadowOut {
+  var o:ShadowOut;
+  o.clip=frame.sunViewProj*vec4f(v.position,1.0);
+  o.uv=v.uv;
+  o.materialCutoff=v.materialCutoff;
+  return o;
+}
+@fragment fn shadowFS(v:ShadowOut) {
+  let surface=materialSample(v.uv,v.materialCutoff.x);
+  if(v.materialCutoff.y>0.0&&surface.a<v.materialCutoff.y){discard;}
 }
 `;
 
@@ -81,10 +113,13 @@ struct FrameUniforms {
   resolution: vec4f,
   controls: vec4f,
 };
-struct HashSlot { key: atomic<u32>, index: u32 };
+struct HashSlot { key: atomic<u32>, index: atomic<u32> };
 struct PassParams { cascade: u32, value: u32, pad0: u32, pad1: u32 };
 struct BvhNode { minMeta: vec4f, maxMeta: vec4f };
-struct Triangle { a: vec4f, b: vec4f, c: vec4f, albedo: vec4f, emissive: vec4f };
+struct Triangle {
+  a: vec4f, b: vec4f, c: vec4f, albedo: vec4f, emissive: vec4f,
+  uvAB: vec4f, uvCMaterial: vec4f,
+};
 struct Hit { t: f32, normal: vec3f, albedo: vec3f, emissive: vec3f };
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
@@ -99,6 +134,7 @@ struct Hit { t: f32, normal: vec3f, albedo: vec3f, emissive: vec3f };
 @group(0) @binding(9) var<storage, read> bvhNodes: array<BvhNode>;
 @group(0) @binding(10) var<storage, read> triangles: array<Triangle>;
 @group(0) @binding(11) var<uniform> passParams: PassParams;
+@group(0) @binding(12) var albedoAtlas: texture_2d<f32>;
 
 const EMPTY: u32 = 0xffffffffu;
 const PI: f32 = 3.141592653589793;
@@ -187,7 +223,7 @@ fn lookupProbeFrame(cascade: u32, key: u32, frameIndex: u32) -> u32 {
   for (var step=0u; step<32u; step++) {
     let slot = base + ((start + step) & mask);
     let found = atomicLoad(&slots[slot].key);
-    if (found == key) { return slots[slot].index; }
+    if (found == key) { return atomicLoad(&slots[slot].index); }
     if (found == EMPTY) { return EMPTY; }
   }
   return EMPTY;
@@ -197,7 +233,7 @@ fn lookupProbe(cascade: u32, key: u32) -> u32 {
   return lookupProbeFrame(cascade, key, currentFrame());
 }
 
-fn insertProbe(cascade: u32, position: vec3f, lod: u32) -> u32 {
+fn insertProbeKey(cascade: u32, position: vec3f, lod: u32) {
   let cell = probeCell(position, cascade, lod);
   let key = keyFromCell(cell, lod);
   let base = currentFrame() * HASH_FRAME_STRIDE + HASH_OFFSETS[cascade];
@@ -206,21 +242,9 @@ fn insertProbe(cascade: u32, position: vec3f, lod: u32) -> u32 {
   for (var step=0u; step<32u; step++) {
     let slot = base + ((start + step) & mask);
     let result = atomicCompareExchangeWeak(&slots[slot].key, EMPTY, key);
-    if (result.exchanged) {
-      let index = atomicAdd(&state[cascade], 1u);
-      if (index >= PROBE_CAPS[cascade]) {
-        slots[slot].index = EMPTY;
-        atomicAdd(&state[6], 1u);
-        return EMPTY;
-      }
-      slots[slot].index = index;
-      probeMeta[PROBE_OFFSETS[cascade] + index] = vec4f(probePositionFromCell(cell,cascade,lod), bitcast<f32>(lod));
-      return index;
-    }
-    if (result.old_value == key) { return slots[slot].index; }
+    if (result.exchanged || result.old_value == key) { return; }
   }
   atomicAdd(&state[6], 1u);
-  return EMPTY;
 }
 
 fn dataIndex(cascade: u32, probe: u32, direction: u32) -> u32 {
@@ -264,22 +288,32 @@ fn rayBox(origin: vec3f, inverseDirection: vec3f, minB: vec3f, maxB: vec3f, maxD
   return farT >= nearT && nearT < maxDistance;
 }
 
-fn traceTriangle(origin: vec3f, direction: vec3f, tri: Triangle, maxDistance: f32) -> f32 {
+fn sampleAtlasNearest(uv:vec2f,material:f32)->vec4f{
+  if(material<0.0){return vec4f(1);}
+  let index=u32(material+0.5);
+  let cell=vec2u(index%5u,index/5u);
+  let atlasUv=(vec2f(cell)*819.0+vec2f(4.0)+fract(uv)*811.0)/4096.0;
+  let dimensions=vec2f(textureDimensions(albedoAtlas));
+  let texel=vec2i(clamp(floor(atlasUv*dimensions),vec2f(0),dimensions-vec2f(1)));
+  return textureLoad(albedoAtlas,texel,0);
+}
+
+fn traceTriangle(origin: vec3f, direction: vec3f, tri: Triangle, maxDistance: f32) -> vec3f {
   let e1=tri.b.xyz-tri.a.xyz;
   let e2=tri.c.xyz-tri.a.xyz;
   let p=cross(direction,e2);
   let det=dot(e1,p);
-  if(abs(det)<1e-7){return maxDistance;}
+  if(abs(det)<1e-7){return vec3f(maxDistance,0,0);}
   let inv=1.0/det;
   let tv=origin-tri.a.xyz;
   let u=dot(tv,p)*inv;
-  if(u<0.0||u>1.0){return maxDistance;}
+  if(u<0.0||u>1.0){return vec3f(maxDistance,0,0);}
   let q=cross(tv,e1);
   let v=dot(direction,q)*inv;
-  if(v<0.0||u+v>1.0){return maxDistance;}
+  if(v<0.0||u+v>1.0){return vec3f(maxDistance,0,0);}
   let t=dot(e2,q)*inv;
-  if(t>0.001&&t<maxDistance){return t;}
-  return maxDistance;
+  if(t>0.001&&t<maxDistance){return vec3f(t,u,v);}
+  return vec3f(maxDistance,0,0);
 }
 
 fn traceScene(origin: vec3f, directionIn: vec3f, maxDistance: f32) -> Hit {
@@ -300,11 +334,15 @@ fn traceScene(origin: vec3f, directionIn: vec3f, maxDistance: f32) -> Hit {
       let first=left&0x7fffffffu;
       for(var j=0u;j<right;j++){
         let tri=triangles[first+j];
-        let t=traceTriangle(origin,direction,tri,result.t);
-        if(t<result.t){
+        let intersection=traceTriangle(origin,direction,tri,result.t);
+        if(intersection.x<result.t){
+          let uv=tri.uvAB.xy*(1.0-intersection.y-intersection.z)
+            +tri.uvAB.zw*intersection.y+tri.uvCMaterial.xy*intersection.z;
+          let surface=sampleAtlasNearest(uv,tri.uvCMaterial.z);
+          if(tri.uvCMaterial.w>0.0&&surface.a<tri.uvCMaterial.w){continue;}
           var n=normalize(cross(tri.b.xyz-tri.a.xyz,tri.c.xyz-tri.a.xyz));
           if(dot(n,direction)>0.0){n=-n;}
-          result=Hit(t,n,tri.albedo.xyz,tri.emissive.xyz);
+          result=Hit(intersection.x,n,tri.albedo.xyz*surface.rgb,tri.emissive.xyz);
         }
       }
     } else if(stackSize<30u) {
@@ -327,6 +365,61 @@ fn octTexel(normalIn:vec3f)->u32{
   let uv=clamp(f*0.5+0.5,vec2f(0),vec2f(0.99999));
   let xy=vec2u(floor(uv*6.0));
   return xy.x+xy.y*6u;
+}
+
+fn samplePrimaryIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
+  let spacing=cascadeSpacing(0u,lod);
+  let grid=position/spacing-vec3f(0.5);
+  let cell=vec3i(floor(grid));
+  let fraction=fract(grid);
+  var octNormal=normalize(normal);
+  octNormal/=max(1e-6,abs(octNormal.x)+abs(octNormal.y)+abs(octNormal.z));
+  var oct=octNormal.xy;
+  if(octNormal.z<0.0){
+    oct=vec2f(
+      (1.0-abs(oct.y))*select(-1.0,1.0,oct.x>=0.0),
+      (1.0-abs(oct.x))*select(-1.0,1.0,oct.y>=0.0)
+    );
+  }
+  let octCoordinate=clamp((oct*0.5+0.5)*6.0-vec2f(0.5),vec2f(0),vec2f(5));
+  let octBase=vec2i(floor(octCoordinate));
+  let octFraction=fract(octCoordinate);
+  var value=vec3f(0);
+  var total=0.0;
+  for(var corner=0u;corner<8u;corner++){
+    let bits=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let wv=vec3f(
+      select(1.0-fraction.x,fraction.x,bits.x==1),
+      select(1.0-fraction.y,fraction.y,bits.y==1),
+      select(1.0-fraction.z,fraction.z,bits.z==1)
+    );
+    let spatialWeight=wv.x*wv.y*wv.z;
+    let probe=lookupProbe(0u,keyFromCell(cell+bits,lod));
+    if(probe!=EMPTY&&probe<PROBE_CAPS[0]){
+      for(var tap=0u;tap<4u;tap++){
+        let offset=vec2i(i32(tap&1u),i32((tap>>1u)&1u));
+        let coordinate=clamp(octBase+offset,vec2i(0),vec2i(5));
+        let angularWeight=select(1.0-octFraction.x,octFraction.x,offset.x==1)
+          *select(1.0-octFraction.y,octFraction.y,offset.y==1);
+        let texel=u32(coordinate.x+coordinate.y*6);
+        let weight=spatialWeight*angularWeight;
+        value+=irradiance[currentFrame()*IRRADIANCE_FRAME_STRIDE+probe*36u+texel].xyz*weight;
+        total+=weight;
+      }
+    }
+  }
+  if(total<1e-5){return vec4f(frame.envBaseSpacing.xyz*0.6,0.0);}
+  return vec4f(value/total,clamp(total,0.0,1.0));
+}
+
+fn samplePrimaryIrradiance(position:vec3f,normal:vec3f)->vec4f{
+  let lods=lodSelection(position);
+  let fine=samplePrimaryIrradianceLod(position,normal,u32(lods.x));
+  if(u32(lods.y)==u32(lods.x)){return fine;}
+  let coarse=samplePrimaryIrradianceLod(position,normal,u32(lods.y));
+  if(fine.w<0.001){return coarse;}
+  if(coarse.w<0.001){return fine;}
+  return vec4f(mix(fine.xyz,coarse.xyz,lods.z),mix(fine.w,coarse.w,lods.z));
 }
 
 // Secondary cache from the previous frame. It uses the same sparse machinery
@@ -390,7 +483,7 @@ export const computeShader = sharedCompute + /* wgsl */`
   if(gid.x>=12288u){return;}
   let slot=currentFrame()*HASH_FRAME_STRIDE+gid.x;
   atomicStore(&slots[slot].key,EMPTY);
-  slots[slot].index=EMPTY;
+  atomicStore(&slots[slot].index,EMPTY);
 }
 
 @compute @workgroup_size(8,8) fn initBase(@builtin(global_invocation_id) gid: vec3u) {
@@ -402,17 +495,9 @@ export const computeShader = sharedCompute + /* wgsl */`
   if(world.w<0.5){return;}
   let lods=lodSelection(world.xyz);
   let fine=u32(lods.x);
-  let fineProbe=insertProbe(0u,world.xyz,fine);
-  if(fineProbe!=EMPTY){
-    atomicAdd(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,fineProbe)],max(1u,passParams.value));
-  }
+  insertProbeKey(0u,world.xyz,fine);
   let coarse=u32(lods.y);
-  if(coarse!=fine){
-    let coarseProbe=insertProbe(0u,world.xyz,coarse);
-    if(coarseProbe!=EMPTY){
-      atomicAdd(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,coarseProbe)],max(1u,passParams.value));
-    }
-  }
+  if(coarse!=fine){insertProbeKey(0u,world.xyz,coarse);}
 }
 
 fn hitRecordIndex(gid:vec3u,frameIndex:u32)->u32{
@@ -429,10 +514,7 @@ fn hitRecordIndex(gid:vec3u,frameIndex:u32)->u32{
   let hitPosition=probeMeta[record];
   if(hitPosition.w<0.5){return;}
   let lod=min(levelOfDetail(hitPosition.xyz)+2u,7u)|SECONDARY_TAG;
-  let probe=insertProbe(0u,hitPosition.xyz,lod);
-  if(probe!=EMPTY){
-    atomicAdd(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,probe)],1u);
-  }
+  insertProbeKey(0u,hitPosition.xyz,lod);
 }
 
 @compute @workgroup_size(64) fn initHigher(@builtin(global_invocation_id) gid: vec3u) {
@@ -442,7 +524,91 @@ fn hitRecordIndex(gid:vec3u,frameIndex:u32)->u32{
   let activeCount=min(atomicLoad(&state[previous]),PROBE_CAPS[previous]);
   if(gid.x>=activeCount){return;}
   let probeInfo=probeMeta[PROBE_OFFSETS[previous]+gid.x];
-  let parent=insertProbe(cascade,probeInfo.xyz,bitcast<u32>(probeInfo.w));
+  insertProbeKey(cascade,probeInfo.xyz,bitcast<u32>(probeInfo.w));
+}
+
+fn cellFromKey(key:u32)->vec3i{
+  return vec3i(
+    i32(key&511u)-256,
+    i32((key>>9u)&511u)-256,
+    i32((key>>18u)&511u)-256
+  );
+}
+
+fn lodFromKey(key:u32)->u32{
+  return ((key>>27u)&7u)|(((key>>30u)&1u)<<8u);
+}
+
+// Key insertion and compact-index assignment are separate passes. Ranking
+// occupied hash slots in slot order makes key -> probe-index publication
+// independent of GPU workgroup scheduling, eliminating a subtle frame race.
+@compute @workgroup_size(64) fn canonicalizeProbes(@builtin(global_invocation_id) gid:vec3u){
+  let cascade=passParams.cascade;
+  if(gid.x>=HASH_SIZES[cascade]){return;}
+  let base=currentFrame()*HASH_FRAME_STRIDE+HASH_OFFSETS[cascade];
+  let slot=base+gid.x;
+  let key=atomicLoad(&slots[slot].key);
+  if(key==EMPTY){return;}
+  var rank=0u;
+  for(var previous=0u;previous<gid.x;previous++){
+    if(atomicLoad(&slots[base+previous].key)!=EMPTY){rank+=1u;}
+  }
+  if(rank>=PROBE_CAPS[cascade]){
+    atomicStore(&slots[slot].index,EMPTY);
+    atomicAdd(&state[6],1u);
+    return;
+  }
+  atomicStore(&slots[slot].index,rank);
+  let lod=lodFromKey(key);
+  probeMeta[PROBE_OFFSETS[cascade]+rank]=vec4f(
+    probePositionFromCell(cellFromKey(key),cascade,lod),
+    bitcast<f32>(lod)
+  );
+  atomicMax(&state[cascade],rank+1u);
+}
+
+@compute @workgroup_size(8,8) fn countBaseRays(@builtin(global_invocation_id) gid:vec3u){
+  let giSize=vec2u(u32(frame.resolution.z),u32(frame.resolution.w));
+  if(any(gid.xy>=giSize)){return;}
+  let fullSize=vec2u(u32(frame.resolution.x),u32(frame.resolution.y));
+  let pixel=min(fullSize-vec2u(1),gid.xy*fullSize/giSize);
+  let world=textureLoad(worldTex,vec2i(pixel),0);
+  if(world.w<0.5){return;}
+  let lods=lodSelection(world.xyz);
+  let fine=u32(lods.x);
+  let fineProbe=lookupProbe(0u,keyFromCell(probeCell(world.xyz,0u,fine),fine));
+  if(fineProbe!=EMPTY){
+    atomicAdd(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,fineProbe)],max(1u,passParams.value));
+  }
+  let coarse=u32(lods.y);
+  if(coarse!=fine){
+    let coarseProbe=lookupProbe(0u,keyFromCell(probeCell(world.xyz,0u,coarse),coarse));
+    if(coarseProbe!=EMPTY){
+      atomicAdd(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,coarseProbe)],max(1u,passParams.value));
+    }
+  }
+}
+
+@compute @workgroup_size(8,8) fn countSecondaryRays(@builtin(global_invocation_id) gid:vec3u){
+  let giSize=vec2u(u32(frame.resolution.z),u32(frame.resolution.w));
+  if(!featureEnabled(1u)||historyWeight()<=0.0||any(gid.xy>=giSize)||gid.z>=max(1u,passParams.value)){return;}
+  let record=hitRecordIndex(gid,1u-currentFrame());
+  let hitPosition=probeMeta[record];
+  if(hitPosition.w<0.5){return;}
+  let lod=min(levelOfDetail(hitPosition.xyz)+2u,7u)|SECONDARY_TAG;
+  let probe=lookupProbe(0u,keyFromCell(probeCell(hitPosition.xyz,0u,lod),lod));
+  if(probe!=EMPTY){atomicAdd(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,probe)],1u);}
+}
+
+@compute @workgroup_size(64) fn countHigherRays(@builtin(global_invocation_id) gid:vec3u){
+  let cascade=passParams.cascade;
+  if(cascade==0u||cascade>3u){return;}
+  let previous=cascade-1u;
+  let childCount=min(atomicLoad(&state[previous]),PROBE_CAPS[previous]);
+  if(gid.x>=childCount){return;}
+  let childInfo=probeMeta[PROBE_OFFSETS[previous]+gid.x];
+  let lod=bitcast<u32>(childInfo.w);
+  let parent=lookupProbe(cascade,keyFromCell(probeCell(childInfo.xyz,cascade,lod),lod));
   if(parent!=EMPTY){
     let childRays=atomicLoad(&state[probeStateIndex(RAY_COUNT_OFFSET,previous,gid.x)]);
     atomicAdd(&state[probeStateIndex(RAY_COUNT_OFFSET,cascade,parent)],childRays);
@@ -501,19 +667,21 @@ fn deposit(cascade:u32,probe:u32,direction:u32,radiance:vec3f,beta:f32){
   atomicAdd(&accum[base+4u],1u);
 }
 
-fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,lane:u32,record:u32,writeHit:bool){
+fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,lane:u32,sequenceSeed:u32,record:u32,writeHit:bool){
   let key0=keyFromCell(probeCell(world,0u,lod),lod);
   let baseProbe=lookupProbe(0u,key0);
   if(baseProbe==EMPTY){
     if(writeHit){probeMeta[record]=vec4f(0);probeMeta[record+1u]=vec4f(0);}
     return;
   }
-  let local=atomicAdd(&state[probeStateIndex(RAY_CURSOR_OFFSET,0u,baseProbe)],1u);
-  let sequenceIndex=atomicLoad(&state[probeStateIndex(RAY_OFFSET_OFFSET,0u,baseProbe)])+local;
+  // GPU atomic arrival order is deliberately excluded from direction
+  // assignment. The stable screen-sample seed makes the same camera path
+  // bit-reproducible while Algorithm 3's prefix still decorrelates probes.
+  let sequenceIndex=atomicLoad(&state[probeStateIndex(RAY_OFFSET_OFFSET,0u,baseProbe)])+sequenceSeed;
   let g=1.324717957244746;
   let alpha=vec2f(1.0/g,1.0/(g*g));
   var jitter=vec2f(0);
-  if(historyWeight()<=0.0){
+  if(!featureEnabled(8u)){
     let temporal=hash32(u32(frame.sunDirTime.w*60.0)+lane*0x9e3779b9u);
     jitter=vec2f(f32(temporal&65535u),f32(temporal>>16u))/65536.0;
   }
@@ -523,7 +691,8 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,lane:u32,record:u32,writeHit:b
 
   let baseLength=frame.envBaseSpacing.w*exp2(f32(lod&7u))*1.6;
   let maxDistance=baseLength*64.0;
-  let origin=world+normal*max(0.008,frame.envBaseSpacing.w*0.012);
+  let nearOffset=select(0.0,frame.envBaseSpacing.w*exp2(f32(lod&7u)),featureEnabled(4u));
+  let origin=world+normal*max(0.008,frame.envBaseSpacing.w*0.012)+direction*nearOffset;
   let hit=traceScene(origin,direction,maxDistance+0.001);
   let didHit=hit.t<maxDistance;
   if(writeHit){
@@ -539,8 +708,9 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,lane:u32,record:u32,writeHit:b
   if(didHit){
     targetCascade=0u;
     var end=baseLength;
+    let intervalDistance=hit.t+nearOffset;
     loop {
-      if(hit.t<=end||targetCascade>=3u){break;}
+      if(intervalDistance<=end||targetCascade>=3u){break;}
       targetCascade+=1u; end*=4.0;
     }
   }
@@ -569,9 +739,10 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,lane:u32,record:u32,writeHit:b
   let normal=normalize(textureLoad(normalTex,vec2i(pixel),0).xyz);
   let lods=lodSelection(world.xyz);
   let fine=u32(lods.x);
-  traceAndSplit(world.xyz,normal,fine,gid.z,record,true);
+  let sequenceSeed=(gid.y*giSize.x+gid.x)*max(1u,passParams.value)+gid.z;
+  traceAndSplit(world.xyz,normal,fine,gid.z,sequenceSeed,record,true);
   let coarse=u32(lods.y);
-  if(coarse!=fine){traceAndSplit(world.xyz,normal,coarse,gid.z,0u,false);}
+  if(coarse!=fine){traceAndSplit(world.xyz,normal,coarse,gid.z,sequenceSeed,0u,false);}
 }
 
 @compute @workgroup_size(8,8) fn splitSecondaryRays(@builtin(global_invocation_id) gid: vec3u) {
@@ -582,7 +753,8 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,lane:u32,record:u32,writeHit:b
   let hitNormal=probeMeta[record+1u];
   if(hitPosition.w<0.5||hitNormal.w<0.5){return;}
   let lod=min(levelOfDetail(hitPosition.xyz)+2u,7u)|SECONDARY_TAG;
-  traceAndSplit(hitPosition.xyz,normalize(hitNormal.xyz),lod,gid.z,0u,false);
+  let sequenceSeed=(gid.y*giSize.x+gid.x)*max(1u,passParams.value)+gid.z;
+  traceAndSplit(hitPosition.xyz,normalize(hitNormal.xyz),lod,gid.z,sequenceSeed,0u,false);
 }
 
 fn sampleParentDirection(cascade:u32,position:vec3f,lod:u32,parentDirection:u32)->vec3f{
@@ -689,6 +861,54 @@ fn decodeOctahedral(uvIn:vec2f)->vec3f{
   }
   irradiance[currentFrame()*IRRADIANCE_FRAME_STRIDE+probe*36u+texel]=vec4f(filtered,1.0);
 }
+
+// Deterministic one-bounce ground-truth gate. Each low-resolution validation
+// pixel traces a cosine-weighted reference estimator against the same scene BVH
+// and compares it with the reconstructed Split RC irradiance. The output is
+// fixed-point so all workgroups can accumulate without floating atomics.
+@compute @workgroup_size(8,8,1) fn validateReference(@builtin(global_invocation_id) gid:vec3u){
+  let outputSize=vec2u(passParams.pad0,passParams.pad1);
+  let sampleCount=max(1u,passParams.value);
+  if(any(gid.xy>=outputSize)||gid.z>=sampleCount){return;}
+  let fullSize=vec2u(u32(frame.resolution.x),u32(frame.resolution.y));
+  let pixel=min(fullSize-vec2u(1),(gid.xy*fullSize+outputSize/2u)/outputSize);
+  let world=textureLoad(worldTex,vec2i(pixel),0);
+  if(world.w<0.5){return;}
+  let normal=normalize(textureLoad(normalTex,vec2i(pixel),0).xyz);
+  let base=(gid.y*outputSize.x+gid.x)*8u;
+  if(gid.z==0u){
+    let current=clamp(samplePrimaryIrradiance(world.xyz,normal).xyz,vec3f(0),vec3f(16));
+    atomicStore(&accum[base+3u],u32(current.r*65536.0+0.5));
+    atomicStore(&accum[base+4u],u32(current.g*65536.0+0.5));
+    atomicStore(&accum[base+5u],u32(current.b*65536.0+0.5));
+    atomicStore(&accum[base+6u],1u);
+  }
+
+  let pixelHash=hash32(gid.x+gid.y*outputSize.x);
+  let sequence=gid.z+(pixelHash&65535u);
+  let g=1.324717957244746;
+  let uv=fract(vec2f(0.5)+f32(sequence+1u)*vec2f(1.0/g,1.0/(g*g)));
+  let radius=sqrt(uv.x);
+  let phi=TAU*uv.y;
+  let local=vec3f(radius*cos(phi),radius*sin(phi),sqrt(max(0.0,1.0-uv.x)));
+  let helper=select(vec3f(0,1,0),vec3f(1,0,0),abs(normal.y)>0.9);
+  let tangent=normalize(cross(helper,normal));
+  let bitangent=cross(normal,tangent);
+  let direction=normalize(tangent*local.x+bitangent*local.y+normal*local.z);
+  let lod=levelOfDetail(world.xyz);
+  let maxDistance=frame.envBaseSpacing.w*exp2(f32(lod))*1.6*64.0;
+  let origin=world.xyz+normal*max(0.008,frame.envBaseSpacing.w*0.012);
+  let hit=traceScene(origin,direction,maxDistance+0.001);
+  var radiance=frame.envBaseSpacing.xyz;
+  if(hit.t<maxDistance){
+    radiance=directAtHit(origin+direction*hit.t,hit);
+  }
+  let safe=clamp(radiance,vec3f(0),vec3f(16));
+  atomicAdd(&accum[base],u32(safe.r*65536.0+0.5));
+  atomicAdd(&accum[base+1u],u32(safe.g*65536.0+0.5));
+  atomicAdd(&accum[base+2u],u32(safe.b*65536.0+0.5));
+  atomicAdd(&accum[base+7u],1u);
+}
 `;
 
 export const finalShader = /* wgsl */`
@@ -704,7 +924,7 @@ struct FrameUniforms {
   resolution: vec4f,
   controls: vec4f,
 };
-struct HashSlot { key: atomic<u32>, index: u32 };
+struct HashSlot { key: atomic<u32>, index: atomic<u32> };
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(0) @binding(1) var albedoTex: texture_2d<f32>;
 @group(0) @binding(2) var normalTex: texture_2d<f32>;
@@ -739,7 +959,7 @@ fn lookupProbeCascade(cascade:u32,key:u32)->u32{
   for(var step=0u;step<32u;step++){
     let slot=base+((start+step)&mask);
     let found=atomicLoad(&slots[slot].key);
-    if(found==key){return slots[slot].index;}
+    if(found==key){return atomicLoad(&slots[slot].index);}
     if(found==EMPTY){return EMPTY;}
   }
   return EMPTY;
@@ -779,7 +999,18 @@ fn sampleIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
   let grid=position/spacing-vec3f(0.5);
   let cell=vec3i(floor(grid));
   let fraction=fract(grid);
-  let texel=octIndex(normal);
+  var octNormal=normalize(normal);
+  octNormal/=max(1e-6,abs(octNormal.x)+abs(octNormal.y)+abs(octNormal.z));
+  var oct=octNormal.xy;
+  if(octNormal.z<0.0){
+    oct=vec2f(
+      (1.0-abs(oct.y))*select(-1.0,1.0,oct.x>=0.0),
+      (1.0-abs(oct.x))*select(-1.0,1.0,oct.y>=0.0)
+    );
+  }
+  let octCoordinate=clamp((oct*0.5+0.5)*6.0-vec2f(0.5),vec2f(0),vec2f(5));
+  let octBase=vec2i(floor(octCoordinate));
+  let octFraction=fract(octCoordinate);
   let frameIndex=min(1u,u32(floor(frame.controls.w)));
   var value=vec3f(0);
   var total=0.0;
@@ -790,9 +1021,20 @@ fn sampleIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
       select(1.0-fraction.y,fraction.y,bits.y==1),
       select(1.0-fraction.z,fraction.z,bits.z==1)
     );
-    let weight=wv.x*wv.y*wv.z;
+    let spatialWeight=wv.x*wv.y*wv.z;
     let probe=lookupProbe(keyFromCell(cell+bits,lod));
-    if(probe!=EMPTY&&probe<2048u){value+=irradiance[frameIndex*IRRADIANCE_FRAME_STRIDE+probe*36u+texel].xyz*weight;total+=weight;}
+    if(probe!=EMPTY&&probe<2048u){
+      for(var tap=0u;tap<4u;tap++){
+        let offset=vec2i(i32(tap&1u),i32((tap>>1u)&1u));
+        let coordinate=clamp(octBase+offset,vec2i(0),vec2i(5));
+        let angularWeight=select(1.0-octFraction.x,octFraction.x,offset.x==1)
+          *select(1.0-octFraction.y,octFraction.y,offset.y==1);
+        let texel=u32(coordinate.x+coordinate.y*6);
+        let weight=spatialWeight*angularWeight;
+        value+=irradiance[frameIndex*IRRADIANCE_FRAME_STRIDE+probe*36u+texel].xyz*weight;
+        total+=weight;
+      }
+    }
   }
   if(total<1e-5){return vec4f(frame.envBaseSpacing.xyz*0.6,0.0);}
   return vec4f(value/total,clamp(total,0.0,1.0));
@@ -812,6 +1054,20 @@ fn directionIndex(direction:vec3f,cascade:u32)->u32{
   let uFloat=fract(atan2(direction.y,direction.x)/6.283185307179586+1.0);
   let vFloat=clamp(direction.z*0.5+0.5,0.0,0.999999);
   return min(width-1u,u32(floor(uFloat*f32(width))))+min(theta-1u,u32(floor(vFloat*f32(theta))))*width;
+}
+fn decodeEqualArea(uv:vec2f)->vec3f{
+  let phi=uv.x*6.283185307179586;
+  let z=uv.y*2.0-1.0;
+  let radius=sqrt(max(0.0,1.0-z*z));
+  return vec3f(radius*cos(phi),radius*sin(phi),z);
+}
+fn directionFromIndex(index:u32,cascade:u32)->vec3f{
+  let theta=4u<<cascade;
+  let width=theta*2u;
+  return decodeEqualArea(vec2f(
+    (f32(index%width)+0.5)/f32(width),
+    (f32(index/width)+0.5)/f32(theta)
+  ));
 }
 fn dataIndex(cascade:u32,probe:u32,direction:u32)->u32{
   return DATA_OFFSETS[cascade]+probe*DIR_COUNTS[cascade]+direction;
@@ -895,31 +1151,6 @@ fn roughSpecular(position:vec3f,normal:vec3f)->vec3f{
   let coarse=roughSpecularLod(position,normal,u32(lods.y));
   return mix(fine,coarse,lods.z);
 }
-fn screenSpaceCMinusOne(pixel:vec2i,position:vec3f,normal:vec3f)->f32{
-  let size=vec2i(textureDimensions(worldTex));
-  let offsets=array<vec2i,12>(
-    vec2i(3,0),vec2i(-3,0),vec2i(0,3),vec2i(0,-3),
-    vec2i(5,5),vec2i(-5,5),vec2i(5,-5),vec2i(-5,-5),
-    vec2i(9,2),vec2i(-9,2),vec2i(2,9),vec2i(2,-9)
-  );
-  var occlusion=0.0;
-  var valid=0.0;
-  for(var i=0u;i<12u;i++){
-    let q=clamp(pixel+offsets[i],vec2i(0),size-vec2i(1));
-    let neighbor=textureLoad(worldTex,q,0);
-    if(neighbor.w>0.5){
-      let delta=neighbor.xyz-position;
-      let distance=length(delta);
-      let radius=frame.envBaseSpacing.w*1.25;
-      if(distance>0.002&&distance<radius){
-        let horizon=max(0.0,dot(normalize(delta),normal));
-        occlusion+=horizon*(1.0-distance/radius);
-      }
-      valid+=1.0;
-    }
-  }
-  return 1.0-clamp(occlusion/max(1.0,valid)*1.35,0.0,0.65);
-}
 fn shadowVisibility(world:vec3f,normal:vec3f)->f32{
   let clip=frame.sunViewProj*vec4f(world+normal*0.012,1.0);
   let ndc=clip.xyz/clip.w;
@@ -933,6 +1164,65 @@ fn shadowVisibility(world:vec3f,normal:vec3f)->f32{
     }
   }
   return result/9.0;
+}
+fn directRadianceAtPixel(pixel:vec2i)->vec3f{
+  let world=textureLoad(worldTex,pixel,0);
+  let albedoData=textureLoad(albedoTex,pixel,0);
+  let albedo=albedoData.xyz;
+  let normal=normalize(textureLoad(normalTex,pixel,0).xyz);
+  let lightDirection=normalize(-frame.sunDirTime.xyz);
+  let sun=albedo*frame.sunColorIntensity.xyz*frame.sunColorIntensity.w
+    *max(0.0,dot(normal,lightDirection))*shadowVisibility(world.xyz,normal);
+  let toPoint=frame.pointPosRange.xyz-world.xyz;
+  let distance=length(toPoint);
+  let pointWindow=max(0.0,1.0-distance/frame.pointPosRange.w);
+  let point=albedo*frame.pointColorIntensity.xyz*frame.pointColorIntensity.w
+    *max(0.0,dot(normal,toPoint/max(distance,1e-4)))*pointWindow*pointWindow
+    /(1.0+0.06*distance*distance);
+  return sun+point+albedoData.www*vec3f(2.2,1.8,1.35);
+}
+fn screenSpaceNearInterval(position:vec3f,direction:vec3f)->vec4f{
+  let size=vec2i(textureDimensions(worldTex));
+  let nearLength=frame.envBaseSpacing.w;
+  for(var step=1u;step<=8u;step++){
+    let distance=nearLength*f32(step)/8.0;
+    let expected=position+direction*distance;
+    let clip=frame.viewProj*vec4f(expected,1.0);
+    if(clip.w<=0.0){continue;}
+    let ndc=clip.xy/clip.w;
+    let uv=vec2f(ndc.x*0.5+0.5,0.5-ndc.y*0.5);
+    if(any(uv<vec2f(0))||any(uv>vec2f(1))){continue;}
+    let pixel=clamp(vec2i(uv*vec2f(size)),vec2i(0),size-vec2i(1));
+    let candidate=textureLoad(worldTex,pixel,0);
+    if(candidate.w<0.5){continue;}
+    let delta=candidate.xyz-position;
+    let along=dot(delta,direction);
+    let perpendicular=length(delta-direction*along);
+    let thickness=max(frame.envBaseSpacing.w*0.08,distance*0.035);
+    if(along>0.01&&abs(along-distance)<thickness&&perpendicular<thickness){
+      return vec4f(directRadianceAtPixel(pixel),0.0);
+    }
+  }
+  return vec4f(0,0,0,1);
+}
+fn directionalCMinusOneLod(position:vec3f,normal:vec3f,lod:u32)->vec3f{
+  var result=vec3f(0);
+  for(var index=0u;index<32u;index++){
+    let direction=directionFromIndex(index,0u);
+    let cosine=max(0.0,dot(normal,direction));
+    if(cosine<=0.0){continue;}
+    let near=screenSpaceNearInterval(position,direction);
+    let distant=sampleConeLod(0u,position,direction,lod).xyz;
+    result+=(near.xyz+near.w*distant)*cosine;
+  }
+  return result*(4.0/32.0);
+}
+fn directionalCMinusOne(position:vec3f,normal:vec3f)->vec3f{
+  let lods=lodSelection(position);
+  let fine=directionalCMinusOneLod(position,normal,u32(lods.x));
+  if(u32(lods.y)==u32(lods.x)){return fine;}
+  let coarse=directionalCMinusOneLod(position,normal,u32(lods.y));
+  return mix(fine,coarse,lods.z);
 }
 fn aces(x:vec3f)->vec3f{
   let a=2.51;let b=0.03;let c=2.43;let d=0.59;let e=0.14;
@@ -953,10 +1243,10 @@ fn aces(x:vec3f)->vec3f{
   let albedoData=textureLoad(albedoTex,pixel,0);
   let albedo=albedoData.xyz;
   let normal=normalize(textureLoad(normalTex,pixel,0).xyz);
-  let sample=sampleIrradiance(world.xyz,normal);
   let features=u32(frame.cameraPos.w+0.5);
-  let cMinus=select(1.0,screenSpaceCMinusOne(pixel,world.xyz,normal),(features&4u)!=0u);
-  let indirect=albedo*sample.xyz*frame.controls.x*cMinus;
+  var sample=sampleIrradiance(world.xyz,normal);
+  if((features&4u)!=0u){sample=vec4f(directionalCMinusOne(world.xyz,normal),sample.w);}
+  let indirect=albedo*sample.xyz*frame.controls.x;
   let L=normalize(-frame.sunDirTime.xyz);
   let sun=albedo*frame.sunColorIntensity.xyz*frame.sunColorIntensity.w*max(0.0,dot(normal,L))*shadowVisibility(world.xyz,normal);
   let toPoint=frame.pointPosRange.xyz-world.xyz;
