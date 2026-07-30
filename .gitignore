@@ -43,5 +43,6 @@ next-env.d.ts
 /outputs/
 /work/
 /tmp/
+/.tmp/
 /.codex-dev.*.log
 /.codex-static.*.log
