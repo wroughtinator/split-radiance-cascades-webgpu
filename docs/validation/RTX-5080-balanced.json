@@ -1,44 +1,618 @@
 {
-  "date": "2026-07-30",
+  "timestamp": "2026-07-30T21:23:48.024Z",
   "adapter": {
     "vendor": "nvidia",
     "architecture": "blackwell",
-    "description": "NVIDIA GeForce RTX 5080",
-    "timestampQuery": true
+    "device": "unknown",
+    "description": "High-performance WebGPU adapter",
+    "timestampQuery": true,
+    "limits": {
+      "maxStorageBufferBindingSize": 134217728,
+      "maxComputeInvocationsPerWorkgroup": 256
+    }
   },
   "quality": "balanced",
-  "resolution": [1152, 648],
-  "giResolution": [192, 108],
-  "raysPerGiSample": 2,
-  "displayRefreshHz": 60,
-  "passed": true,
-  "criteria": {
-    "minimumFps": 30,
-    "maximumProbeOverflows": 0,
-    "maximumWebGpuErrors": 0
-  },
-  "scenes": [
-    {"id": 1, "name": "Color bleed laboratory", "fps": 60, "gpuMs": 0.52, "triangles": 820, "probes": 1540, "overflows": 0},
-    {"id": 2, "name": "Sponza atrium (paper scene)", "fps": 60, "gpuMs": 1.84, "triangles": 262267, "probes": 720, "overflows": 0},
-    {"id": 3, "name": "Concave canyon heightfield", "fps": 60, "gpuMs": 0.62, "triangles": 12184, "probes": 1427, "overflows": 0},
-    {"id": 4, "name": "Dense lantern forest", "fps": 60, "gpuMs": 0.72, "triangles": 6768, "probes": 1678, "overflows": 0},
-    {"id": 5, "name": "Multi-level atrium", "fps": 60, "gpuMs": 0.39, "triangles": 1552, "probes": 1175, "overflows": 0},
-    {"id": 6, "name": "Industrial pipe maze", "fps": 60, "gpuMs": 0.52, "triangles": 5268, "probes": 1178, "overflows": 0},
-    {"id": 7, "name": "Sun temple", "fps": 60, "gpuMs": 0.52, "triangles": 2480, "probes": 1103, "overflows": 0},
-    {"id": 8, "name": "Orbital sculpture field", "fps": 60, "gpuMs": 0.59, "triangles": 8204, "probes": 1131, "overflows": 0},
-    {"id": 9, "name": "Night market", "fps": 60, "gpuMs": 0.52, "triangles": 2220, "probes": 879, "overflows": 0},
-    {"id": 10, "name": "Megacity stress grid", "fps": 60, "gpuMs": 0.85, "triangles": 13496, "probes": 1334, "overflows": 0}
+  "resolution": [
+    1152,
+    648
   ],
-  "temporalStability": {
-    "scene": "Color bleed laboratory",
-    "view": "indirect only",
-    "camera": "frozen",
-    "lights": "frozen",
-    "settlingMilliseconds": 2200,
-    "frameIntervalMilliseconds": 800,
-    "viewportChannelsCompared": 1478400,
-    "changedChannels": 0,
-    "meanChannelDelta": 0,
-    "maximumChannelDelta": 0
-  }
+  "giResolution": [
+    192,
+    108
+  ],
+  "minFps": 59.97600959616189,
+  "maxGpuMs": 5.767168,
+  "passed": true,
+  "scenes": [
+    {
+      "scene": 0,
+      "name": "Color bleed laboratory",
+      "fps": 60.006000600060354,
+      "gpuMs": 2.162688,
+      "triangles": 820,
+      "probes": [
+        1205,
+        374,
+        85,
+        28
+      ],
+      "rays": 50991,
+      "hitRate": 0.7502696554293895,
+      "overflows": 0,
+      "gpuError": null,
+      "motionStability": {
+        "samples": 4,
+        "matchedProbesMin": 1094,
+        "p95RelativeMax": 0.009730618055059627,
+        "p99RelativeMax": 0.02099582708416534,
+        "p95AbsoluteMax": 0.0006624653330176422,
+        "passed": true,
+        "measurements": [
+          {
+            "matchedProbes": 1094,
+            "medianRelative": 0.0031222119927408476,
+            "p95Relative": 0.009730618055059627,
+            "p99Relative": 0.01941936699789007,
+            "p95Absolute": 0.0006624653330176422,
+            "maxAbsolute": 0.011086786435502649
+          },
+          {
+            "matchedProbes": 1096,
+            "medianRelative": 0.0024709786800476076,
+            "p95Relative": 0.008610618121056377,
+            "p99Relative": 0.01922364506454442,
+            "p95Absolute": 0.0006379941097357233,
+            "maxAbsolute": 0.014628262270366399
+          },
+          {
+            "matchedProbes": 1095,
+            "medianRelative": 0.0021349907014517333,
+            "p95Relative": 0.008808799393684627,
+            "p99Relative": 0.02099582708416534,
+            "p95Absolute": 0.0005538174364301748,
+            "maxAbsolute": 0.008177878494725954
+          },
+          {
+            "matchedProbes": 1095,
+            "medianRelative": 0.0018500791432128627,
+            "p95Relative": 0.0077271493448654634,
+            "p99Relative": 0.019697087208856656,
+            "p95Absolute": 0.0005375468507926306,
+            "maxAbsolute": 0.01140170869007695
+          }
+        ]
+      }
+    },
+    {
+      "scene": 1,
+      "name": "Sponza atrium (paper scene)",
+      "fps": 59.99400059993966,
+      "gpuMs": 5.767168,
+      "triangles": 262267,
+      "probes": [
+        680,
+        217,
+        71,
+        22
+      ],
+      "rays": 79940,
+      "hitRate": 0.9317488116087065,
+      "overflows": 0,
+      "gpuError": null,
+      "motionStability": {
+        "samples": 4,
+        "matchedProbesMin": 474,
+        "p95RelativeMax": 0.005315927117345041,
+        "p99RelativeMax": 0.011132602234418143,
+        "p95AbsoluteMax": 0.0007285719931125201,
+        "passed": true,
+        "measurements": [
+          {
+            "matchedProbes": 475,
+            "medianRelative": 0.0009675394991486402,
+            "p95Relative": 0.005315927117345041,
+            "p99Relative": 0.011132602234418143,
+            "p95Absolute": 0.0007285719931125201,
+            "maxAbsolute": 0.001997872107103449
+          },
+          {
+            "matchedProbes": 476,
+            "medianRelative": 0.0010595898426966918,
+            "p95Relative": 0.004783335855473865,
+            "p99Relative": 0.008881068066791894,
+            "p95Absolute": 0.0006232657822469595,
+            "maxAbsolute": 0.0026596562185220995
+          },
+          {
+            "matchedProbes": 477,
+            "medianRelative": 0.0009467606902332703,
+            "p95Relative": 0.00459747758547725,
+            "p99Relative": 0.00785499012383041,
+            "p95Absolute": 0.0006477816821386095,
+            "maxAbsolute": 0.00170829351122187
+          },
+          {
+            "matchedProbes": 474,
+            "medianRelative": 0.0009753156355227293,
+            "p95Relative": 0.004927941763607401,
+            "p99Relative": 0.009900046056994839,
+            "p95Absolute": 0.0006227409541192663,
+            "maxAbsolute": 0.002645874372248863
+          }
+        ]
+      }
+    },
+    {
+      "scene": 2,
+      "name": "Concave canyon heightfield",
+      "fps": 59.99400059993966,
+      "gpuMs": 2.490368,
+      "triangles": 12184,
+      "probes": [
+        1153,
+        371,
+        109,
+        35
+      ],
+      "rays": 9556,
+      "hitRate": 0.27113855169527,
+      "overflows": 0,
+      "gpuError": null,
+      "motionStability": {
+        "samples": 4,
+        "matchedProbesMin": 1038,
+        "p95RelativeMax": 0.007084477117435968,
+        "p99RelativeMax": 0.012668367162646979,
+        "p95AbsoluteMax": 0.0010797800680001912,
+        "passed": true,
+        "measurements": [
+          {
+            "matchedProbes": 1041,
+            "medianRelative": 0.0012385230251812129,
+            "p95Relative": 0.006250340373743684,
+            "p99Relative": 0.010098358411535325,
+            "p95Absolute": 0.0009002850229127279,
+            "maxAbsolute": 0.0037666593145993243
+          },
+          {
+            "matchedProbes": 1038,
+            "medianRelative": 0.0011310853387968562,
+            "p95Relative": 0.006274557514699899,
+            "p99Relative": 0.010323042437047448,
+            "p95Absolute": 0.0009559331603348487,
+            "maxAbsolute": 0.003201951355859628
+          },
+          {
+            "matchedProbes": 1040,
+            "medianRelative": 0.0011750334621341294,
+            "p95Relative": 0.007035065716161183,
+            "p99Relative": 0.01120557782331448,
+            "p95Absolute": 0.0010638823946730602,
+            "maxAbsolute": 0.003151904401472866
+          },
+          {
+            "matchedProbes": 1039,
+            "medianRelative": 0.0011544316046643785,
+            "p95Relative": 0.007084477117435968,
+            "p99Relative": 0.012668367162646979,
+            "p95Absolute": 0.0010797800680001912,
+            "maxAbsolute": 0.003428434548651188
+          }
+        ]
+      }
+    },
+    {
+      "scene": 3,
+      "name": "Dense lantern forest",
+      "fps": 59.99999999999999,
+      "gpuMs": 2.686976,
+      "triangles": 6768,
+      "probes": [
+        1239,
+        512,
+        184,
+        72
+      ],
+      "rays": 12179,
+      "hitRate": 0.41202069135396996,
+      "overflows": 0,
+      "gpuError": null,
+      "motionStability": {
+        "samples": 4,
+        "matchedProbesMin": 1055,
+        "p95RelativeMax": 0.0037216028648738575,
+        "p99RelativeMax": 0.00965354175700088,
+        "p95AbsoluteMax": 0.00018608014324369287,
+        "passed": true,
+        "measurements": [
+          {
+            "matchedProbes": 1071,
+            "medianRelative": 0.0005140871696898003,
+            "p95Relative": 0.0037216028648738575,
+            "p99Relative": 0.007411874727759893,
+            "p95Absolute": 0.00018608014324369287,
+            "maxAbsolute": 0.0022564717650309894
+          },
+          {
+            "matchedProbes": 1066,
+            "medianRelative": 0.000525419083889575,
+            "p95Relative": 0.003143636477800707,
+            "p99Relative": 0.0071566556823543515,
+            "p95Absolute": 0.00015718182389003535,
+            "maxAbsolute": 0.0011197133269678639
+          },
+          {
+            "matchedProbes": 1055,
+            "medianRelative": 0.0004545327887559708,
+            "p95Relative": 0.0031264775500425973,
+            "p99Relative": 0.00965354175700088,
+            "p95Absolute": 0.00015632387750212987,
+            "maxAbsolute": 0.005112562127090575
+          },
+          {
+            "matchedProbes": 1059,
+            "medianRelative": 0.0004920475344277059,
+            "p95Relative": 0.0031022210597165395,
+            "p99Relative": 0.009449801068431728,
+            "p95Absolute": 0.00015511105298582697,
+            "maxAbsolute": 0.003163071520166056
+          }
+        ]
+      }
+    },
+    {
+      "scene": 4,
+      "name": "Multi-level atrium",
+      "fps": 59.99999999999999,
+      "gpuMs": 1.441792,
+      "triangles": 1552,
+      "probes": [
+        780,
+        276,
+        93,
+        39
+      ],
+      "rays": 5825,
+      "hitRate": 0.31570815450643774,
+      "overflows": 0,
+      "gpuError": null,
+      "motionStability": {
+        "samples": 4,
+        "matchedProbesMin": 688,
+        "p95RelativeMax": 0.008265891538184043,
+        "p99RelativeMax": 0.011568835890780426,
+        "p95AbsoluteMax": 0.0005006510410664952,
+        "passed": true,
+        "measurements": [
+          {
+            "matchedProbes": 688,
+            "medianRelative": 0.0021458662537236772,
+            "p95Relative": 0.008088725194147698,
+            "p99Relative": 0.011568835890780426,
+            "p95Absolute": 0.0004983746002738682,
+            "maxAbsolute": 0.0019567442312422717
+          },
+          {
+            "matchedProbes": 693,
+            "medianRelative": 0.0018427230048527453,
+            "p95Relative": 0.007262247152063165,
+            "p99Relative": 0.010141937183231694,
+            "p95Absolute": 0.0004230002124276308,
+            "maxAbsolute": 0.001838187992728002
+          },
+          {
+            "matchedProbes": 695,
+            "medianRelative": 0.002165388067977281,
+            "p95Relative": 0.006759675740160842,
+            "p99Relative": 0.010924806037464856,
+            "p95Absolute": 0.00040095018817941364,
+            "maxAbsolute": 0.0014868992138860893
+          },
+          {
+            "matchedProbes": 699,
+            "medianRelative": 0.002169892884790886,
+            "p95Relative": 0.008265891538184043,
+            "p99Relative": 0.010688455462126769,
+            "p95Absolute": 0.0005006510410664952,
+            "maxAbsolute": 0.0011474815485067666
+          }
+        ]
+      }
+    },
+    {
+      "scene": 5,
+      "name": "Industrial pipe maze",
+      "fps": 59.97600959616189,
+      "gpuMs": 1.835008,
+      "triangles": 5268,
+      "probes": [
+        868,
+        293,
+        95,
+        35
+      ],
+      "rays": 7876,
+      "hitRate": 0.44565769426104623,
+      "overflows": 0,
+      "gpuError": null,
+      "motionStability": {
+        "samples": 4,
+        "matchedProbesMin": 771,
+        "p95RelativeMax": 0.01269541438901244,
+        "p99RelativeMax": 0.02403297672644539,
+        "p95AbsoluteMax": 0.000874346582964064,
+        "passed": true,
+        "measurements": [
+          {
+            "matchedProbes": 777,
+            "medianRelative": 0.0012130767048024182,
+            "p95Relative": 0.01085304740492003,
+            "p99Relative": 0.022071812825472215,
+            "p95Absolute": 0.0007259770688911038,
+            "maxAbsolute": 0.0037524487758366365
+          },
+          {
+            "matchedProbes": 775,
+            "medianRelative": 0.0011688445379127999,
+            "p95Relative": 0.01028869371334151,
+            "p99Relative": 0.021528596711185958,
+            "p95Absolute": 0.0007451105841642658,
+            "maxAbsolute": 0.002240122972832395
+          },
+          {
+            "matchedProbes": 771,
+            "medianRelative": 0.0014743960373519993,
+            "p95Relative": 0.011784134189182054,
+            "p99Relative": 0.021519045095319055,
+            "p95Absolute": 0.000793733231345628,
+            "maxAbsolute": 0.003724271393836215
+          },
+          {
+            "matchedProbes": 772,
+            "medianRelative": 0.0012535848501656066,
+            "p95Relative": 0.01269541438901244,
+            "p99Relative": 0.02403297672644539,
+            "p95Absolute": 0.000874346582964064,
+            "maxAbsolute": 0.003524179060394983
+          }
+        ]
+      }
+    },
+    {
+      "scene": 6,
+      "name": "Sun temple",
+      "fps": 59.99999999999999,
+      "gpuMs": 1.7039360000000001,
+      "triangles": 2480,
+      "probes": [
+        856,
+        330,
+        110,
+        34
+      ],
+      "rays": 6069,
+      "hitRate": 0.36628769154720714,
+      "overflows": 0,
+      "gpuError": null,
+      "motionStability": {
+        "samples": 4,
+        "matchedProbesMin": 740,
+        "p95RelativeMax": 0.00947205345535736,
+        "p99RelativeMax": 0.01880487362356061,
+        "p95AbsoluteMax": 0.0012624119008581292,
+        "passed": true,
+        "measurements": [
+          {
+            "matchedProbes": 741,
+            "medianRelative": 0.0016270373905190047,
+            "p95Relative": 0.00947205345535736,
+            "p99Relative": 0.01880487362356061,
+            "p95Absolute": 0.0012624119008581292,
+            "maxAbsolute": 0.008579645616395626
+          },
+          {
+            "matchedProbes": 750,
+            "medianRelative": 0.001519177794168904,
+            "p95Relative": 0.008671993110536909,
+            "p99Relative": 0.01572418821235267,
+            "p95Absolute": 0.001210177174665844,
+            "maxAbsolute": 0.0048235183772942225
+          },
+          {
+            "matchedProbes": 744,
+            "medianRelative": 0.001643285148739758,
+            "p95Relative": 0.00811708961081879,
+            "p99Relative": 0.014864420768647456,
+            "p95Absolute": 0.0011048025570810083,
+            "maxAbsolute": 0.00412984540959202
+          },
+          {
+            "matchedProbes": 740,
+            "medianRelative": 0.0015797295092575304,
+            "p95Relative": 0.008550016942452814,
+            "p99Relative": 0.014668465847537743,
+            "p95Absolute": 0.0012372720790407299,
+            "maxAbsolute": 0.003921802560902257
+          }
+        ]
+      }
+    },
+    {
+      "scene": 7,
+      "name": "Orbital sculpture field",
+      "fps": 60.02400960384119,
+      "gpuMs": 1.900544,
+      "triangles": 8204,
+      "probes": [
+        906,
+        328,
+        94,
+        40
+      ],
+      "rays": 8007,
+      "hitRate": 0.26551767203696763,
+      "overflows": 0,
+      "gpuError": null,
+      "motionStability": {
+        "samples": 4,
+        "matchedProbesMin": 855,
+        "p95RelativeMax": 0.005942573209810759,
+        "p99RelativeMax": 0.011824221207656777,
+        "p95AbsoluteMax": 0.00035027729542923963,
+        "passed": true,
+        "measurements": [
+          {
+            "matchedProbes": 855,
+            "medianRelative": 0.0006922657071911244,
+            "p95Relative": 0.005942573209810759,
+            "p99Relative": 0.011824221207656777,
+            "p95Absolute": 0.00035027729542923963,
+            "maxAbsolute": 0.0031199271799375317
+          },
+          {
+            "matchedProbes": 860,
+            "medianRelative": 0.0007830666620280147,
+            "p95Relative": 0.005856363015249305,
+            "p99Relative": 0.010579727024992595,
+            "p95Absolute": 0.0003426491812078547,
+            "maxAbsolute": 0.0032686074500281603
+          },
+          {
+            "matchedProbes": 864,
+            "medianRelative": 0.0008089104625914889,
+            "p95Relative": 0.005614114408070692,
+            "p99Relative": 0.0107950261843681,
+            "p95Absolute": 0.00030166301939429235,
+            "maxAbsolute": 0.003044343572441044
+          },
+          {
+            "matchedProbes": 863,
+            "medianRelative": 0.0007037985966434901,
+            "p95Relative": 0.005364354475090871,
+            "p99Relative": 0.009427774700393503,
+            "p95Absolute": 0.0002936329866552456,
+            "maxAbsolute": 0.002396185955156921
+          }
+        ]
+      }
+    },
+    {
+      "scene": 8,
+      "name": "Night market",
+      "fps": 60.006000600060354,
+      "gpuMs": 1.441792,
+      "triangles": 2220,
+      "probes": [
+        765,
+        273,
+        87,
+        42
+      ],
+      "rays": 6346,
+      "hitRate": 0.5485345099275134,
+      "overflows": 0,
+      "gpuError": null,
+      "motionStability": {
+        "samples": 4,
+        "matchedProbesMin": 637,
+        "p95RelativeMax": 0.012715502365958087,
+        "p99RelativeMax": 0.03678438880457303,
+        "p95AbsoluteMax": 0.0007836341721626575,
+        "passed": true,
+        "measurements": [
+          {
+            "matchedProbes": 637,
+            "medianRelative": 0.00043947350246723027,
+            "p95Relative": 0.0094975189989846,
+            "p99Relative": 0.03461226271452483,
+            "p95Absolute": 0.0005348329781683925,
+            "maxAbsolute": 0.0033628387471906704
+          },
+          {
+            "matchedProbes": 642,
+            "medianRelative": 0.0004889147212056369,
+            "p95Relative": 0.012715502365958087,
+            "p99Relative": 0.03678438880457303,
+            "p95Absolute": 0.0007836341721626575,
+            "maxAbsolute": 0.005107149815950035
+          },
+          {
+            "matchedProbes": 643,
+            "medianRelative": 0.0005114019299960922,
+            "p95Relative": 0.008944911588397372,
+            "p99Relative": 0.03223600203849168,
+            "p95Absolute": 0.0005052018932040769,
+            "maxAbsolute": 0.0044191391735001195
+          },
+          {
+            "matchedProbes": 639,
+            "medianRelative": 0.00048175637033357616,
+            "p95Relative": 0.010889986447834704,
+            "p99Relative": 0.0325461550361943,
+            "p95Absolute": 0.0005868811572475006,
+            "maxAbsolute": 0.005265018825445056
+          }
+        ]
+      }
+    },
+    {
+      "scene": 9,
+      "name": "Megacity stress grid",
+      "fps": 60.006000600060354,
+      "gpuMs": 3.080192,
+      "triangles": 13496,
+      "probes": [
+        983,
+        375,
+        127,
+        39
+      ],
+      "rays": 9001,
+      "hitRate": 0.5007221419842239,
+      "overflows": 0,
+      "gpuError": null,
+      "motionStability": {
+        "samples": 4,
+        "matchedProbesMin": 836,
+        "p95RelativeMax": 0.012354208861167226,
+        "p99RelativeMax": 0.02336787795972937,
+        "p95AbsoluteMax": 0.0007940909742584698,
+        "passed": true,
+        "measurements": [
+          {
+            "matchedProbes": 844,
+            "medianRelative": 0.0021922872501112245,
+            "p95Relative": 0.012354208861167226,
+            "p99Relative": 0.02336787795972937,
+            "p95Absolute": 0.0007940909742584698,
+            "maxAbsolute": 0.0034548741539422723
+          },
+          {
+            "matchedProbes": 844,
+            "medianRelative": 0.0018105348226510332,
+            "p95Relative": 0.011909334698451266,
+            "p99Relative": 0.01742393959145657,
+            "p95Absolute": 0.0007489037134788268,
+            "maxAbsolute": 0.001959388560605131
+          },
+          {
+            "matchedProbes": 838,
+            "medianRelative": 0.0019133346111821492,
+            "p95Relative": 0.011875404354061312,
+            "p99Relative": 0.01945495044394937,
+            "p95Absolute": 0.0007835941313248454,
+            "maxAbsolute": 0.0030954083573797517
+          },
+          {
+            "matchedProbes": 836,
+            "medianRelative": 0.0017395589571032877,
+            "p95Relative": 0.010556297822131161,
+            "p99Relative": 0.019284529939500583,
+            "p95Absolute": 0.0007255313699754545,
+            "maxAbsolute": 0.003140774855059064
+          }
+        ]
+      }
+    }
+  ]
 }

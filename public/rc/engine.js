@@ -60,6 +60,9 @@ class SplitRadianceCascades {
     this.sunSpeed = 1;
     this.debugMode = 0;
     this.temporalStability = true;
+    this.multibounce = true;
+    this.roughSpecular = true;
+    this.cMinusOne = true;
     this.historyValid = false;
     this.animateCamera = true;
     this.animateLights = true;
@@ -215,8 +218,11 @@ class SplitRadianceCascades {
     this.computePipelines = {
       reset: cp("resetSlots"),
       initBase: cp("initBase"),
+      initSecondary: cp("initSecondary"),
       initHigher: cp("initHigher"),
+      assignOffsets: cp("assignRayOffsets"),
       splitRays: cp("splitRays"),
+      splitSecondary: cp("splitSecondaryRays"),
       merge: cp("mergeCascade"),
       prefilter: cp("prefilterIrradiance"),
     };
@@ -232,6 +238,8 @@ class SplitRadianceCascades {
         { binding: 5, visibility: SHADER.FRAGMENT, sampler: { type: "comparison" } },
         { binding: 6, visibility: SHADER.FRAGMENT, buffer: { type: "storage" } },
         { binding: 7, visibility: SHADER.FRAGMENT, buffer: { type: "read-only-storage" } },
+        { binding: 8, visibility: SHADER.FRAGMENT, buffer: { type: "read-only-storage" } },
+        { binding: 9, visibility: SHADER.FRAGMENT, buffer: { type: "storage" } },
       ],
     });
     this.finalPipeline = device.createRenderPipeline({
@@ -248,12 +256,12 @@ class SplitRadianceCascades {
   createPersistentResources() {
     const d = this.device;
     this.frameBuffer = createBuffer(d, "frame uniforms", 256, GPU.UNIFORM | GPU.COPY_DST);
-    this.hashBuffer = createBuffer(d, "double-buffered sparse probe hash", K.totalHashSlots * K.hashFrames * 8, GPU.STORAGE | GPU.COPY_DST);
-    this.stateBuffer = createBuffer(d, "probe counters and diagnostics", 32, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
+    this.hashBuffer = createBuffer(d, "double-buffered sparse probe hash", K.totalHashSlots * K.hashFrames * 8, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
+    this.stateBuffer = createBuffer(d, "probe counters, ray prefixes, and diagnostics", K.stateWords * 4, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
     this.probeMetaBuffer = createBuffer(d, "sparse probe metadata", K.totalProbeMeta * 16, GPU.STORAGE | GPU.COPY_DST);
     this.accumBuffer = createBuffer(d, "fixed-point ray intervals", K.totalDirectionData * 5 * 4, GPU.STORAGE | GPU.COPY_DST);
     this.coneBuffer = createBuffer(d, "merged radiance cones", K.totalDirectionData * 16, GPU.STORAGE | GPU.COPY_DST);
-    this.irradianceBuffer = createBuffer(d, "double-buffered 6x6 probe irradiance", K.probeCaps[0] * K.irradianceTexels * K.irradianceFrames * 16, GPU.STORAGE | GPU.COPY_DST);
+    this.irradianceBuffer = createBuffer(d, "double-buffered 6x6 probe irradiance", K.probeCaps[0] * K.irradianceTexels * K.irradianceFrames * 16, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
     this.passBuffers = [0, 1, 2, 3].map((i) => makePassBuffer(d, i));
     this.shadowSampler = d.createSampler({ compare: "less-equal", minFilter: "linear", magFilter: "linear" });
     this.rasterBindGroup = d.createBindGroup({
@@ -292,6 +300,15 @@ class SplitRadianceCascades {
     this.giHeight = Math.max(1, Math.ceil(height / quality.giDivisor));
     this.raysPerSample = quality.raysPerSample;
     this.device.queue.writeBuffer(this.passBuffers[0], 0, new Uint32Array([0, this.raysPerSample, 0, 0]));
+    this.probeMetaBuffer?.destroy();
+    const hitRecordVec4s = this.giWidth * this.giHeight * this.raysPerSample * 4;
+    this.probeMetaBuffer = createBuffer(
+      this.device,
+      "sparse probe metadata and double-buffered secondary hit records",
+      (K.totalProbeMeta + hitRecordVec4s) * 16,
+      GPU.STORAGE | GPU.COPY_DST,
+    );
+    this.historyValid = false;
     this.canvas.width = width;
     this.canvas.height = height;
     for (const texture of this.gbuffer || []) texture.destroy();
@@ -345,6 +362,8 @@ class SplitRadianceCascades {
         { binding: 5, resource: this.shadowSampler },
         { binding: 6, resource: { buffer: this.hashBuffer } },
         { binding: 7, resource: { buffer: this.irradianceBuffer } },
+        { binding: 8, resource: { buffer: this.coneBuffer } },
+        { binding: 9, resource: { buffer: this.accumBuffer } },
       ],
     });
   }
@@ -414,7 +433,9 @@ class SplitRadianceCascades {
     const sunDistance = this.scene.radius * 1.8 + 30;
     const lightPosition = sub3(this.camera.target, mul3(sunDirection, sunDistance));
     const sunView = mat4LookAt(lightPosition, this.camera.target, Math.abs(sunDirection[1]) > 0.95 ? [0, 0, 1] : [0, 1, 0]);
-    const extent = Math.max(8, this.scene.radius * 0.78);
+    // Cover the full scene bounding sphere. A tighter crop produced bright
+    // unshadowed wedges whenever a camera-visible corner left the sun frustum.
+    const extent = Math.max(10, this.scene.radius * 1.18);
     const sunProjection = mat4Ortho(-extent, extent, -extent, extent, 0.1, sunDistance * 2.3);
     const sunVP = mat4Multiply(sunProjection, sunView);
     const pointAngle = sunTime * 0.67 + this.sceneIndex;
@@ -427,7 +448,8 @@ class SplitRadianceCascades {
     const u = new Float32Array(64);
     u.set(viewProjection, 0);
     u.set(sunVP, 16);
-    u.set([...cameraPosition, 1], 32);
+    const featureFlags = (this.multibounce ? 1 : 0) | (this.roughSpecular ? 2 : 0) | (this.cMinusOne ? 4 : 0);
+    u.set([...cameraPosition, featureFlags], 32);
     u.set([...sunDirection, seconds], 36);
     u.set([1.0, 0.84, 0.63, this.scene.sun], 40);
     u.set([...pointPosition, this.scene.radius * 0.72], 44);
@@ -435,7 +457,10 @@ class SplitRadianceCascades {
     u.set([...this.scene.env, this.scene.baseSpacing], 52);
     u.set([this.width, this.height, this.giWidth, this.giHeight], 56);
     const frameParity = this.frameIndex & 1;
-    const historyBlend = this.temporalStability && this.historyValid ? 0.88 : 0;
+    // A long world-space half-life removes the last allocator/visibility
+    // shimmer under camera motion. Exact-key rejection still makes
+    // disocclusions immediate, while animated lighting remains smooth.
+    const historyBlend = this.temporalStability && this.historyValid ? 0.96 : 0;
     u.set([this.indirectStrength, 1.0, this.debugMode, frameParity + historyBlend], 60);
     this.device.queue.writeBuffer(this.frameBuffer, 0, u);
   }
@@ -491,6 +516,11 @@ class SplitRadianceCascades {
     pass.setBindGroup(0, this.computeBindGroups[0]);
     pass.dispatchWorkgroups(Math.ceil(this.giWidth / 8), Math.ceil(this.giHeight / 8));
     pass.end();
+    pass = encoder.beginComputePass({ label: "initialize secondary multibounce probes" });
+    pass.setPipeline(this.computePipelines.initSecondary);
+    pass.setBindGroup(0, this.computeBindGroups[0]);
+    pass.dispatchWorkgroups(Math.ceil(this.giWidth / 8), Math.ceil(this.giHeight / 8), this.raysPerSample);
+    pass.end();
     for (let cascade = 1; cascade < 4; cascade++) {
       pass = encoder.beginComputePass({ label: `initialize cascade ${cascade}` });
       pass.setPipeline(this.computePipelines.initHigher);
@@ -499,8 +529,21 @@ class SplitRadianceCascades {
       pass.end();
     }
 
+    for (let cascade = 3; cascade >= 0; cascade--) {
+      pass = encoder.beginComputePass({ label: `assign hierarchical R2 offsets c${cascade}` });
+      pass.setPipeline(this.computePipelines.assignOffsets);
+      pass.setBindGroup(0, this.computeBindGroups[cascade]);
+      pass.dispatchWorkgroups(Math.ceil(K.probeCaps[cascade] / 64));
+      pass.end();
+    }
+
     pass = encoder.beginComputePass({ label: "trace and split surface rays" });
     pass.setPipeline(this.computePipelines.splitRays);
+    pass.setBindGroup(0, this.computeBindGroups[0]);
+    pass.dispatchWorkgroups(Math.ceil(this.giWidth / 8), Math.ceil(this.giHeight / 8), this.raysPerSample);
+    pass.end();
+    pass = encoder.beginComputePass({ label: "trace secondary multibounce rays" });
+    pass.setPipeline(this.computePipelines.splitSecondary);
     pass.setBindGroup(0, this.computeBindGroups[0]);
     pass.dispatchWorkgroups(Math.ceil(this.giWidth / 8), Math.ceil(this.giHeight / 8), this.raysPerSample);
     pass.end();
@@ -691,6 +734,12 @@ class SplitRadianceCascades {
       this.temporalStability = e.target.checked;
       this.resetProbeHistory();
     });
+    on($("multibounce"), "change", (e) => {
+      this.multibounce = e.target.checked;
+      this.resetProbeHistory();
+    });
+    on($("rough-specular"), "change", (e) => { this.roughSpecular = e.target.checked; });
+    on($("c-minus-one"), "change", (e) => { this.cMinusOne = e.target.checked; });
     on($("show-profiler"), "change", (e) => { $("pass-profiler").hidden = !e.target.checked; });
     on($("run-validation"), "click", () => this.runValidation());
     on($("close-audit"), "click", () => { $("audit-card").hidden = true; });
@@ -731,6 +780,102 @@ class SplitRadianceCascades {
     }
   }
 
+  async readGpuBuffer(source, size, label) {
+    const readback = createBuffer(this.device, label, size, GPU.COPY_DST | GPU.MAP_READ);
+    const encoder = this.device.createCommandEncoder({ label });
+    encoder.copyBufferToBuffer(source, 0, readback, 0, size);
+    this.device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(MAP.READ);
+    const bytes = readback.getMappedRange().slice(0);
+    readback.unmap();
+    readback.destroy();
+    return bytes;
+  }
+
+  async measureWorldProbeStability() {
+    await this.device.queue.onSubmittedWorkDone();
+    const hashBytes = K.totalHashSlots * K.hashFrames * 8;
+    const irradianceBytes = K.probeCaps[0] * K.irradianceTexels * K.irradianceFrames * 16;
+    const [hashData, irradianceData] = await Promise.all([
+      this.readGpuBuffer(this.hashBuffer, hashBytes, "stability hash readback"),
+      this.readGpuBuffer(this.irradianceBuffer, irradianceBytes, "stability irradiance readback"),
+    ]);
+    const hash = new Uint32Array(hashData);
+    const fields = new Float32Array(irradianceData);
+    const current = (this.frameIndex - 1) & 1;
+    const previous = 1 - current;
+    const frameMap = (frame) => {
+      const map = new Map();
+      const base = frame * K.totalHashSlots * 2;
+      for (let slot = 0; slot < K.hashSizes[0]; slot++) {
+        const key = hash[base + slot * 2];
+        const index = hash[base + slot * 2 + 1];
+        if (key !== 0xffffffff && (key & 0x40000000) === 0 && index < K.probeCaps[0]) map.set(key, index);
+      }
+      return map;
+    };
+    const currentMap = frameMap(current);
+    const previousMap = frameMap(previous);
+    const luminance = (frame, probe) => {
+      const base = (frame * K.probeCaps[0] * K.irradianceTexels + probe * K.irradianceTexels) * 4;
+      let sum = 0;
+      for (let texel = 0; texel < K.irradianceTexels; texel++) {
+        const i = base + texel * 4;
+        sum += fields[i] * 0.2126 + fields[i + 1] * 0.7152 + fields[i + 2] * 0.0722;
+      }
+      return sum / K.irradianceTexels;
+    };
+    const relative = [];
+    const absolute = [];
+    for (const [key, probe] of currentMap) {
+      const oldProbe = previousMap.get(key);
+      if (oldProbe == null) continue;
+      const a = luminance(current, probe);
+      const b = luminance(previous, oldProbe);
+      const delta = Math.abs(a - b);
+      absolute.push(delta);
+      relative.push(delta / Math.max(0.05, (a + b) * 0.5));
+    }
+    relative.sort((a, b) => a - b);
+    absolute.sort((a, b) => a - b);
+    const percentile = (values, p) => values.length ? values[Math.min(values.length - 1, Math.floor((values.length - 1) * p))] : Infinity;
+    return {
+      matchedProbes: relative.length,
+      medianRelative: percentile(relative, 0.5),
+      p95Relative: percentile(relative, 0.95),
+      p99Relative: percentile(relative, 0.99),
+      p95Absolute: percentile(absolute, 0.95),
+      maxAbsolute: absolute.at(-1) ?? Infinity,
+    };
+  }
+
+  async runMotionStabilityAudit({ samples = 5, interval = 4, warmup = 32 } = {}) {
+    const previousCamera = this.animateCamera;
+    const previousLights = this.animateLights;
+    this.animateCamera = true;
+    this.animateLights = false;
+    await this.waitFrames(warmup);
+    const measurements = [];
+    for (let i = 0; i < samples; i++) {
+      await this.waitFrames(interval);
+      measurements.push(await this.measureWorldProbeStability());
+    }
+    this.animateCamera = previousCamera;
+    this.animateLights = previousLights;
+    const valid = measurements.filter((m) => Number.isFinite(m.p95Relative) && m.matchedProbes >= 16);
+    const maximum = (name) => valid.length ? Math.max(...valid.map((m) => m[name])) : Infinity;
+    const minimum = (name) => valid.length ? Math.min(...valid.map((m) => m[name])) : 0;
+    return {
+      samples: valid.length,
+      matchedProbesMin: minimum("matchedProbes"),
+      p95RelativeMax: maximum("p95Relative"),
+      p99RelativeMax: maximum("p99Relative"),
+      p95AbsoluteMax: maximum("p95Absolute"),
+      passed: valid.length === samples && maximum("p95Relative") <= 0.015 && maximum("p95Absolute") <= 0.012,
+      measurements,
+    };
+  }
+
   metricsSnapshot() {
     const avg = this.frameSamples.slice(-60).reduce((a,b)=>a+b,0) / Math.max(1,Math.min(60,this.frameSamples.length));
     const gpu = this.gpuSamples.length ? this.gpuSamples.slice(-8).reduce((a,b)=>a+b,0)/Math.min(8,this.gpuSamples.length) : null;
@@ -764,14 +909,15 @@ class SplitRadianceCascades {
       await this.loadScene(i);
       await this.waitFrames(framesPerScene);
       const result = this.metricsSnapshot();
+      result.motionStability = await this.runMotionStabilityAudit({ samples: 4, interval: 3, warmup: 32 });
       results.push(result);
       $("audit-report").textContent = results.map((r) =>
-        `${String(r.scene+1).padStart(2,"0")} ${r.name.padEnd(28)} ${r.fps.toFixed(0).padStart(3)} FPS  ${r.gpuMs == null ? "CPU timing" : `${r.gpuMs.toFixed(2)} ms GPU`}  ${r.triangles.toLocaleString()} tris  ${r.probes.reduce((a,b)=>a+b,0)} probes  overflow ${r.overflows}`
+        `${String(r.scene+1).padStart(2,"0")} ${r.name.padEnd(28)} ${r.fps.toFixed(0).padStart(3)} FPS  ${r.gpuMs == null ? "CPU timing" : `${r.gpuMs.toFixed(2)} ms GPU`}  ${r.triangles.toLocaleString()} tris  ${r.probes.reduce((a,b)=>a+b,0)} probes  flicker p95 ${(r.motionStability.p95RelativeMax*100).toFixed(2)}%  overflow ${r.overflows}`
       ).join("\n");
     }
     const minFps = Math.min(...results.map((r) => r.fps));
     const maxGpu = Math.max(0, ...results.map((r) => r.gpuMs || 0));
-    const failures = results.filter((r) => r.overflows || r.gpuError);
+    const failures = results.filter((r) => r.overflows || r.gpuError || !r.motionStability.passed);
     const report = {
       timestamp: new Date().toISOString(),
       adapter: this.adapterInfo(),

@@ -2,11 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { computeShader, finalShader, shaderConstants } from "../public/rc/shaders.js";
 
-test("world-space sampling and probe history are double-buffered", () => {
+test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
   assert.equal(shaderConstants.hashFrames, 2);
   assert.equal(shaderConstants.irradianceFrames, 2);
-  assert.match(computeShader, /stableCell=vec3i\(floor\(world\.xyz\/stableScale\)\)/);
-  assert.match(computeShader, /lookupProbeFrame\(0u,key,previousFrame\)/);
+  assert.match(computeShader, /fn assignRayOffsets/);
+  assert.match(computeShader, /RAY_COUNT_OFFSET/);
+  assert.match(computeShader, /RAY_OFFSET_OFFSET/);
+  assert.match(computeShader, /sequenceIndex=atomicLoad/);
+  assert.match(computeShader, /let overlapStart = boundary \* 0\.9/);
+  assert.match(computeShader, /lookupProbeFrame\(0u,keyFromCell\(cell\+bits,lod\),previousFrame\)/);
   assert.match(computeShader, /filtered=mix\(filtered,history,blend\)/);
   assert.match(finalShader, /frameIndex\*IRRADIANCE_FRAME_STRIDE/);
+});
+
+test("paper extension paths are present in the production shader", () => {
+  assert.match(computeShader, /fn sampleSecondaryHistory/);
+  assert.match(computeShader, /fn initSecondary/);
+  assert.match(computeShader, /fn splitSecondaryRays/);
+  assert.match(finalShader, /fn roughSpecularLod/);
+  assert.match(finalShader, /fn screenSpaceCMinusOne/);
 });

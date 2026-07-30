@@ -3,133 +3,126 @@
 ## Frame graph
 
 ```text
-Sun depth pass
-      |
-      v
-G-buffer (world position, normal, albedo/emission, depth)
-      |
-      v
-Reset sparse hash and fixed-point accumulators
-      |
-      v
-Insert c0 probes from visible surfaces
-      |
-      v
-Initialize c1 -> c3 nearest parents
-      |
-      v
-Trace quality-dependent, world-keyed R2 rays per GI surface sample
-      |
-      v
-Split each ray into (J, beta) cascade intervals and atomically deposit
-      |
-      v
-Merge c3 -> c0, four angular children per lower direction,
-with sparse trilinear spatial interpolation
-      |
-      v
-Prefilter each c0 probe to a 6x6 octahedral irradiance field
-      |
-      v
-Blend exact matching world probes from the previous frame
-      |
-      v
-Sparse eight-probe gather + direct light + shadow + ACES composite
+sun shadow pass
+  -> G-buffer (world, two-sided normal, albedo/emission, depth)
+  -> clear current hash, counters, prefixes, and interval accumulators
+  -> insert primary c0 probes from visible surfaces
+  -> insert secondary c0 probes from previous-frame ray hits at LOD + 2
+  -> initialize c1 through c3 parents
+  -> count rays bottom-up
+  -> assign deterministic hierarchical R2 offsets c3 through c0
+  -> trace and split primary rays
+  -> trace and split secondary-cache rays
+  -> merge c3 through c0
+  -> prefilter c0 into 6x6 octahedral irradiance
+  -> exact-key temporal blend
+  -> diffuse + C(-1) + rough specular + direct composite
 ```
 
-Each operation is an independent WebGPU pass, which gives explicit memory ordering between hash initialization, interval deposition, merging, and shading.
+Every arrow is a WebGPU pass boundary, providing ordering for atomic writes and
+subsequent reads.
 
 ## Cascade configuration
 
-For cascade `n`:
+For cascade `n` and LOD `d`:
 
 ```text
-probe spacing      Δs_n = Δs_0 · 2^n
-direction count    |Ω_n| = 32 · 4^n
-ray cutoff         t_n = 1.6 · Δs_0 · 4^n
+probe spacing   ds(n,d) = ds0 * 2^(n+d)
+directions      |Omega_n| = 32 * 4^n
+cutoff          t(n,d) = 1.6 * ds0 * 2^d * 4^n
 ```
 
-The angular grid is `2Θ_n × Θ_n`, where `Θ_n = 4 · 2^n`, yielding 32, 128, 512, and 2048 directions. Direction samples use the paper's equal-area mapping:
+The angular grid is `2*Theta_n` by `Theta_n`, where
+`Theta_n = 4 * 2^n`. This yields 32, 128, 512, and 2048 equal-area
+sphere directions.
+
+## Sparse probes and LODs
+
+Each cascade owns an open-addressed hash range. A compare/exchange claims an
+empty slot and maps the key to a compact probe index. Keys contain signed
+9-bit cell coordinates, a 3-bit LOD, and a primary/secondary cache tag.
+
+Probe centers are half-cell offsets. Merging and final gathers use only
+existing trilinear neighbors and divide by the accumulated weight.
+
+LOD selection uses Chebyshev distance. A coarser LOD begins at 90% of its
+nominal boundary; both LODs are initialized and evaluated through the overlap,
+then linearly blended.
+
+## Algorithm 3 on WebGPU
+
+The base pass counts visible ray contributions per c0 probe. Higher passes sum
+child counts into their nearest parent. Offsets are then assigned from c3 to c0
+using probe-key order. Key order is important: compact indices are allocated
+concurrently and are not stable between frames.
+
+For a c0 probe, each ray obtains:
 
 ```text
-φ = 2πu
-z = 2v - 1
-r = sqrt(1 - z²)
-ω = (r cos φ, r sin φ, z)
+sequence_index = hierarchical_offset + atomic_local_rank
+direction = DecodeDir(R2(sequence_index) + global_jitter)
 ```
 
-## Sparse probes
+Stable mode sets the global jitter to zero. Turning stable history off restores
+the paper's temporally changing global jitter for single-frame inspection.
 
-Probe keys pack three signed nine-bit grid coordinates plus a three-bit LOD. Each cascade has a separate open-addressed hash range. A compare/exchange claims an empty slot; the slot maps to a compact per-cascade index.
+## Ray splitting and merge
 
-Probe centers are positioned at half-cell offsets. Final shading and cascade merging only use present trilinear neighbors and divide by their summed weight, preventing darkening at sparse boundaries.
-
-Capacity:
-
-| Cascade | Max probes | Hash slots | Directions/probe |
-|---:|---:|---:|---:|
-| c0 | 2048 | 4096 | 32 |
-| c1 | 1024 | 4096 | 128 |
-| c2 | 512 | 2048 | 512 |
-| c3 | 256 | 2048 | 2048 |
-
-The built-in audit fails visibly if insertion exceeds those caps.
-
-## Ray splitting
-
-Each valid GI sample traces a hemisphere ray from the visible surface. If a hit distance terminates in cascade `n`, lower cascades receive:
+If a surface ray terminates in cascade `n`, lower cascades receive:
 
 ```text
 J_k = 0
-beta_k = 1,  k < n
+beta_k = 1, for k < n
 ```
 
-and the terminating cascade receives:
+The terminating cascade receives the hit radiance and zero transmittance. A
+miss terminates in c3 with environment radiance. Values are accumulated as
+non-negative 20.12 fixed-point atomics because portable WebGPU does not expose
+atomic float addition.
+
+Merge evaluates:
 
 ```text
-J_n = direct_radiance_at_hit
-beta_n = 0
+I_n = J_n + beta_n * average(interpolate(I_(n+1)))
 ```
 
-A miss deposits environment radiance into the final cascade. Atomic float addition is not portable in core WebGPU, so non-negative radiance and transmittance use 20.12 fixed-point `atomic<u32>` sums plus an integer sample count. Values are range-checked before conversion.
+The four angular children of each lower direction are contiguous. Missing
+interval samples are transparent; a completely missing parent gather falls
+back to environment radiance.
 
-## Merge
+## Irradiance and extensions
 
-For each lower direction, the four corresponding directions in the next cascade are averaged. Each higher direction is itself sampled with renormalized sparse trilinear interpolation. The interval is then composed with the distant cone:
+Diffuse shading prefilters 32 c0 directions into a 6x6 octahedral field, then
+uses at most eight sparse probe reads per LOD.
 
-```text
-I_n = J_n + beta_n · average(interpolate(I_(n+1)))
-```
+The secondary cache consumes previous-frame primary hit points, initializes
+probes two LODs coarser, and samples its previous irradiance at new ray hits.
+The cache can therefore feed itself for temporally converged multiple bounces.
 
-Missing interval samples act as transparent intervals; missing higher probes fall back to environment radiance. This prevents undefined reads and isolated black pixels.
+Rough specular selects c2 as a broad cone, samples it along the reflection
+direction, then composes c1 and c0 `(J, beta)` intervals in front.
 
-## BVH
+`C(-1)` uses the paper's suggested ambient optimization: a fixed, symmetric
+screen-space near-field gather modulates the world-space diffuse result. It
+captures sub-c0 occlusion without the paper's expensive directional gather.
 
-Every procedural mesh is triangulated on the CPU. Triangle centroids are Morton-sorted and recursively partitioned into a balanced BVH with leaves of at most four triangles. Nodes and reordered triangles are uploaded once per scene. The paper's Sponza scene is prepacked at build time into a 262,267-triangle, 131,317-node BVH and delivered as a 9.3 MB same-origin compressed payload.
+## Stability and diagnostics
 
-WGSL traversal uses a fixed 32-entry stack, sufficient for the balanced trees in the validation suite (maximum depth is below 16). Shadow rays use the same traversal.
+Hash and irradiance storage are double-buffered. Temporal reuse first looks up
+the exact previous world/LOD/cache key; missing, disoccluded, or LOD-changed
+probes reject history. The default history weight is 0.96.
 
-## Stability
+The in-app audit reads both world-probe frames back, joins them by key, and
+reports median, p95, and p99 irradiance deltas while the camera moves and lights
+are frozen. It also records FPS, GPU timestamps, ray/probe counts, overflows,
+and WebGPU errors for every scene.
 
-The R2 sequence is derived from quantized world position, normal, LOD, and the per-sample lane rather than the screen-pixel index. Camera motion therefore does not scramble a surface's directional sample set.
-
-The sparse hash and 6×6 irradiance field are double-buffered. After the current frame is prefiltered, the shader looks up the same probe key in the previous frame and blends only an exact world/LOD match. Newly visible or LOD-changed probes reject history automatically. Scene changes clear both history frames.
-
-This is intentionally not screen-space reprojection: camera motion cannot drag old light across geometry. A frozen color-bleed viewport produced zero changed channels across two captures 800 ms apart after settling.
-
-The implementation does not use the paper's exact Algorithm 3 hierarchical
-prefix-sum allocator. It uses deterministic world-keyed sequence assignment,
-which is a WebGPU-portability tradeoff and is documented rather than presented
-as full feature parity.
-
-## Safety and recovery
+## Safety and portability
 
 - high-performance adapter request
-- adapter-limit check before buffer creation
+- adapter-limit checks
 - shader/pipeline validation error scope
-- uncaptured error monitoring
-- device-loss reporting
+- device-loss and uncaptured-error reporting
 - bounded hash probing and BVH traversal
 - capacity and finite-value guards
-- secure, same-origin Netlify headers
-- no external runtime dependencies or network requests
+- same-origin assets and no runtime trackers
