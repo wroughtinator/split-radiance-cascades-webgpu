@@ -1,0 +1,44 @@
+{
+  "date": "2026-07-30",
+  "adapter": {
+    "vendor": "nvidia",
+    "architecture": "blackwell",
+    "description": "NVIDIA GeForce RTX 5080",
+    "timestampQuery": true
+  },
+  "quality": "balanced",
+  "resolution": [1152, 648],
+  "giResolution": [192, 108],
+  "raysPerGiSample": 2,
+  "displayRefreshHz": 60,
+  "passed": true,
+  "criteria": {
+    "minimumFps": 30,
+    "maximumProbeOverflows": 0,
+    "maximumWebGpuErrors": 0
+  },
+  "scenes": [
+    {"id": 1, "name": "Color bleed laboratory", "fps": 60, "gpuMs": 0.52, "triangles": 820, "probes": 1540, "overflows": 0},
+    {"id": 2, "name": "Sponza atrium (paper scene)", "fps": 60, "gpuMs": 1.84, "triangles": 262267, "probes": 720, "overflows": 0},
+    {"id": 3, "name": "Concave canyon heightfield", "fps": 60, "gpuMs": 0.62, "triangles": 12184, "probes": 1427, "overflows": 0},
+    {"id": 4, "name": "Dense lantern forest", "fps": 60, "gpuMs": 0.72, "triangles": 6768, "probes": 1678, "overflows": 0},
+    {"id": 5, "name": "Multi-level atrium", "fps": 60, "gpuMs": 0.39, "triangles": 1552, "probes": 1175, "overflows": 0},
+    {"id": 6, "name": "Industrial pipe maze", "fps": 60, "gpuMs": 0.52, "triangles": 5268, "probes": 1178, "overflows": 0},
+    {"id": 7, "name": "Sun temple", "fps": 60, "gpuMs": 0.52, "triangles": 2480, "probes": 1103, "overflows": 0},
+    {"id": 8, "name": "Orbital sculpture field", "fps": 60, "gpuMs": 0.59, "triangles": 8204, "probes": 1131, "overflows": 0},
+    {"id": 9, "name": "Night market", "fps": 60, "gpuMs": 0.52, "triangles": 2220, "probes": 879, "overflows": 0},
+    {"id": 10, "name": "Megacity stress grid", "fps": 60, "gpuMs": 0.85, "triangles": 13496, "probes": 1334, "overflows": 0}
+  ],
+  "temporalStability": {
+    "scene": "Color bleed laboratory",
+    "view": "indirect only",
+    "camera": "frozen",
+    "lights": "frozen",
+    "settlingMilliseconds": 2200,
+    "frameIntervalMilliseconds": 800,
+    "viewportChannelsCompared": 1478400,
+    "changedChannels": 0,
+    "meanChannelDelta": 0,
+    "maximumChannelDelta": 0
+  }
+}
