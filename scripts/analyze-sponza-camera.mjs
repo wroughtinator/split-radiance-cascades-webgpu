@@ -12,6 +12,7 @@ const triangles = new Float32Array(
   packed.byteOffset + 64 + vertexBytes + nodeBytes,
   header[4],
 );
+const triangleStride = header[4] / header[7];
 
 function rayBox(origin, inverse, offset, limit) {
   let near = 0;
@@ -63,7 +64,7 @@ function trace(origin, direction, maxDistance = 100) {
     const right = nodeWords[offset + 7];
     if (left & 0x80000000) {
       const first = left & 0x7fffffff;
-      for (let i = 0; i < right; i++) result = rayTriangle(origin, direction, (first + i) * 28, result);
+      for (let i = 0; i < right; i++) result = rayTriangle(origin, direction, (first + i) * triangleStride, result);
     } else {
       stack.push(left, right);
     }

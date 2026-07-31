@@ -41,7 +41,7 @@ class Geometry {
     this.vertex(a, ns[0], albedo, emissive);
     this.vertex(b, ns[1], albedo, emissive);
     this.vertex(c, ns[2], albedo, emissive);
-    this.triangles.push({ a, b, c, albedo, emissive });
+    this.triangles.push({ a, b, c, albedo, emissive, normals: ns });
   }
 
   quad(a, b, c, d, color = C.white, emissive = [0, 0, 0]) {
@@ -185,7 +185,7 @@ async function loadPackedSponzaGeometry() {
       const stream = response.body.pipeThrough(new DecompressionStream("gzip"));
       const packed = await new Response(stream).arrayBuffer();
       const header = new Uint32Array(packed, 0, 8);
-      if (header[0] !== 0x31424352 || header[1] !== 2) {
+      if (header[0] !== 0x31424352 || header[1] !== 3) {
         throw new Error("The Sponza geometry package is invalid or uses an unsupported version.");
       }
       const [, , vertexFloats, nodeFloats, triangleFloats, vertexCount, nodeCount, triangleCount] = header;
@@ -216,7 +216,7 @@ async function loadPackedSponzaGeometry() {
 
 export const SCENE_INFO = [
   {name:"Color bleed laboratory",short:"Lab",description:"Near-field red/green transfer, hard occluders, emissive geometry, and moving dual lights."},
-  {name:"Sponza atrium (paper scene)",short:"Sponza",description:"The official 262k-triangle Crytek Sponza geometry and base-color materials used for the paper comparison, with full software-BVH traversal."},
+  {name:"Sponza atrium (paper scene)",short:"Sponza",description:"The official 262k-triangle Crytek Sponza geometry, recreated neutral/cyan paper palette, and red area emitter, with exact software-BVH traversal."},
   {name:"Concave canyon heightfield",short:"Canyon",description:"A 72×72 terrain mesh with nested craters, ravines, overhangs, and a moving low sun."},
   {name:"Dense lantern forest",short:"Forest",description:"Thousands of thin triangles, deep occlusion, high-frequency foliage, and colored moving lanterns."},
   {name:"Multi-level atrium",short:"Atrium",description:"Stairs, balconies, skylight transfer, curved sculptures, and cross-floor indirect illumination."},
@@ -334,7 +334,11 @@ function buildScene8(g) {
     const canopy=i%2?C.yellow:C.violet;
     g.quad([x-2,2,z-2],[x+2,2,z-2],[x+1.6,3.1,z+1.8],[x-1.6,3.1,z+1.8],canopy);
     const e=i%3===0?[4.5,0.3,0.12]:i%3===1?[0.15,1.3,4.8]:[0.15,4.0,0.7];
-    g.sphere([x,2.5,z],0.22,[0.8,0.8,0.8],e,5,8);
+    // Keep each lantern above the base cascade's angular resolution. Tiny
+    // point-like emissive triangles alias into rare temporal fireflies; these
+    // are still compact area emitters, but large enough to be sampled
+    // consistently by the paper's 32 c0 directions.
+    g.sphere([x,2.5,z],0.45,[0.8,0.8,0.8],e,7,12);
   }
   for(let i=0;i<12;i++)g.cylinder([-16+i*2.9,2.3,0],0.08,4.6,C.metal,7);
   return {camera:[28,12,28],target:[0,1.2,0],baseSpacing:1.1,env:[0.003,0.006,0.018],sun:0.35};
@@ -363,9 +367,9 @@ export function createScene(index) {
     return loadPackedSponzaGeometry().then((geometry) => ({
       id: index,
       ...SCENE_INFO[index],
-      camera: [-8.0, 8.5, -0.5],
+      camera: [-8.0, 8.0, -0.5],
       target: [5.0, 2.0, -0.5],
-      baseSpacing: 0.82,
+      baseSpacing: 0.55,
       env: [0.55, 0.65, 0.82],
       sun: 5.2,
       geometry,

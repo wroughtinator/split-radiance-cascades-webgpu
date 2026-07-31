@@ -26,40 +26,61 @@ is required.
 - directional screen-space `C(-1)` interval merging (optional extension)
 
 WebGPU does not expose a portable hardware ray-tracing pipeline. Rays and
-shadow queries therefore traverse a balanced triangle BVH in WGSL. This
+shadow queries therefore traverse a binned-SAH triangle BVH in WGSL. This
 changes the traversal backend, not the Split RC interval or merge math.
+The equation-by-equation audit is in
+[PAPER-COVERAGE.md](./PAPER-COVERAGE.md).
 
 ## Stability
 
-The default paper baseline is single-bounce Split RC. The paper's multibounce,
-rough-specular, and directional `C(-1)` experiments are explicit opt-in
-extensions so a screen-space term is never silently mixed into the baseline.
+The ten-scene baseline is single-bounce Split RC. Sponza opens in the paper's
+multibounce showcase configuration for presentation quality; its checkbox can
+return immediately to the single-bounce comparison. Rough-specular and
+directional `C(-1)` experiments remain explicit opt-in extensions.
 
-Stable mode freezes the paper's global R2 jitter, uses a deterministic
-screen-sample seed, canonicalizes sparse probe indices in hash-slot order, and
-uses probe-key ordering for Algorithm 3 offsets. Adjacent LODs cross-fade
-across the paper's 0.9 overlap and history only accumulates exact
-world/LOD/cache key matches. There is no screen-space reprojection.
+Stable mode advances a deterministic global low-discrepancy temporal rotation,
+uses exact canonical screen-sample ranks, canonicalizes sparse probe indices
+by key, and uses the paper's hierarchical key-ordered Algorithm 3 offsets.
+Directional `(J, beta)` intervals accumulate only on exact world/LOD/cache key
+matches. Adjacent LODs cross-fade across the paper's 0.9 overlap. There is no
+stochastic full-resolution GI trace: the GI grid is 192x108 in Balanced mode.
 
-The built-in audit now has three independent gates:
+The sparse hierarchy retains prior probes inside a bounded view guard so
+trilinear neighborhoods and parent ancestry do not pop as the camera moves.
+After the paper's world-space interval accumulation, a production presentation
+resolve reprojects the tone-mapped result by world position and surface normal.
+It rejects disocclusions and normal changes, so it stabilizes sparse-to-screen
+reconstruction without smearing newly visible geometry. This final resolve is
+an explicitly documented browser-production extension, not a paper equation.
+
+Stable mode explores 32 temporal rotations, then freezes the converged global
+rotation. With paused lighting, exact-key intervals also lock as suggested by
+the paper's semi-static temporal path; animated lights continue adapting at a
+0.96 history blend.
+
+The built-in audit has four independent gates:
 
 - matched world-probe irradiance while the camera moves
 - two separately initialized runs of the same camera trajectory, compared from
   the final 8-bit framebuffer
+- uninterrupted adjacent moving-camera frames compared after world-position
+  reprojection (baseline and multibounce)
 - a deterministic 128-spp cosine-weighted BVH path-traced reference for Sponza
 
-On the development NVIDIA RTX 5080, all ten framebuffer trajectory tests were
-byte-identical at every tested pose except two Sponza captures with a worst
-single-channel difference of 1/255; Sponza's p99 difference was 0/255. This
-directly covers the final image rather than inferring stability from probe
-values.
+On the development NVIDIA RTX 5080, independent Sponza trajectory replays
+measured 0/255 at p95 in both modes (p99 0/255 baseline and 1/255
+multibounce). Across 31 consecutive moving-camera comparisons, baseline and
+multibounce both measured 2/255 at p95 and 8/255 at p99 after world
+reprojection, with 99.5%-trimmed RMSE of 1.27/255 and 1.24/255. This directly
+covers the final image rather than inferring stability from probe values.
 
 ## Ten validation scenes
 
 1. Color bleed laboratory - near-field transfer and emissive geometry.
 2. Sponza atrium - the official Crytek/Khronos model used in the paper,
-   prepacked as 262,267 triangles, a 131,317-node BVH, and a 4096px atlas made
-   from all 25 official base-color materials.
+   prepacked with the paper-style neutral/cyan material preset and a real red
+   area-emitter quad as 262,269 triangles, a 158,359-node SAH BVH, and a
+   4096px atlas made from all 25 official base-color materials.
 3. Concave canyon heightfield - a 72x72 terrain with craters and ravines.
 4. Dense lantern forest - thousands of thin foliage triangles.
 5. Multi-level atrium - stairs, balconies, skylight, and curved sculptures.
@@ -79,14 +100,21 @@ rough specular, `C(-1)`, and stable history.
 Balanced mode was validated at a 1152x648 render resolution with a 192x108 GI
 grid and 12 primary rays per visible GI sample:
 
-- all ten scenes passed the final-frame repeatability and world-probe gates
-- full GPU frame time remained below 11.6 ms
-- the 262k-triangle textured Sponza scene measured 11.53 ms
-- zero sparse-hash/probe-capacity overflows
-- zero uncaptured WebGPU validation errors
-- Sponza passed the independent path-traced-reference thresholds (50.7% raw
-  NRMSE, 35.3% scale-invariant NRMSE, and 0.159 scene-linear p95 absolute
-  irradiance error)
+- ordinary Sponza profiling measured 10.42 ms single-bounce and 11.73 ms
+  multibounce at 60 FPS; the exhaustive audit's worst Sponza sample was
+  14.02 ms
+- both baseline and multibounce Sponza trajectory replays measured 0/255 at
+  p95, and both uninterrupted 32-frame camera-motion tests measured 2/255 at
+  p95 and 8/255 at p99
+- exact matched Sponza world probes changed by 0.83% at p95 during camera
+  motion, with zero sparse/BVH overflows or WebGPU errors
+- the independent reference gate measured 48.25% raw NRMSE, 47.21% raw
+  scale-invariant NRMSE, 27.21% low-frequency scale-invariant NRMSE, 0.198
+  scene-linear p95 error, 1.00% severe under-light outliers, and 8.41%
+  bright-leak candidates
+- all ten production scenes passed final-frame replay, continuous-camera,
+  world-probe, overflow, and device-error gates; the audit's minimum sampled
+  rate was 55.4 FPS
 
 The reference numbers are not a claim of exact path-traced equality: Split RC
 is a biased sparse estimator, and the paper documents interpolation leaks,

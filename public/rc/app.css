@@ -89,6 +89,9 @@ button:hover { border-color: rgba(155,255,214,.45); background: rgba(155,255,214
 .audit-heading button { width: 30px; height: 30px; font-size: 19px; }
 .audit-progress { height: 2px; background: #ffffff14; }
 .audit-progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .35s; }
+.reference-visual { padding: 14px 20px 0; }
+.reference-visual > div { display: grid; grid-template-columns: repeat(3, 1fr); margin-bottom: 6px; color: var(--muted); font-size: 8px; letter-spacing: .08em; text-align: center; text-transform: uppercase; }
+.reference-visual canvas { display: block; width: 100%; height: auto; border: 1px solid var(--line); image-rendering: pixelated; }
 .audit-card pre { max-height: 330px; overflow: auto; margin: 0; padding: 18px 20px 22px; color: #a9bbb5; font: 10px/1.7 inherit; white-space: pre-wrap; }
 .help { position: absolute; z-index: 2; left: 50%; bottom: 27px; transform: translateX(-50%); display: flex; gap: 16px; font-size: 9px; color: var(--muted); }
 kbd { color: var(--ink); border: 1px solid var(--line); padding: 3px 5px; background: #080d0eb8; }

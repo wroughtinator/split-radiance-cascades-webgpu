@@ -142,51 +142,174 @@ export function packProbeKey(position, spacing, lod = 0) {
   return ((p[0] | (p[1] << 9) | (p[2] << 18) | ((lod & 7) << 27)) >>> 0);
 }
 
-function expandBits(v) {
-  v = (v * 0x00010001) & 0xff0000ff;
-  v = (v * 0x00000101) & 0x0f00f00f;
-  v = (v * 0x00000011) & 0xc30c30c3;
-  v = (v * 0x00000005) & 0x49249249;
-  return v >>> 0;
-}
-
-function morton3(x, y, z) {
-  return (expandBits(x) | (expandBits(y) << 1) | (expandBits(z) << 2)) >>> 0;
+function packOctNormal(normal) {
+  const n = normalize3(normal);
+  const inverseL1 = 1 / Math.max(1e-12, Math.abs(n[0]) + Math.abs(n[1]) + Math.abs(n[2]));
+  let x = n[0] * inverseL1;
+  let y = n[1] * inverseL1;
+  if (n[2] < 0) {
+    const oldX = x;
+    x = (1 - Math.abs(y)) * Math.sign(oldX || 1);
+    y = (1 - Math.abs(oldX)) * Math.sign(y || 1);
+  }
+  const encode = (value) => clamp(Math.round((value * 0.5 + 0.5) * 65535), 0, 65535);
+  return (encode(x) | (encode(y) << 16)) >>> 0;
 }
 
 export function buildBVH(triangles, maxLeaf = 4) {
   if (!triangles.length) {
-    return { nodes: new Float32Array(16), triangles: new Float32Array(28), nodeCount: 1 };
+    return { nodes: new Float32Array(16), triangles: new Float32Array(32), nodeCount: 1 };
   }
-  const bounds = { min: [Infinity,Infinity,Infinity], max: [-Infinity,-Infinity,-Infinity] };
-  const refs = triangles.map((t, index) => {
-    const c = [(t.a[0]+t.b[0]+t.c[0])/3,(t.a[1]+t.b[1]+t.c[1])/3,(t.a[2]+t.b[2]+t.c[2])/3];
-    for (let k=0;k<3;k++) { bounds.min[k]=Math.min(bounds.min[k],c[k]); bounds.max[k]=Math.max(bounds.max[k],c[k]); }
-    return { t, index, c, code: 0 };
+  const refs = triangles.map((t) => {
+    const min = [
+      Math.min(t.a[0], t.b[0], t.c[0]),
+      Math.min(t.a[1], t.b[1], t.c[1]),
+      Math.min(t.a[2], t.b[2], t.c[2]),
+    ];
+    const max = [
+      Math.max(t.a[0], t.b[0], t.c[0]),
+      Math.max(t.a[1], t.b[1], t.c[1]),
+      Math.max(t.a[2], t.b[2], t.c[2]),
+    ];
+    return {
+      t,
+      min,
+      max,
+      c: [(min[0]+max[0])*0.5,(min[1]+max[1])*0.5,(min[2]+max[2])*0.5],
+    };
   });
-  const extent = bounds.max.map((v,k)=>Math.max(1e-6,v-bounds.min[k]));
-  for (const r of refs) {
-    const q=r.c.map((v,k)=>clamp(Math.floor((v-bounds.min[k])/extent[k]*1023),0,1023));
-    r.code=morton3(q[0],q[1],q[2]);
-  }
-  refs.sort((a,b)=>a.code-b.code);
+  const surfaceArea = (min, max) => {
+    const x = Math.max(0, max[0]-min[0]);
+    const y = Math.max(0, max[1]-min[1]);
+    const z = Math.max(0, max[2]-min[2]);
+    return 2*(x*y+x*z+y*z);
+  };
+  const BIN_COUNT = 16;
+  const scratch = [];
+  const scratchForDepth = (depth) => {
+    if (!scratch[depth]) {
+      scratch[depth] = {
+        counts: new Uint32Array(BIN_COUNT),
+        mins: new Float64Array(BIN_COUNT*3),
+        maxs: new Float64Array(BIN_COUNT*3),
+        leftCounts: new Uint32Array(BIN_COUNT-1),
+        rightCounts: new Uint32Array(BIN_COUNT-1),
+        leftAreas: new Float64Array(BIN_COUNT-1),
+        rightAreas: new Float64Array(BIN_COUNT-1),
+      };
+    }
+    return scratch[depth];
+  };
   const nodes=[];
   const ordered=[];
-  const build=(start,end)=>{
+  const build=(start,end,depth=0)=>{
     const nodeIndex=nodes.length;
     const node={min:[Infinity,Infinity,Infinity],max:[-Infinity,-Infinity,-Infinity],left:0,right:0,leaf:false};
     nodes.push(node);
+    const centroidMin=[Infinity,Infinity,Infinity];
+    const centroidMax=[-Infinity,-Infinity,-Infinity];
     for(let i=start;i<end;i++){
-      for(const p of [refs[i].t.a,refs[i].t.b,refs[i].t.c]){
-        for(let k=0;k<3;k++){node.min[k]=Math.min(node.min[k],p[k]);node.max[k]=Math.max(node.max[k],p[k]);}
+      const ref=refs[i];
+      for(let axis=0;axis<3;axis++){
+        node.min[axis]=Math.min(node.min[axis],ref.min[axis]);
+        node.max[axis]=Math.max(node.max[axis],ref.max[axis]);
+        centroidMin[axis]=Math.min(centroidMin[axis],ref.c[axis]);
+        centroidMax[axis]=Math.max(centroidMax[axis],ref.c[axis]);
       }
     }
-    if(end-start<=maxLeaf){
-      node.leaf=true; node.left=ordered.length; node.right=end-start;
+    const count=end-start;
+    if(count<=maxLeaf){
+      node.leaf=true; node.left=ordered.length; node.right=count;
       for(let i=start;i<end;i++) ordered.push(refs[i].t);
     } else {
-      const mid=(start+end)>>1;
-      node.left=build(start,mid); node.right=build(mid,end);
+      let bestAxis=-1;
+      let bestSplit=-1;
+      let bestCost=Infinity;
+      const work=scratchForDepth(depth);
+      for(let axis=0;axis<3;axis++){
+        const extent=centroidMax[axis]-centroidMin[axis];
+        if(extent<1e-9)continue;
+        work.counts.fill(0);
+        work.mins.fill(Infinity);
+        work.maxs.fill(-Infinity);
+        const scale=BIN_COUNT/extent;
+        for(let i=start;i<end;i++){
+          const ref=refs[i];
+          const bin=Math.min(BIN_COUNT-1,Math.floor((ref.c[axis]-centroidMin[axis])*scale));
+          work.counts[bin]++;
+          const offset=bin*3;
+          for(let k=0;k<3;k++){
+            work.mins[offset+k]=Math.min(work.mins[offset+k],ref.min[k]);
+            work.maxs[offset+k]=Math.max(work.maxs[offset+k],ref.max[k]);
+          }
+        }
+        let runningCount=0;
+        const runningMin=[Infinity,Infinity,Infinity];
+        const runningMax=[-Infinity,-Infinity,-Infinity];
+        for(let bin=0;bin<BIN_COUNT-1;bin++){
+          runningCount+=work.counts[bin];
+          const offset=bin*3;
+          for(let k=0;k<3;k++){
+            runningMin[k]=Math.min(runningMin[k],work.mins[offset+k]);
+            runningMax[k]=Math.max(runningMax[k],work.maxs[offset+k]);
+          }
+          work.leftCounts[bin]=runningCount;
+          work.leftAreas[bin]=surfaceArea(runningMin,runningMax);
+        }
+        runningCount=0;
+        runningMin.fill(Infinity);
+        runningMax.fill(-Infinity);
+        for(let bin=BIN_COUNT-1;bin>0;bin--){
+          runningCount+=work.counts[bin];
+          const offset=bin*3;
+          for(let k=0;k<3;k++){
+            runningMin[k]=Math.min(runningMin[k],work.mins[offset+k]);
+            runningMax[k]=Math.max(runningMax[k],work.maxs[offset+k]);
+          }
+          work.rightCounts[bin-1]=runningCount;
+          work.rightAreas[bin-1]=surfaceArea(runningMin,runningMax);
+        }
+        for(let split=0;split<BIN_COUNT-1;split++){
+          const leftCount=work.leftCounts[split];
+          const rightCount=work.rightCounts[split];
+          if(leftCount===0||rightCount===0)continue;
+          const cost=work.leftAreas[split]*leftCount+work.rightAreas[split]*rightCount;
+          if(cost<bestCost){
+            bestCost=cost;
+            bestAxis=axis;
+            bestSplit=split;
+          }
+        }
+      }
+      let mid=start;
+      if(bestAxis>=0&&depth<48){
+        const extent=centroidMax[bestAxis]-centroidMin[bestAxis];
+        const scale=BIN_COUNT/Math.max(1e-9,extent);
+        let left=start;
+        let right=end-1;
+        while(left<=right){
+          const bin=Math.min(BIN_COUNT-1,Math.floor((refs[left].c[bestAxis]-centroidMin[bestAxis])*scale));
+          if(bin<=bestSplit){
+            left++;
+          }else{
+            const swap=refs[left];
+            refs[left]=refs[right];
+            refs[right]=swap;
+            right--;
+          }
+        }
+        mid=left;
+      }
+      const minimumChild=Math.max(1,Math.floor(count/64));
+      if(mid-start<minimumChild||end-mid<minimumChild){
+        const extents=centroidMax.map((value,axis)=>value-centroidMin[axis]);
+        const axis=extents.indexOf(Math.max(...extents));
+        const sorted=refs.slice(start,end).sort((a,b)=>a.c[axis]-b.c[axis]);
+        for(let i=0;i<sorted.length;i++)refs[start+i]=sorted[i];
+        mid=(start+end)>>1;
+      }
+      node.left=build(start,mid,depth+1);
+      node.right=build(mid,end,depth+1);
     }
     return nodeIndex;
   };
@@ -199,14 +322,22 @@ export function buildBVH(triangles, maxLeaf = 4) {
     nu[o+3]=n.leaf?(0x80000000|n.left)>>>0:n.left>>>0;
     nu[o+7]=n.right>>>0;
   });
-  const triData=new Float32Array(ordered.length*28);
+  const triBuffer = new ArrayBuffer(ordered.length * 32 * 4);
+  const triData = new Float32Array(triBuffer);
+  const triWords = new Uint32Array(triBuffer);
   ordered.forEach((t,i)=>{
-    const o=i*28;
+    const o=i*32;
     const uvs=t.uvs||[[0,0],[0,0],[0,0]];
+    const face = normalize3(cross3(sub3(t.b, t.a), sub3(t.c, t.a)));
+    const normals = t.normals || [face, face, face];
     triData.set([
       ...t.a,0,...t.b,0,...t.c,0,...t.albedo,0,...t.emissive,0,
       ...uvs[0],...uvs[1],...uvs[2],t.material??-1,t.alphaCutoff??0,
     ],o);
+    triWords[o + 28] = packOctNormal(normals[0]);
+    triWords[o + 29] = packOctNormal(normals[1]);
+    triWords[o + 30] = packOctNormal(normals[2]);
+    triWords[o + 31] = 0;
   });
   return {nodes:new Float32Array(nodeData),triangles:triData,nodeCount:nodes.length,triangleCount:ordered.length};
 }

@@ -124,6 +124,10 @@ export function RadianceCascadesLab() {
           <button id="close-audit" aria-label="Close audit report">×</button>
         </div>
         <div className="audit-progress"><i id="audit-progress" /></div>
+        <div className="reference-visual" id="reference-visual" hidden>
+          <div><span>Path reference</span><span>Split RC</span><span>Absolute error</span></div>
+          <canvas id="reference-comparison" aria-label="Path reference, Split RC, and absolute error comparison" />
+        </div>
         <pre id="audit-report">Warming renderer…</pre>
       </div>
 
