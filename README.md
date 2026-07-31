@@ -33,17 +33,26 @@ The equation-by-equation audit is in
 
 ## Stability
 
-The ten-scene baseline is single-bounce Split RC. Sponza opens in the paper's
-multibounce showcase configuration for presentation quality; its checkbox can
-return immediately to the single-bounce comparison. Rough-specular and
-directional `C(-1)` experiments remain explicit opt-in extensions.
+The twelve-scene baseline is single-bounce Split RC. Sponza opens in that
+paper-comparison configuration; its checkbox enables the paper's multibounce
+showcase path. Rough-specular and directional `C(-1)` experiments remain
+explicit opt-in extensions.
 
 Stable mode advances a deterministic global low-discrepancy temporal rotation,
-uses exact canonical screen-sample ranks, canonicalizes sparse probe indices
-by key, and uses the paper's hierarchical key-ordered Algorithm 3 offsets.
+uses exact canonical screen-sample ranks, orders every allocation decision by
+probe key, and uses the paper's hierarchical key-ordered Algorithm 3 offsets.
 Directional `(J, beta)` intervals accumulate only on exact world/LOD/cache key
 matches. Adjacent LODs cross-fade across the paper's 0.9 overlap. There is no
-stochastic full-resolution GI trace: the GI grid is 192x108 in Balanced mode.
+separate low-resolution ray lattice: Algorithm 3 assigns one ray to every pixel
+of the bounded internal render. Performance tiers vary that internal screen
+resolution, so thin and distant geometry cannot fall between ray samples and
+Retina/4K windows cannot multiply work without limit. Balanced and Performance
+also adapt that bounded pixel budget to sustained frame time; they always keep
+one owner per resulting internal pixel and never switch to a sparse ray grid.
+GPU timestamps drive recovery when available. A browser without timestamp
+queries makes a conservative five-second upscale probe after sustaining a
+vsync-limited 60 Hz cadence, so a transient slowdown cannot leave the renderer
+permanently downscaled.
 
 The sparse hierarchy retains prior probes inside a bounded view guard so
 trilinear neighborhoods and parent ancestry do not pop as the camera moves.
@@ -53,34 +62,50 @@ It rejects disocclusions and normal changes, so it stabilizes sparse-to-screen
 reconstruction without smearing newly visible geometry. This final resolve is
 an explicitly documented browser-production extension, not a paper equation.
 
-Stable mode explores 32 temporal rotations, then freezes the converged global
-rotation. With paused lighting, exact-key intervals also lock as suggested by
-the paper's semi-static temporal path; animated lights continue adapting at a
-0.96 history blend.
+Stable mode advances the deterministic R2/Cranley-Patterson sequence
+continuously. An odd 32-bit Weyl permutation supplies the global rotation, so
+the 2D rotation pair cannot repeat before the full `2^32`-frame cycle and never
+loses precision through a large float conversion. Paused lighting bootstraps
+at 0.92 for 24 frames, then uses a 0.98 exact-key interval-history blend;
+animated lighting remains at 0.92 and is separately checked for both smooth
+motion and step-response lag. Toggling the lighting clock invalidates history
+instead of retaining radiance from a discontinuous sun pose. The optional
+secondary cache uses a stronger world-validated presentation history under
+camera motion.
 
-The built-in audit has four independent gates:
+The built-in audit has eleven independent gates:
 
 - matched world-probe irradiance while the camera moves
 - two separately initialized runs of the same camera trajectory, compared from
   the final 8-bit framebuffer
 - uninterrupted adjacent moving-camera frames compared after world-position
   reprojection (baseline and multibounce)
-- a deterministic 128-spp cosine-weighted BVH path-traced reference for Sponza
+- the same uninterrupted motion with animated lights enabled
+- a fixed-camera moving-light step response compared with a freshly converged
+  target, which detects excessive temporal lag
+- a deliberate near/far Sponza camera dolly aimed at view-sized distant meshes
+- deterministic 512-spp, 64x36 cosine-weighted BVH references for the
+  color-bleed lab, Sponza, Cornell, and the large concave heightmap
+- raster sun and six-face point-shadow visibility compared sample-for-sample
+  with exact software-BVH visibility, including mandatory coverage of all six
+  point-shadow array layers in Cornell
+- sparse-hash, key-range, capacity, BVH-stack, and WebGPU error diagnostics
 
-On the development NVIDIA RTX 5080, independent Sponza trajectory replays
-measured 0/255 at p95 in both modes (p99 0/255 baseline and 1/255
-multibounce). Across 31 consecutive moving-camera comparisons, baseline and
-multibounce both measured 2/255 at p95 and 8/255 at p99 after world
-reprojection, with 99.5%-trimmed RMSE of 1.27/255 and 1.24/255. This directly
-covers the final image rather than inferring stability from probe values.
+On the development NVIDIA RTX 5080, the final 32-frame Sponza motion runs
+measured at most 2/255 at p95 for baseline, moving-light, and multibounce paths;
+the multibounce p99 maximum was 6/255. Every per-capture sparse diagnostic was
+zero. This directly covers the final image rather than inferring stability
+from probe values.
 
-## Ten validation scenes
+## Twelve validation scenes
 
 1. Color bleed laboratory - near-field transfer and emissive geometry.
-2. Sponza atrium - the official Crytek/Khronos model used in the paper,
-   prepacked with the paper-style neutral/cyan material preset and a real red
-   area-emitter quad as 262,269 triangles, a 158,359-node SAH BVH, and a
-   4096px atlas made from all 25 official base-color materials.
+2. Sponza atrium - the official Crytek/Khronos geometry reconstructed with the
+   paper's neutral/cyan presentation and a real red area-emitter quad as
+   262,269 triangles, a 158,359-node SAH BVH, and a 4096px atlas made from all
+   25 official base-color materials. The paper does not distribute its exact
+   prepared asset, camera, or exposure, so visual matching is not mislabeled
+   as byte-identical scene provenance.
 3. Concave canyon heightfield - a 72x72 terrain with craters and ravines.
 4. Dense lantern forest - thousands of thin foliage triangles.
 5. Multi-level atrium - stairs, balconies, skylight, and curved sculptures.
@@ -89,6 +114,10 @@ covers the final image rather than inferring stability from probe values.
 8. Orbital sculpture field - open-sky misses and high-curvature meshes.
 9. Night market - many colored emitters and dark-region stability.
 10. Megacity stress grid - 13,496 triangles and high probe pressure.
+11. Cornell box reference - canonical red/green enclosure, two occluders,
+    ceiling area emitter, and a moving comparison light.
+12. Grand concave heightmap - a 128x128 terrain with nested bowls, crater,
+    ravine, terraces, shelves, and moving sun/fill light.
 
 Every scene has a deterministic camera path, moving sun, and moving colored
 point light. The controls expose final, indirect, direct, normal, coverage, and
@@ -97,24 +126,25 @@ rough specular, `C(-1)`, and stable history.
 
 ## Measured result
 
-Balanced mode was validated at a 1152x648 render resolution with a 192x108 GI
-grid and 12 primary rays per visible GI sample:
+Balanced mode bounds the internal screen to 360,000 pixels; the development
+viewport resolves to 800x450 and traces one primary R2 ray per internal-screen
+pixel:
 
-- ordinary Sponza profiling measured 10.42 ms single-bounce and 11.73 ms
-  multibounce at 60 FPS; the exhaustive audit's worst Sponza sample was
-  14.02 ms
-- both baseline and multibounce Sponza trajectory replays measured 0/255 at
-  p95, and both uninterrupted 32-frame camera-motion tests measured 2/255 at
-  p95 and 8/255 at p99
-- exact matched Sponza world probes changed by 0.83% at p95 during camera
-  motion, with zero sparse/BVH overflows or WebGPU errors
-- the independent reference gate measured 48.25% raw NRMSE, 47.21% raw
-  scale-invariant NRMSE, 27.21% low-frequency scale-invariant NRMSE, 0.198
-  scene-linear p95 error, 1.00% severe under-light outliers, and 8.41%
+- the final all-scene audit measured Sponza at 7.67 ms GPU and 60 FPS; the
+  slowest callback rate across all 12 scenes was 57.13 FPS
+- baseline, moving-light, and multibounce 32-frame motion gates measure 2/255
+  at p95; multibounce measures 6/255 at p99
+- the 512-spp Sponza reference gate measures 37.74% raw NRMSE, 31.22%
+  99%-trimmed NRMSE, 21.30% low-frequency scale-invariant NRMSE, 0.141
+  scene-linear p95 error, 0.35% severe under-light outliers, and 3.47%
   bright-leak candidates
-- all ten production scenes passed final-frame replay, continuous-camera,
-  world-probe, overflow, and device-error gates; the audit's minimum sampled
-  rate was 55.4 FPS
+- the point-shadow/BVH classification mismatch is 0% in the laboratory and
+  Cornell scenes and 1.19% on the large heightmap; corresponding sun-shadow
+  mismatch is 0%, 1.52%, and 1.04%
+- no sparse-hash, capacity, or BVH-stack overflow was observed
+
+The exact final machine-readable result is
+[`docs/validation/RTX-5080-balanced.json`](docs/validation/RTX-5080-balanced.json).
 
 The reference numbers are not a claim of exact path-traced equality: Split RC
 is a biased sparse estimator, and the paper documents interpolation leaks,
@@ -148,6 +178,11 @@ changing meshes requires rebuilding their BVH. These are method limits, not
 silent feature omissions.
 
 This is a from-paper WebGPU implementation, not the authors' unreleased source
-code. WebGPU's portable software BVH, deterministic probe canonicalization, and
-manual storage-buffer filtering replace native ray-tracing and CUDA-specific
-implementation details without changing the Split RC interval/merge model.
+code. WebGPU's portable software BVH and deterministic key-ordered allocation
+replace native ray-tracing and CUDA-specific implementation details. The
+paper's bordered irradiance field is copied from its storage write target into
+a filterable RGBA16F texture atlas, so final diffuse reconstruction and
+secondary-cache feedback use one bilinear texture sample for each of at most
+eight sparse probe neighbors per LOD. Moving point shadows are rendered into
+six alpha-tested depth layers and sampled with explicit face/UV mapping; this
+avoids backend-dependent cube-face orientation assumptions.

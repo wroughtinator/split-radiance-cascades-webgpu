@@ -63,6 +63,27 @@ class Geometry {
     this.quad(p[0],p[1],p[5],p[4],color,emissive);
   }
 
+  boxRotatedY(center, size, angle, color = C.white, emissive = [0, 0, 0]) {
+    const [sx, sy, sz] = size.map((v) => v * 0.5);
+    const cosine = Math.cos(angle);
+    const sine = Math.sin(angle);
+    const point = (x, y, z) => [
+      center[0] + x * cosine - z * sine,
+      center[1] + y,
+      center[2] + x * sine + z * cosine,
+    ];
+    const p = [
+      point(-sx,-sy,-sz), point(sx,-sy,-sz), point(sx,sy,-sz), point(-sx,sy,-sz),
+      point(-sx,-sy,sz), point(sx,-sy,sz), point(sx,sy,sz), point(-sx,sy,sz),
+    ];
+    this.quad(p[1],p[0],p[3],p[2],color,emissive);
+    this.quad(p[4],p[5],p[6],p[7],color,emissive);
+    this.quad(p[0],p[4],p[7],p[3],color,emissive);
+    this.quad(p[5],p[1],p[2],p[6],color,emissive);
+    this.quad(p[3],p[7],p[6],p[2],color,emissive);
+    this.quad(p[0],p[1],p[5],p[4],color,emissive);
+  }
+
   sphere(center, radius, color = C.white, emissive = [0,0,0], rings = 8, segments = 14) {
     for (let v=0;v<rings;v++) {
       const t0=v/rings*Math.PI, t1=(v+1)/rings*Math.PI;
@@ -225,6 +246,8 @@ export const SCENE_INFO = [
   {name:"Orbital sculpture field",short:"Orbit",description:"Freestanding high-curvature meshes test open-sky misses, distance intervals, and moving lights."},
   {name:"Night market",short:"Market",description:"Many colored area emitters, stalls, fabric-like canopies, and dark-region stability."},
   {name:"Megacity stress grid",short:"Stress",description:"Large terrain, 150 structures, complex monuments, maximum probe pressure, and profiling load."},
+  {name:"Cornell box reference",short:"Cornell",description:"Canonical red/green Cornell enclosure, two occluding boxes, ceiling area emitter, and an animated comparison light."},
+  {name:"Grand concave heightmap",short:"Heightmap",description:"A 128×128, 32k-triangle terrain with nested bowls, a winding ravine, cliff shelves, moving sun, and orbiting fill light."},
 ];
 
 function buildScene0(g) {
@@ -234,7 +257,7 @@ function buildScene0(g) {
   g.sphere([0,1.05,2.4],1.05,C.yellow,[0,0,0],10,18);
   g.torus([0,3.2,-2.6],1.25,0.25,C.cyan,20,10,Math.PI/2);
   g.box([0,4.75,0],[3.3,0.08,3.3],[0.8,0.8,0.8],[5.2,4.6,3.5]);
-  return {camera:[6.5,3.7,13],target:[0,1.8,0],baseSpacing:0.72,env:[0.02,0.025,0.04],sun:2.2};
+  return {camera:[6.5,3.7,13],target:[0,1.8,0],baseSpacing:0.5,env:[0.02,0.025,0.04],sun:2.2};
 }
 
 function buildScene1(g) {
@@ -360,7 +383,73 @@ function buildScene9(g) {
   return {camera:[50,30,53],target:[0,3,0],baseSpacing:2.05,env:[0.02,0.035,0.06],sun:3.6};
 }
 
-const BUILDERS=[buildScene0,buildScene1,buildScene2,buildScene3,buildScene4,buildScene5,buildScene6,buildScene7,buildScene8,buildScene9];
+function buildScene10(g) {
+  // Cornell's front is intentionally open. The walls use the original
+  // proportions and diffuse color arrangement so this doubles as a compact
+  // color-bleed/reference scene rather than another arbitrary room.
+  const left=-2.78,right=2.78,floor=0,ceiling=5.49,back=-5.59,front=0.15;
+  g.quad([left,floor,front],[right,floor,front],[right,floor,back],[left,floor,back],C.white);
+  g.quad([left,ceiling,back],[right,ceiling,back],[right,ceiling,front],[left,ceiling,front],C.white);
+  g.quad([left,floor,back],[right,floor,back],[right,ceiling,back],[left,ceiling,back],C.white);
+  g.quad([left,floor,front],[left,floor,back],[left,ceiling,back],[left,ceiling,front],C.red);
+  g.quad([right,floor,back],[right,floor,front],[right,ceiling,front],[right,ceiling,back],C.green);
+  // Match the canonical Cornell layout: the short block turns clockwise and
+  // the tall block counter-clockwise instead of presenting axis-aligned faces.
+  g.boxRotatedY([-1.05,0.82,-3.8],[1.65,1.64,1.65],-0.30,C.white);
+  g.boxRotatedY([1.0,1.55,-2.05],[1.75,3.1,1.75],0.28,C.white);
+  g.quad(
+    [-0.65,ceiling-0.025,-3.9],[0.65,ceiling-0.025,-3.9],
+    [0.65,ceiling-0.025,-2.85],[-0.65,ceiling-0.025,-2.85],
+    [0.9,0.88,0.72],[8.5,7.4,5.8],
+  );
+  return {
+    camera:[0,2.65,8.6],target:[0,2.5,-2.75],baseSpacing:0.32,
+    env:[0.0015,0.0015,0.0015],sun:0.05,pointIntensity:3.5,
+    pointOrbit:1.45,pointBaseHeight:0.0,pointHeight:0.75,
+    pointColor:[1.0,0.82,0.62],exposure:1.15,
+  };
+}
+
+function buildScene11(g) {
+  const height=(x,z)=>{
+    const bowl=Math.hypot(x+12,z-7);
+    const crater=Math.hypot(x-16,z+13);
+    const ravineDistance=Math.abs(z-7*Math.sin(x*0.075)-2*Math.sin(x*0.22));
+    const terracing=Math.floor((Math.sin(x*0.055)+Math.cos(z*0.061)+2)*2.2)/2.2;
+    return 2.8*Math.sin(x*0.075)*Math.cos(z*0.068)
+      -10.5*Math.exp(-bowl*bowl/155)
+      -7.0*Math.exp(-crater*crater/88)
+      -5.8*Math.exp(-ravineDistance*ravineDistance/5.5)
+      +0.7*terracing+0.0022*(x*x+z*z);
+  };
+  g.terrain(
+    92,128,height,
+    (y)=>y<-4?[0.16,0.12,0.075]:y>7?[0.58,0.59,0.56]:[0.38,0.29,0.17],
+  );
+  // Shelves and arches create concavities a single-valued height field cannot,
+  // while the dense ground remains a genuine heightmap.
+  for(let i=0;i<9;i++){
+    const x=-30+i*7.5,z=-15+5*Math.sin(i*0.9),y=height(x,z)+2.4;
+    g.box([x,y,z],[7.8,0.55,5.2],i%2?C.stone:C.sand);
+    g.torus([x,y-0.8,z],1.55,0.28,C.dark,18,8,Math.PI/2);
+  }
+  for(let i=0;i<18;i++){
+    const a=i/18*TAU,r=18+4*Math.sin(i*1.7);
+    const x=Math.cos(a)*r,z=Math.sin(a)*r,y=height(x,z)+1.2;
+    g.sphere([x,y,z],0.65+(i%3)*0.18,i%2?C.orange:C.cyan,[0,0,0],8,14);
+  }
+  return {
+    camera:[67,38,72],target:[0,-1,0],baseSpacing:2.2,
+    env:[0.055,0.075,0.12],sun:5.8,pointIntensity:15.0,
+    pointOrbit:28,pointBaseHeight:9,pointHeight:6,
+    pointColor:[0.12,0.45,1.0],sunHeight:-0.52,sunHorizontal:0.86,
+  };
+}
+
+const BUILDERS=[
+  buildScene0,buildScene1,buildScene2,buildScene3,buildScene4,buildScene5,
+  buildScene6,buildScene7,buildScene8,buildScene9,buildScene10,buildScene11,
+];
 
 export function createScene(index) {
   if (index === 1 && typeof window !== "undefined") {
@@ -369,7 +458,7 @@ export function createScene(index) {
       ...SCENE_INFO[index],
       camera: [-8.0, 8.0, -0.5],
       target: [5.0, 2.0, -0.5],
-      baseSpacing: 0.55,
+      baseSpacing: 0.32,
       env: [0.55, 0.65, 0.82],
       sun: 5.2,
       geometry,

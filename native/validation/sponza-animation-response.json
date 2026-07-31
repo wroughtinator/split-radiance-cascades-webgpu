@@ -1,0 +1,72 @@
+﻿{
+    "animation_enabled":  true,
+    "camera_fixed":  true,
+    "comparison_animation_seconds":  6.078881740570068,
+    "comparison_frame":  360,
+    "comparison_point_position":  [
+                                      -5.18388557434082,
+                                      5.90242338180542,
+                                      3.0211472511291504
+                                  ],
+    "comparison_sun_direction":  [
+                                     0.27948126196861267,
+                                     0.721988320350647,
+                                     0.632948100566864
+                                 ],
+    "delta":  {
+                  "changed_channel_fraction":  0.9326220460199005,
+                  "maximum_absolute_u8":  128,
+                  "mean_absolute_u8":  17.553485826077942,
+                  "p99_absolute_u8":  92,
+                  "root_mean_square_u8":  29.554276742316016
+              },
+    "diagnostics":  {
+                        "bvh_stack_overflows":  0,
+                        "hash_overflows":  0,
+                        "key_hash_collisions":  0,
+                        "key_range_rejections":  0
+                    },
+    "gate":  {
+                 "diagnostics_clean":  true,
+                 "minimum_changed_channel_fraction":  0.01,
+                 "minimum_mean_absolute_u8":  0.1,
+                 "passes":  true,
+                 "visible_response":  true
+             },
+    "hash_publication":  {
+                             "canonical_slots":  1769,
+                             "duplicate_slots":  0,
+                             "high_confidence_display_pixels":  0,
+                             "history_reprojected_pixels":  0,
+                             "history_surface_pixels":  514560,
+                             "history_valid_pixels":  0,
+                             "occupied_slots":  1769,
+                             "repeated_exact_keys":  0,
+                             "reserved_slots":  0,
+                             "tombstone_slots":  0,
+                             "unpublished_slots":  0
+                         },
+    "height":  536,
+    "reference_animation_seconds":  2.0826284885406494,
+    "reference_frame":  120,
+    "reference_point_position":  [
+                                     3.7506301403045654,
+                                     5.203379154205322,
+                                     4.683243751525879
+                                 ],
+    "reference_sun_direction":  [
+                                    0.6384398937225342,
+                                    0.7219882011413574,
+                                    0.2666974365711212
+                                ],
+    "scene":  "Sponza atrium (paper scene)",
+    "width":  960,
+    "provenance":  {
+                       "generated_at_utc":  "2026-07-31T07:27:55.4228091Z",
+                       "executable_sha256":  "9d15970b4eff795c040753c21e01cb943b9adbf496663b751be2e3dd6515c915",
+                       "shader_source_glsl_sha256":  "dd17dc1e5100dfc55382511190ca1f642672c6f930f961e3525b2ae700917360",
+                       "generated_shader_rs_sha256":  "0463247d23cf71fc43a8f86aad569678c617dfa1439fb1c443f059ae142566a1",
+                       "gpu_harness_rs_sha256":  "fe5abc789a132ebe9be977bacfb16408fe326734b7595f063292744e38d950c7",
+                       "cargo_lock_sha256":  "14dd9e409b1d3081d2d07b02e4c58502fda029796181b7c2158b713fc16115e5"
+                   }
+}

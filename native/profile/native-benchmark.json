@@ -1,0 +1,114 @@
+﻿{
+    "adaptive_resolution":  false,
+    "backend":  "D3d11",
+    "benchmark_warmup_frames":  60,
+    "bvh_stack_overflows":  0,
+    "elapsed_seconds":  4.9657543,
+    "frames":  300,
+    "gpu_stage_ms":  {
+                         "clear":  0.302496,
+                         "merge_and_irradiance":  0.11136,
+                         "present":  0.83232,
+                         "primary_and_direct_shadows":  1.52976,
+                         "shade":  0.133568,
+                         "sparse_probe_construction":  2.410528,
+                         "split_trace_and_indirect_shadows":  4.195808
+                     },
+    "gpu_stage_timing":  {
+                             "clear":  {
+                                           "maximum_ms":  0.444864,
+                                           "median_ms":  0.302496,
+                                           "minimum_ms":  0.04432,
+                                           "p95_ms":  0.442752,
+                                           "sample_count":  30
+                                       },
+                             "merge_and_irradiance":  {
+                                                          "maximum_ms":  0.27136,
+                                                          "median_ms":  0.11136,
+                                                          "minimum_ms":  0.10928,
+                                                          "p95_ms":  0.2704,
+                                                          "sample_count":  30
+                                                      },
+                             "present":  {
+                                             "maximum_ms":  7.56976,
+                                             "median_ms":  0.83232,
+                                             "minimum_ms":  0.00944,
+                                             "p95_ms":  1.498624,
+                                             "sample_count":  30
+                                         },
+                             "primary_and_direct_shadows":  {
+                                                                "maximum_ms":  1.771328,
+                                                                "median_ms":  1.52976,
+                                                                "minimum_ms":  1.431424,
+                                                                "p95_ms":  1.739936,
+                                                                "sample_count":  30
+                                                            },
+                             "shade":  {
+                                           "maximum_ms":  0.76752,
+                                           "median_ms":  0.133568,
+                                           "minimum_ms":  0.131808,
+                                           "p95_ms":  0.495264,
+                                           "sample_count":  30
+                                       },
+                             "sparse_probe_construction":  {
+                                                               "maximum_ms":  2.426784,
+                                                               "median_ms":  2.410528,
+                                                               "minimum_ms":  2.391392,
+                                                               "p95_ms":  2.423712,
+                                                               "sample_count":  30
+                                                           },
+                             "split_trace_and_indirect_shadows":  {
+                                                                      "maximum_ms":  5.056,
+                                                                      "median_ms":  4.195808,
+                                                                      "minimum_ms":  3.982848,
+                                                                      "p95_ms":  4.81728,
+                                                                      "sample_count":  30
+                                                                  }
+                         },
+    "gpu_timestamp_available":  true,
+    "gpu_timestamp_first_measured_frame_index":  0,
+    "gpu_timestamp_last_measured_frame_index":  290,
+    "gpu_timestamp_sample_count":  30,
+    "gpu_timestamp_sample_interval_frames":  10,
+    "gpu_timestamp_sampling_scope":  "measured_interval_after_warmup",
+    "hash_overflows":  0,
+    "hash_publication":  {
+                             "canonical_slots":  1772,
+                             "duplicate_slots":  0,
+                             "high_confidence_display_pixels":  0,
+                             "history_reprojected_pixels":  0,
+                             "history_surface_pixels":  514560,
+                             "history_valid_pixels":  0,
+                             "occupied_slots":  1772,
+                             "repeated_exact_keys":  0,
+                             "reserved_slots":  0,
+                             "tombstone_slots":  0,
+                             "unpublished_slots":  0
+                         },
+    "height":  536,
+    "key_hash_collisions":  0,
+    "key_range_rejections":  0,
+    "maximum_callback_ms":  16.689782899469904,
+    "median_callback_ms":  16.662627967147905,
+    "p95_callback_ms":  16.670552130135736,
+    "probe_counts":  [
+                         1222,
+                         382,
+                         125,
+                         43
+                     ],
+    "resolution_scale":  1.0,
+    "scene":  "Sponza atrium (paper scene)",
+    "swap_interval":  0,
+    "throughput_fps":  60.413782453956685,
+    "triangles":  262269,
+    "width":  960,
+    "provenance":  {
+                       "generated_at_utc":  "2026-07-31T07:26:44.6236017Z",
+                       "executable_sha256":  "9d15970b4eff795c040753c21e01cb943b9adbf496663b751be2e3dd6515c915",
+                       "shader_source_glsl_sha256":  "dd17dc1e5100dfc55382511190ca1f642672c6f930f961e3525b2ae700917360",
+                       "generated_shader_rs_sha256":  "0463247d23cf71fc43a8f86aad569678c617dfa1439fb1c443f059ae142566a1",
+                       "gpu_harness_rs_sha256":  "fe5abc789a132ebe9be977bacfb16408fe326734b7595f063292744e38d950c7",
+                       "cargo_lock_sha256":  "14dd9e409b1d3081d2d07b02e4c58502fda029796181b7c2158b713fc16115e5"
+                   }
+}

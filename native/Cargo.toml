@@ -1,0 +1,64 @@
+[package]
+name = "split-radiance-cascades-native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+description = "Independent native Rust + Sokol GPU implementation of Split Radiance Cascades"
+
+[features]
+default = ["native-app"]
+native-app = ["dep:sokol"]
+
+[dependencies]
+bytemuck = { version = "1.23", features = ["derive"] }
+flate2 = "1.1"
+glam = { version = "0.30", features = ["bytemuck", "serde"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+sokol = { git = "https://github.com/floooh/sokol-rust.git", rev = "fe6631224be986791316dba74600b8c615b09e83", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+[dev-dependencies]
+approx = "0.5"
+proptest = "1.7"
+
+[[bin]]
+name = "split-rc-native"
+path = "src/main.rs"
+required-features = ["native-app"]
+
+[[bin]]
+name = "split-rc-audit"
+path = "src/bin/audit.rs"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+module_name_repetitions = "allow"
+similar_names = "allow"
+too_many_lines = "allow"

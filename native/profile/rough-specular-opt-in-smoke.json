@@ -1,0 +1,41 @@
+{
+  "adaptive_resolution": false,
+  "backend": "D3d11",
+  "bvh_stack_overflows": 0,
+  "elapsed_seconds": 6e-7,
+  "frames": 1,
+  "gpu_stage_ms": {},
+  "gpu_timestamp_available": false,
+  "hash_overflows": 0,
+  "hash_publication": {
+    "canonical_slots": 1772,
+    "duplicate_slots": 0,
+    "high_confidence_display_pixels": 0,
+    "history_reprojected_pixels": 0,
+    "history_surface_pixels": 514560,
+    "history_valid_pixels": 0,
+    "occupied_slots": 1772,
+    "repeated_exact_keys": 0,
+    "reserved_slots": 0,
+    "tombstone_slots": 0,
+    "unpublished_slots": 0
+  },
+  "height": 536,
+  "key_hash_collisions": 0,
+  "key_range_rejections": 0,
+  "maximum_callback_ms": 17.393062277839825,
+  "median_callback_ms": 17.393062277839825,
+  "p95_callback_ms": 17.393062277839825,
+  "probe_counts": [
+    1222,
+    382,
+    125,
+    43
+  ],
+  "resolution_scale": 1.0,
+  "scene": "Sponza atrium (paper scene)",
+  "swap_interval": 0,
+  "throughput_fps": 1666666.6666666667,
+  "triangles": 262269,
+  "width": 960
+}

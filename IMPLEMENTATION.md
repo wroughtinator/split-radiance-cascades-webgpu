@@ -3,19 +3,19 @@
 ## Frame graph
 
 ```text
-sun shadow pass
+sun shadow pass + six-face moving-point shadow pass
   -> G-buffer (world, two-sided normal, albedo/emission, depth)
   -> clear current hash, counters, prefixes, and interval accumulators
   -> retain the bounded prior sparse hierarchy inside a view guard
-  -> insert primary c0 probes from visible surfaces
+  -> insert primary c0 probes from every visible internal-screen pixel
   -> insert secondary c0 probes from previous-frame ray hits at LOD + 2
   -> initialize c1 through c3 parents
-  -> count rays bottom-up
+  -> assign one ray per visible internal-screen pixel and count rays bottom-up
   -> assign deterministic hierarchical R2 offsets c3 through c0
   -> trace and split primary rays
   -> trace and split secondary-cache rays
   -> exact-key interval accumulation and merge c3 through c0
-  -> prefilter c0 into 6x6 octahedral irradiance
+  -> prefilter c0 into a filterable bordered 6x6 octahedral atlas
   -> diffuse + C(-1) + rough specular + direct current composite
   -> world-position/normal-validated temporal resolve
   -> present
@@ -43,6 +43,8 @@ sphere directions.
 Each cascade owns an open-addressed hash range. A compare/exchange claims an
 empty slot and maps the key to a compact probe index. Keys contain signed
 9-bit cell coordinates, a 3-bit LOD, and a primary/secondary cache tag.
+Coordinates outside the representable scene-local range are rejected and
+counted as an overflow; they are never silently clamped onto an unrelated key.
 
 Probe centers are half-cell offsets. Merging and final gathers use only
 existing trilinear neighbors and divide by the accumulated weight.
@@ -56,10 +58,13 @@ then linearly blended.
 
 ## Algorithm 3 on WebGPU
 
-The base pass counts visible ray contributions per c0 probe. Higher passes sum
+The base pass counts one visible ray contribution per internal-screen pixel
+into its c0 probe. Higher passes sum
 child counts into their nearest parent. Offsets are then assigned from c3 to c0
 using probe-key order. Key order is important: compact indices are allocated
-concurrently and are not stable between frames.
+concurrently and are not stable between frames. Each lower-cascade probe
+enumerates only its parent's eight possible children. The bounded c3 root
+prefix scans at most 256 active probes.
 
 For a c0 probe, each ray obtains:
 
@@ -76,10 +81,12 @@ under a new epoch tag, preventing stale ray-map records from matching. Turning
 stable history off uses a wall-clock global jitter and disables history for the
 paper's single-frame inspection path.
 
-After 32 rotations, stable mode freezes the global rotation. If lighting is
-also paused, exact-key intervals lock at their converged value instead of being
-recomputed from a view-dependent pixel set; newly visible keys are still
-initialized immediately. Animated lighting keeps the 0.96 update blend active.
+The temporal rotation uses an odd 32-bit Weyl permutation whose low/high halves
+approximate the paper's two irrational rotation increments. The complete pair
+does not repeat before `2^32` frames and avoids float precision collapse.
+Exact-key intervals therefore keep converging under paused lighting. Animated
+lighting keeps a 0.92 interval-history blend active and is validated against a
+stepped, freshly-converged target.
 
 ## Ray splitting and merge
 
@@ -101,15 +108,22 @@ Merge evaluates:
 I_n = J_n + beta_n * average(interpolate(I_(n+1)))
 ```
 
-The four angular children of each lower direction are contiguous. Missing
-interval samples are transparent; a completely missing parent gather falls
-back to environment radiance.
+The four angular children of each lower direction are contiguous. Directions
+with no interval samples are invalid and do not participate in spatial or
+angular interpolation. A traced sky miss explicitly deposits environment
+radiance at c3; an absent parent gather remains invalid instead of inventing
+environment light through missing coverage.
 
 ## Irradiance and extensions
 
 Diffuse shading prefilters 32 c0 directions into a 6x6 octahedral field inside
-an evaluated one-texel border (an 8x8 allocation), then uses at most eight
-sparse probe reads per LOD.
+an evaluated one-texel border (an 8x8 allocation). Every active probe writes
+its tile into a double-buffered RGBA16F storage atlas. WebGPU requires writable
+storage and filtered sampling to occupy separate usage resources, so the
+completed frame half is copied into a filterable atlas before final and
+secondary-cache gathers. Each gather performs one bilinear texture lookup per
+sparse trilinear neighbor: at most eight filtered samples per LOD, including
+octahedral interpolation.
 
 The secondary cache consumes previous-frame primary hit points, initializes
 probes two LODs coarser, and samples its previous irradiance at new ray hits.
@@ -127,30 +141,48 @@ described by the paper.
 Hash, interval, and irradiance storage are double-buffered. Temporal reuse
 looks up the exact previous world/LOD/cache key and blends the previous
 directional `(J, beta)` interval before recursive merge; missing, disoccluded,
-or LOD-changed probes reject history. The default history weight is 0.96.
+or LOD-changed probes reject history. Fixed lighting bootstraps at 0.92 for 24
+frames and then uses 0.98; animated lighting remains at 0.92. Changing the
+lighting-animation mode invalidates history.
 
 The final sparse-to-screen reconstruction is also double-buffered. The current
 world position is reprojected into the previous view, a 3x3 search chooses the
 closest prior surface, and both world distance and normal agreement must pass
-before history is accepted. Static-light presentation uses at most 0.96
-history; animated lighting uses at most 0.84. Raw and 99.5%-trimmed RMSE are
+before history is accepted. Static-light presentation uses at most 0.97
+history; animated lighting uses at most 0.88. Raw and 99.5%-trimmed RMSE are
 both reported so ambiguous disocclusion-edge correspondences remain visible
 without being mislabeled as global shimmer.
 
-The in-app audit includes four independent checks: exact-key world-probe
+Visible emissive radiance has its own RGB16F G-buffer target. Moving point
+lights render alpha-tested geometry into a six-layer depth texture. Explicit
+face/UV selection samples those layers, so visible direct lighting and GI
+ray-hit lighting both respect occlusion without relying on backend cube-face
+orientation.
+
+The in-app audit includes eleven independent gates: exact-key world-probe
 comparison; byte-for-byte replay of independently initialized camera
 trajectories; world-position reprojection between every adjacent frame of an
-uninterrupted moving-camera sequence; and a 128-spp cosine-weighted BVH
-reference with dark-spot, bright-leak, percentile, and energy-bias
-classification. Baseline and multibounce Sponza paths both run the replay and
-continuous-motion checks. A path-reference/Split-RC/error triptych is rendered
-with the report. The audit also records FPS, GPU timestamps, ray/probe counts,
+uninterrupted moving-camera sequence; the same sequence with moving lights;
+fixed-camera moving-light step response versus a fresh target;
+the deliberate near/far Sponza dolly that covers view-sized surfaces; a
+512-spp 64x36 cosine-weighted BVH reference on four representative scenes with
+raw, robust, dark-spot, bright-leak, percentile, energy-bias, and frozen
+per-scene regression gates; raster sun/point shadows compared with exact BVH
+visibility; plus explicit per-capture hash/key/capacity/BVH/device diagnostics.
+Cornell additionally requires the shadow oracle to exercise all six
+point-shadow array layers.
+Baseline and multibounce
+Sponza paths both run
+the replay and continuous-motion checks. Captures include the world and normal
+buffers so opposite-facing surfaces are never paired as temporal
+correspondences. A path-reference/Split-RC/error triptych is rendered with the
+report. The audit also records FPS, GPU timestamps, ray/probe counts,
 overflows, and WebGPU errors for every scene.
 
-The reference classifier reports both raw pixel error and a 3x3 low-frequency
-metric. The latter is the gating scale-invariant metric because Split RC
-reconstructs low-frequency irradiance; the raw metric, p95/p99 absolute error,
-and under/over-light outlier ratios remain mandatory report fields.
+The reference classifier reports raw and 99%-trimmed NRMSE plus raw and trimmed
+3x3 low-frequency metrics. Raw metrics remain visible and have frozen
+scene-specific ceilings; robust metrics, p95/p99 absolute error, signed energy
+bias, and under/over-light outlier ratios are independent mandatory gates.
 
 ## Safety and portability
 

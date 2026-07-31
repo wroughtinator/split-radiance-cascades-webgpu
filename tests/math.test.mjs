@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  CASCADE_DIRECTIONS, buildBVH, decodeEqualArea, encodeEqualArea,
-  intersectTriangle, nearestProbe, normalize3, packProbeKey, r2,
+  adaptiveBudgetScale, CASCADE_DIRECTIONS, buildBVH, decodeEqualArea, encodeEqualArea,
+  intersectTriangle, mortonDirectionCoordinates, mortonDirectionIndex,
+  nearestProbe, normalize3, packProbeKey, r2,
 } from "../public/rc/math.js";
 
 test("paper cascade direction counts branch by four", () => {
@@ -33,6 +34,44 @@ test("R2 sequence remains in the unit square and avoids repeats", () => {
     points.add(`${u.toFixed(9)},${v.toFixed(9)}`);
   }
   assert.equal(points.size, 4096);
+});
+
+test("full-width temporal rotation does not repeat at the old 16-bit boundary", () => {
+  const rotationWord = (value) => Math.imul(value, 0x91e1c141) >>> 0;
+  for (const frame of [0, 1, 65535, 65536, 65537, 0xffffff, 0x1000000, 0xffffffff]) {
+    assert.notEqual(rotationWord(frame), rotationWord((frame + 65536) >>> 0));
+  }
+  const rotations = new Set();
+  for (let frame = 0; frame < 131072; frame++) rotations.add(rotationWord(frame));
+  assert.equal(rotations.size, 131072);
+});
+
+test("adaptive pixel budgets preserve full ray ownership while targeting frame time", () => {
+  assert.equal(adaptiveBudgetScale(1, 12), 1);
+  assert.equal(adaptiveBudgetScale(1, 100), 0.18);
+  assert.equal(adaptiveBudgetScale(0.2, 100), 0.18);
+  assert.ok(Math.abs(adaptiveBudgetScale(0.5, 10) - 0.54) < 1e-12);
+});
+
+test("Morton direction ordering keeps every angular child quartet contiguous", () => {
+  for (let cascade = 0; cascade < 3; cascade++) {
+    const theta = 4 << cascade;
+    for (let v = 0; v < theta; v++) {
+      for (let u = 0; u < theta * 2; u++) {
+        const parent = mortonDirectionIndex(u, v, cascade);
+        assert.deepEqual(mortonDirectionCoordinates(parent, cascade), [u, v]);
+        const children = [];
+        for (let dv = 0; dv < 2; dv++) {
+          for (let du = 0; du < 2; du++) {
+            children.push(mortonDirectionIndex(u * 2 + du, v * 2 + dv, cascade + 1));
+          }
+        }
+        assert.deepEqual(children.sort((a, b) => a - b), [
+          parent * 4, parent * 4 + 1, parent * 4 + 2, parent * 4 + 3,
+        ]);
+      }
+    }
+  }
 });
 
 test("probe snapping uses paper half-cell offsets and stable keys", () => {

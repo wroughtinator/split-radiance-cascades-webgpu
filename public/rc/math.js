@@ -122,11 +122,43 @@ export function r2(index, jitter = [0, 0]) {
   ];
 }
 
+export function adaptiveBudgetScale(current, observedMs) {
+  let next = current;
+  if (observedMs > 18.2) {
+    next *= clamp(15.8 / observedMs, 0.18, 0.9);
+  } else if (observedMs < 13.5 && next < 0.995) {
+    next = Math.min(1, next * 1.08);
+  }
+  return clamp(next, 0.18, 1);
+}
+
 export function decodeEqualArea([u, v]) {
   const phi = u * TAU;
   const z = v * 2 - 1;
   const r = Math.sqrt(Math.max(0, 1 - z * z));
   return [r * Math.cos(phi), r * Math.sin(phi), z];
+}
+
+export function mortonDirectionIndex(u, v, cascade) {
+  const bits = 2 + cascade;
+  let result = 0;
+  for (let bit = 0; bit < bits; bit++) {
+    result |= ((u >> bit) & 1) << (bit * 2);
+    result |= ((v >> bit) & 1) << (bit * 2 + 1);
+  }
+  return (result | (((u >> bits) & 1) << (bits * 2))) >>> 0;
+}
+
+export function mortonDirectionCoordinates(index, cascade) {
+  const bits = 2 + cascade;
+  let u = 0;
+  let v = 0;
+  for (let bit = 0; bit < bits; bit++) {
+    u |= ((index >> (bit * 2)) & 1) << bit;
+    v |= ((index >> (bit * 2 + 1)) & 1) << bit;
+  }
+  u |= ((index >> (bits * 2)) & 1) << bits;
+  return [u, v];
 }
 
 export function encodeEqualArea([x, y, z]) {

@@ -1,0 +1,13 @@
+/target/
+/tmp/
+/dist/
+/profile/hash-debug*.json
+/profile/history-debug.json
+/profile/native-benchmark-baseline.json
+/profile/native-gpu-profile-rank*.json
+/validation/camera-loop-stability*.json
+/validation/camera-loop-stability*.png
+/validation/sponza-debug-stability*.json
+/validation/sponza-debug-stability*.png
+*.pdb
+*.dSYM/

@@ -98,7 +98,7 @@ export function RadianceCascadesLab() {
         </section>
 
         <section id="pass-profiler" className="profiler">
-          <div><span>GI grid</span><i><b style={{ width: "100%" }} /></i><output id="gi-resolution">—</output></div>
+          <div><span>Algorithm 3 ray grid</span><i><b style={{ width: "100%" }} /></i><output id="gi-resolution">—</output></div>
           <div><span>Frame</span><i><b id="bar-frame" /></i><output id="pass-frame">—</output></div>
           <div><span>Geometry</span><i><b id="bar-geometry" /></i><output id="pass-geometry">—</output></div>
           <div><span>Ray split + merge</span><i><b id="bar-gi" /></i><output id="pass-gi">—</output></div>
@@ -107,7 +107,7 @@ export function RadianceCascadesLab() {
 
         <footer>
           <span id="gpu-name">Detecting GPU…</span>
-          <button id="run-validation">Run 10-scene audit</button>
+          <button id="run-validation">Run 12-scene audit</button>
         </footer>
       </aside>
 
