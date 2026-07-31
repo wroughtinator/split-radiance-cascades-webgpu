@@ -43,7 +43,7 @@ export function RadianceCascadesLab() {
               <h2 id="scene-name">Color bleed laboratory</h2>
               <p id="scene-description">Loading production renderer…</p>
             </div>
-            <span id="scene-index">01 / 10</span>
+            <span id="scene-index">01 / 12</span>
           </div>
           <div className="scene-nav">
             <button id="prev-scene" aria-label="Previous test scene">←</button>
@@ -120,7 +120,7 @@ export function RadianceCascadesLab() {
 
       <div className="audit-card" id="audit-card" hidden>
         <div className="audit-heading">
-          <div><p className="eyebrow">Automated audit</p><h2 id="audit-title">Running scene 1 of 10</h2></div>
+          <div><p className="eyebrow">Automated audit</p><h2 id="audit-title">Running scene 1 of 12</h2></div>
           <button id="close-audit" aria-label="Close audit report">×</button>
         </div>
         <div className="audit-progress"><i id="audit-progress" /></div>
