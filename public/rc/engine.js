@@ -153,7 +153,7 @@ class SplitRadianceCascades {
     await this.createMaterialAtlas();
     this.createPersistentResources();
     this.installUI();
-    await this.loadScene(0);
+    await this.loadScene(1);
     this.running = true;
     this.lastTime = performance.now();
     requestAnimationFrame((t) => this.frame(t));
