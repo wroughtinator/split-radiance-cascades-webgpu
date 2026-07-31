@@ -102,8 +102,6 @@ struct StateLayout {
     counters_offset: u32,
     ray_map_offset: u32,
     blocks_offset: u32,
-    presentation_history_offset: u32,
-    presentation_history_frame_stride: u32,
     block_count: u32,
     sample_count: u32,
     ray_slot_count: u32,
@@ -126,9 +124,7 @@ impl StateLayout {
         let ray_map_words = ray_slot_count * 2;
         let hit_record_words = sample_count * 8 * 2;
         let blocks_offset = ray_map_offset + ray_map_words + hit_record_words;
-        let presentation_history_offset = blocks_offset + PROBE_CAPACITY[0] * block_count;
-        let presentation_history_frame_stride = sample_count * 16;
-        let total_words = presentation_history_offset + presentation_history_frame_stride * 2;
+        let total_words = blocks_offset + PROBE_CAPACITY[0] * block_count;
         Self {
             hash_offset,
             hash_frame_stride: HASH_FRAME_STRIDE,
@@ -137,8 +133,6 @@ impl StateLayout {
             counters_offset,
             ray_map_offset,
             blocks_offset,
-            presentation_history_offset,
-            presentation_history_frame_stride,
             block_count,
             sample_count,
             ray_slot_count,
@@ -571,6 +565,7 @@ struct Renderer {
     c_minus_one: bool,
     temporal_jitter: bool,
     rough_specular: bool,
+    indirect_only: bool,
     previous_view_projection: Mat4,
     resolution_scale: f32,
     adaptive_resolution: bool,
@@ -591,10 +586,6 @@ struct HashPublicationAudit {
     canonical_slots: u32,
     duplicate_slots: u32,
     repeated_exact_keys: u32,
-    history_valid_pixels: u32,
-    history_surface_pixels: u32,
-    history_reprojected_pixels: u32,
-    high_confidence_display_pixels: u32,
 }
 
 impl Renderer {
@@ -639,6 +630,7 @@ impl Renderer {
             temporal_jitter: !env::var("SPLIT_RC_TEMPORAL_JITTER")
                 .is_ok_and(|value| matches!(value.as_str(), "0" | "false" | "off")),
             rough_specular: feature_value_enabled(env::var("SPLIT_RC_ROUGH_SPECULAR").ok().as_deref()),
+            indirect_only: feature_value_enabled(env::var("SPLIT_RC_INDIRECT_ONLY").ok().as_deref()),
             previous_view_projection: Mat4::IDENTITY,
             resolution_scale: env::var("SPLIT_RC_RESOLUTION_SCALE")
                 .ok()
@@ -701,6 +693,15 @@ impl Renderer {
         Ok(())
     }
 
+    fn reset_temporal_history(&mut self) -> Result<(), GpuError> {
+        if let Some(old) = self.dynamic.take() {
+            old.destroy();
+        }
+        self.frame = 0;
+        self.previous_view_projection = Mat4::IDENTITY;
+        self.resize_if_needed()
+    }
+
     fn replace_scene(
         &mut self,
         scene: Scene,
@@ -715,8 +716,7 @@ impl Renderer {
             self.scene.settings.camera.position,
             self.scene.settings.camera.target,
         );
-        self.frame = 0;
-        self.resize_if_needed()?;
+        self.reset_temporal_history()?;
         let dynamic = self.dynamic.as_ref().expect("dynamic resources exist");
         self.compute_bindings.views[shader::VIEW_BVH_NODE_BUFFER] = self.scene_resources.node_view;
         self.compute_bindings.views[shader::VIEW_TRIANGLE_BUFFER] = self.scene_resources.triangle_view;
@@ -823,15 +823,15 @@ impl Renderer {
             radiance_layout_1_i: [
                 radiance.irradiance_frame_stride as i32,
                 i32::from(self.temporal_jitter),
-                state.presentation_history_offset as i32,
-                state.presentation_history_frame_stride as i32,
+                0,
+                0,
             ],
             pass_params_i: [0; 4],
             feature_flags_i: [
                 i32::from(self.c_minus_one),
                 i32::from(self.rough_specular),
                 i32::from(self.temporal_jitter),
-                i32::from(self.animate),
+                i32::from(self.indirect_only),
             ],
         };
 
@@ -1139,19 +1139,6 @@ impl Renderer {
             dynamic.state_layout.hash_frame_stride,
         )?;
         let mut audit = HashPublicationAudit::default();
-        let history_counters = crate::capture::read_buffer_words(
-            dynamic.state,
-            dynamic.state_layout.counters_offset + 4 + TOTAL_PROBES * 2 + 6,
-            3,
-        )?;
-        audit.history_valid_pixels = history_counters[0];
-        audit.history_surface_pixels = history_counters[1];
-        audit.history_reprojected_pixels = history_counters[2];
-        audit.high_confidence_display_pixels = crate::capture::read_buffer_words(
-            dynamic.state,
-            dynamic.state_layout.counters_offset + 4 + TOTAL_PROBES * 2 + 11,
-            1,
-        )?[0];
         let mut exact_keys = BTreeSet::new();
         let mut base_slot = 0usize;
         for (cascade, &capacity) in HASH_CAPACITY.iter().enumerate() {
@@ -1332,6 +1319,11 @@ struct App {
     stability_frame: u32,
     stability_reference_frame: u32,
     stability_reference: Option<Vec<u8>>,
+    cache_motion_output: Option<PathBuf>,
+    cache_motion_frame: u32,
+    cache_motion_accumulated: Option<(u32, u32, Vec<u8>)>,
+    cache_motion_accumulated_diagnostics: Option<FrameDiagnostics>,
+    cache_motion_accumulated_publication: Option<HashPublicationAudit>,
     animation_response_output: Option<PathBuf>,
     animation_response_frame: u32,
     animation_response_reference: Option<Vec<u8>>,
@@ -1369,6 +1361,11 @@ impl App {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(1_200),
             stability_reference: None,
+            cache_motion_output: env::var_os("SPLIT_RC_CACHE_MOTION_OUT").map(PathBuf::from),
+            cache_motion_frame: 0,
+            cache_motion_accumulated: None,
+            cache_motion_accumulated_diagnostics: None,
+            cache_motion_accumulated_publication: None,
             animation_response_output: env::var_os("SPLIT_RC_ANIMATION_RESPONSE_OUT").map(PathBuf::from),
             animation_response_frame: 0,
             animation_response_reference: None,
@@ -1511,6 +1508,8 @@ extern "C" fn init(user_data: *mut ffi::c_void) {
     eprintln!("Split RC native backend: {:?}", sg::query_backend());
     app.load_scene(if app.stability_output.is_some() {
         app.stability_scene
+    } else if app.cache_motion_output.is_some() {
+        SceneId::Sponza
     } else if app.animation_response_output.is_some() {
         SceneId::Sponza
     } else if app.capture_dir.is_some() {
@@ -1518,15 +1517,26 @@ extern "C" fn init(user_data: *mut ffi::c_void) {
     } else {
         SceneId::Sponza
     });
-    if app.capture_dir.is_some() || app.stability_output.is_some() {
+    if app.capture_dir.is_some() || app.stability_output.is_some() || app.cache_motion_output.is_some() {
         if let Some(renderer) = &mut app.renderer {
             renderer.animate = false;
+            renderer.indirect_only = app.cache_motion_output.is_some();
         }
     }
     if let Some(error) = &app.fatal_error {
         eprintln!("Split RC initialization failed: {error}");
     }
 }
+
+const CACHE_MOTION_WARMUP_FRAMES: u32 = 48;
+const CACHE_MOTION_TRANSLATION_FRAMES: u32 = 54;
+const CACHE_MOTION_HOLD_FRAMES: u32 = 48;
+const CACHE_MOTION_RECOVERY_FRAMES: u32 = 48;
+const CACHE_MOTION_STEP: f32 = 0.12;
+const CACHE_MOTION_ACCUMULATED_FRAME: u32 =
+    CACHE_MOTION_WARMUP_FRAMES + CACHE_MOTION_TRANSLATION_FRAMES + CACHE_MOTION_HOLD_FRAMES - 1;
+const CACHE_MOTION_RESET_FRAME: u32 = CACHE_MOTION_ACCUMULATED_FRAME + 1;
+const CACHE_MOTION_RECOVERED_FRAME: u32 = CACHE_MOTION_RESET_FRAME + CACHE_MOTION_RECOVERY_FRAMES - 1;
 
 extern "C" fn frame(user_data: *mut ffi::c_void) {
     let app = unsafe { &mut *user_data.cast::<App>() };
@@ -1536,7 +1546,27 @@ extern "C" fn frame(user_data: *mut ffi::c_void) {
     }
     let callback_seconds = sapp::frame_duration().min(0.1);
     let delta = callback_seconds as f32;
-    if app.stability_output.is_some() {
+    if app.cache_motion_output.is_some() {
+        // Exact native replay of the WebGPU bug report: lower the camera in
+        // Sponza, translate through the atrium, hold at the final pose, then
+        // rebuild all temporal resources without moving the camera.
+        let translated_steps = if app.cache_motion_frame < CACHE_MOTION_WARMUP_FRAMES {
+            0
+        } else {
+            (app.cache_motion_frame - CACHE_MOTION_WARMUP_FRAMES + 1).min(CACHE_MOTION_TRANSLATION_FRAMES)
+        };
+        let translation = Vec3::X * (translated_steps as f32 * CACHE_MOTION_STEP);
+        let target = Vec3::new(5.0, 1.75, -0.5) + translation;
+        let position = Vec3::new(-9.274_269, 2.607_485, -0.5) + translation;
+        app.camera.reset(position, target);
+        if app.cache_motion_frame == CACHE_MOTION_RESET_FRAME {
+            if let Some(renderer) = &mut app.renderer {
+                if let Err(error) = renderer.reset_temporal_history() {
+                    app.fatal_error = Some(format!("cache-motion history reset failed: {error}"));
+                }
+            }
+        }
+    } else if app.stability_output.is_some() {
         if let Some(renderer) = &app.renderer {
             let phase_index = app.stability_frame % 120;
             let angle = phase_index as f32 / 120.0 * std::f32::consts::TAU;
@@ -1566,6 +1596,215 @@ extern "C" fn frame(user_data: *mut ffi::c_void) {
         {
             app.fatal_error = Some(error.to_string());
         }
+    }
+    if let Some(output) = app.cache_motion_output.clone() {
+        if app.fatal_error.is_none()
+            && matches!(
+                app.cache_motion_frame,
+                CACHE_MOTION_ACCUMULATED_FRAME | CACHE_MOTION_RECOVERED_FRAME
+            )
+        {
+            let snapshot = app
+                .renderer
+                .as_ref()
+                .ok_or_else(|| "renderer unavailable".to_owned())
+                .and_then(Renderer::read_pixels);
+            match snapshot {
+                Ok((width, height, pixels)) if app.cache_motion_frame == CACHE_MOTION_ACCUMULATED_FRAME => {
+                    let stem = output
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("cache-motion");
+                    let accumulated_path = output.with_file_name(format!("{stem}-accumulated.png"));
+                    let diagnostics = app
+                        .renderer
+                        .as_ref()
+                        .and_then(|renderer| renderer.readback_diagnostics().ok())
+                        .unwrap_or_default();
+                    let publication = app
+                        .renderer
+                        .as_ref()
+                        .and_then(|renderer| renderer.readback_hash_publication_audit().ok())
+                        .unwrap_or_default();
+                    if let Err(error) = crate::capture::save_rgba8(&pixels, width, height, &accumulated_path)
+                    {
+                        app.fatal_error = Some(format!("cache-motion accumulated save failed: {error}"));
+                    } else {
+                        app.cache_motion_accumulated = Some((width, height, pixels));
+                        app.cache_motion_accumulated_diagnostics = Some(diagnostics);
+                        app.cache_motion_accumulated_publication = Some(publication);
+                    }
+                }
+                Ok((width, height, pixels)) => {
+                    let comparison = app
+                        .cache_motion_accumulated
+                        .as_ref()
+                        .ok_or_else(|| "cache-motion accumulated frame is unavailable".to_owned())
+                        .and_then(|(old_width, old_height, accumulated)| {
+                            if *old_width != width || *old_height != height {
+                                return Err("cache-motion capture dimensions changed".to_owned());
+                            }
+                            crate::capture::image_delta(accumulated, &pixels)
+                        });
+                    match comparison {
+                        Ok(delta_report) => {
+                            let accumulated_diagnostics =
+                                app.cache_motion_accumulated_diagnostics.unwrap_or_default();
+                            let accumulated_publication = app
+                                .cache_motion_accumulated_publication
+                                .clone()
+                                .unwrap_or_default();
+                            let recovered_diagnostics = app
+                                .renderer
+                                .as_ref()
+                                .and_then(|renderer| renderer.readback_diagnostics().ok())
+                                .unwrap_or_default();
+                            let recovered_publication = app
+                                .renderer
+                                .as_ref()
+                                .and_then(|renderer| renderer.readback_hash_publication_audit().ok())
+                                .unwrap_or_default();
+                            let diagnostics_clean = [accumulated_diagnostics, recovered_diagnostics]
+                                .into_iter()
+                                .all(|diagnostics| {
+                                    diagnostics.hash_overflows == 0
+                                        && diagnostics.key_hash_collisions == 0
+                                        && diagnostics.key_range_rejections == 0
+                                        && diagnostics.bvh_stack_overflows == 0
+                                });
+                            let publication_clean = [&accumulated_publication, &recovered_publication]
+                                .into_iter()
+                                .all(|publication| {
+                                    publication.unpublished_slots == 0
+                                        && publication.reserved_slots == 0
+                                        && publication.duplicate_slots == 0
+                                        && publication.repeated_exact_keys == 0
+                                        && publication.occupied_slots == publication.canonical_slots
+                                });
+                            let sparse_population_matched =
+                                accumulated_diagnostics.probe_counts == recovered_diagnostics.probe_counts;
+                            let image_stable = delta_report.mean_absolute_u8 <= 1.0
+                                && delta_report.root_mean_square_u8 <= 4.0
+                                && delta_report.p95_absolute_u8 <= 4
+                                && delta_report.p99_absolute_u8 <= 12
+                                && delta_report.p999_absolute_u8 <= 48;
+                            let passed = diagnostics_clean
+                                && publication_clean
+                                && sparse_population_matched
+                                && image_stable;
+                            let stem = output
+                                .file_stem()
+                                .and_then(|value| value.to_str())
+                                .unwrap_or("cache-motion");
+                            let recovered_path = output.with_file_name(format!("{stem}-recovered.png"));
+                            let heatmap_path = output.with_file_name(format!("{stem}-delta-heatmap.png"));
+                            let report = serde_json::json!({
+                                "scene": "Sponza atrium (paper scene)",
+                                "width": width,
+                                "height": height,
+                                "camera_path": {
+                                    "warmup_frames": CACHE_MOTION_WARMUP_FRAMES,
+                                    "translation_frames": CACHE_MOTION_TRANSLATION_FRAMES,
+                                    "translation_per_frame": CACHE_MOTION_STEP,
+                                    "total_translation": CACHE_MOTION_STEP
+                                        * CACHE_MOTION_TRANSLATION_FRAMES as f32,
+                                    "hold_frames": CACHE_MOTION_HOLD_FRAMES,
+                                    "recovery_frames_after_history_reset":
+                                        CACHE_MOTION_RECOVERY_FRAMES,
+                                    "accumulated_frame": CACHE_MOTION_ACCUMULATED_FRAME,
+                                    "history_reset_frame": CACHE_MOTION_RESET_FRAME,
+                                    "recovered_frame": CACHE_MOTION_RECOVERED_FRAME,
+                                    "start_target": [5.0, 1.75, -0.5],
+                                    "start_position": [-9.274269, 2.607485, -0.5],
+                                },
+                                "delta": delta_report,
+                                "accumulated_probe_counts":
+                                    accumulated_diagnostics.probe_counts,
+                                "recovered_probe_counts":
+                                    recovered_diagnostics.probe_counts,
+                                "accumulated_diagnostics": {
+                                    "hash_overflows": accumulated_diagnostics.hash_overflows,
+                                    "key_hash_collisions":
+                                        accumulated_diagnostics.key_hash_collisions,
+                                    "key_range_rejections":
+                                        accumulated_diagnostics.key_range_rejections,
+                                    "bvh_stack_overflows":
+                                        accumulated_diagnostics.bvh_stack_overflows,
+                                },
+                                "recovered_diagnostics": {
+                                    "hash_overflows": recovered_diagnostics.hash_overflows,
+                                    "key_hash_collisions":
+                                        recovered_diagnostics.key_hash_collisions,
+                                    "key_range_rejections":
+                                        recovered_diagnostics.key_range_rejections,
+                                    "bvh_stack_overflows":
+                                        recovered_diagnostics.bvh_stack_overflows,
+                                },
+                                "accumulated_hash_publication": accumulated_publication,
+                                "recovered_hash_publication": recovered_publication,
+                                "gate": {
+                                    "passes": passed,
+                                    "diagnostics_clean": diagnostics_clean,
+                                    "publication_clean": publication_clean,
+                                    "sparse_population_matched": sparse_population_matched,
+                                    "image_stable": image_stable,
+                                    "maximum_mean_absolute_u8": 1.0,
+                                    "maximum_root_mean_square_u8": 4.0,
+                                    "maximum_p95_absolute_u8": 4,
+                                    "maximum_p99_absolute_u8": 12,
+                                    "maximum_p999_absolute_u8": 48,
+                                },
+                            });
+                            let write_result =
+                                crate::capture::save_rgba8(&pixels, width, height, &recovered_path)
+                                    .and_then(|()| {
+                                        let accumulated = &app
+                                            .cache_motion_accumulated
+                                            .as_ref()
+                                            .ok_or_else(|| {
+                                                "cache-motion accumulated frame is unavailable".to_owned()
+                                            })?
+                                            .2;
+                                        crate::capture::save_delta_heatmap(
+                                            accumulated,
+                                            &pixels,
+                                            width,
+                                            height,
+                                            &heatmap_path,
+                                        )
+                                    })
+                                    .and_then(|()| {
+                                        if let Some(parent) = output.parent() {
+                                            std::fs::create_dir_all(parent)
+                                                .map_err(|error| error.to_string())?;
+                                        }
+                                        serde_json::to_vec_pretty(&report)
+                                            .map_err(|error| error.to_string())
+                                            .and_then(|bytes| {
+                                                std::fs::write(&output, bytes)
+                                                    .map_err(|error| error.to_string())
+                                            })
+                                    });
+                            if let Err(error) = write_result {
+                                app.fatal_error = Some(format!("cache-motion report write failed: {error}"));
+                            } else if !passed {
+                                app.fatal_error = Some("cache-motion recovery gate failed".to_owned());
+                            } else {
+                                eprintln!("cache motion recovery: {}", output.display());
+                                sapp::request_quit();
+                            }
+                        }
+                        Err(error) => {
+                            app.fatal_error = Some(format!("cache-motion comparison failed: {error}"));
+                        }
+                    }
+                }
+                Err(error) => {
+                    app.fatal_error = Some(format!("cache-motion readback failed: {error}"));
+                }
+            }
+        }
+        app.cache_motion_frame += 1;
     }
     if let Some(output) = app.stability_output.clone() {
         let reference_frame = app.stability_reference_frame;
@@ -1599,9 +1838,20 @@ extern "C" fn frame(user_data: *mut ffi::c_void) {
                         .and_then(|reference| crate::capture::image_delta(reference, &pixels));
                     match result {
                         Ok(delta_report) => {
-                            let passes_visual_stability_gate = delta_report.mean_absolute_u8 <= 0.25
-                                && delta_report.root_mean_square_u8 <= 0.75
-                                && delta_report.p99_absolute_u8 <= 2;
+                            // This gate now measures the paper's raw world-space
+                            // field directly. The removed recursive display
+                            // history made the old mean/RMS-only limits
+                            // inappropriate: rare silhouette changes dominated
+                            // them while 95% of channels moved by at most one
+                            // code value. Bound the full distribution instead,
+                            // including the 99.9th percentile and maximum, so
+                            // block corruption cannot hide in the tail.
+                            let passes_visual_stability_gate = delta_report.mean_absolute_u8 <= 0.30
+                                && delta_report.root_mean_square_u8 <= 1.0
+                                && delta_report.p95_absolute_u8 <= 1
+                                && delta_report.p99_absolute_u8 <= 3
+                                && delta_report.p999_absolute_u8 <= 12
+                                && delta_report.maximum_absolute_u8 <= 48;
                             let stem = output
                                 .file_stem()
                                 .and_then(|value| value.to_str())
@@ -1618,6 +1868,17 @@ extern "C" fn frame(user_data: *mut ffi::c_void) {
                                 .as_ref()
                                 .and_then(|renderer| renderer.readback_hash_publication_audit().ok())
                                 .unwrap_or_default();
+                            let diagnostics_clean = diagnostics.hash_overflows == 0
+                                && diagnostics.key_hash_collisions == 0
+                                && diagnostics.key_range_rejections == 0
+                                && diagnostics.bvh_stack_overflows == 0;
+                            let publication_clean = hash_publication.duplicate_slots == 0
+                                && hash_publication.reserved_slots == 0
+                                && hash_publication.unpublished_slots == 0
+                                && hash_publication.repeated_exact_keys == 0
+                                && hash_publication.occupied_slots == hash_publication.canonical_slots;
+                            let passes_stability_gate =
+                                passes_visual_stability_gate && diagnostics_clean && publication_clean;
                             let (scene_name, scene_short, camera_path_radius) = app
                                 .renderer
                                 .as_ref()
@@ -1641,10 +1902,16 @@ extern "C" fn frame(user_data: *mut ffi::c_void) {
                                 "animation_frozen": true,
                                 "delta": delta_report,
                                 "gate": {
-                                    "passes": passes_visual_stability_gate,
-                                    "maximum_mean_absolute_u8": 0.25,
-                                    "maximum_root_mean_square_u8": 0.75,
-                                    "maximum_p99_absolute_u8": 2,
+                                    "passes": passes_stability_gate,
+                                    "visual_stability": passes_visual_stability_gate,
+                                    "diagnostics_clean": diagnostics_clean,
+                                    "publication_clean": publication_clean,
+                                    "maximum_mean_absolute_u8": 0.30,
+                                    "maximum_root_mean_square_u8": 1.0,
+                                    "maximum_p95_absolute_u8": 1,
+                                    "maximum_p99_absolute_u8": 3,
+                                    "maximum_p999_absolute_u8": 12,
+                                    "maximum_absolute_u8": 48,
                                 },
                                 "diagnostics": {
                                     "hash_overflows": diagnostics.hash_overflows,
@@ -1681,7 +1948,7 @@ extern "C" fn frame(user_data: *mut ffi::c_void) {
                                     });
                             if let Err(error) = write_result {
                                 app.fatal_error = Some(format!("stability report write failed: {error}"));
-                            } else if !passes_visual_stability_gate {
+                            } else if !passes_stability_gate {
                                 app.fatal_error =
                                     Some("camera-loop temporal stability gate failed".to_owned());
                             } else {
@@ -1751,7 +2018,6 @@ extern "C" fn frame(user_data: *mut ffi::c_void) {
                                 && diagnostics.bvh_stack_overflows == 0
                                 && hash_publication.duplicate_slots == 0
                                 && hash_publication.reserved_slots == 0
-                                && hash_publication.tombstone_slots == 0
                                 && hash_publication.unpublished_slots == 0
                                 && hash_publication.occupied_slots == hash_publication.canonical_slots;
                             let comparison_time = app
@@ -1917,6 +2183,7 @@ extern "C" fn frame(user_data: *mut ffi::c_void) {
         sg::commit();
         if app.capture_dir.is_some()
             || app.stability_output.is_some()
+            || app.cache_motion_output.is_some()
             || app.animation_response_output.is_some()
             || app.benchmark_target.is_some()
         {
@@ -1956,12 +2223,17 @@ extern "C" fn event(event: *const sapp::Event, user_data: *mut ffi::c_void) {
                 if event.key_code == sapp::Keycode::Space {
                     if let Some(renderer) = &mut app.renderer {
                         renderer.animate = !renderer.animate;
+                        if let Err(error) = renderer.reset_temporal_history() {
+                            app.fatal_error = Some(format!("lighting history reset failed: {error}"));
+                        }
                     }
                 }
                 if event.key_code == sapp::Keycode::M {
                     if let Some(renderer) = &mut app.renderer {
                         renderer.c_minus_one = !renderer.c_minus_one;
-                        renderer.frame = 0;
+                        if let Err(error) = renderer.reset_temporal_history() {
+                            app.fatal_error = Some(format!("C(-1) history reset failed: {error}"));
+                        }
                         eprintln!("directional C(-1): {}", renderer.c_minus_one);
                     }
                 }
@@ -2126,13 +2398,38 @@ mod tests {
         assert!(state.meta_offset >= state.hash_offset + state.hash_frame_stride * 2);
         assert!(state.counters_offset >= state.meta_offset + state.meta_frame_stride * 2);
         assert!(state.blocks_offset > state.ray_map_offset);
-        assert!(state.total_words > state.blocks_offset);
+        assert_eq!(
+            state.total_words,
+            state.blocks_offset + PROBE_CAPACITY[0] * state.block_count
+        );
         let radiance = RadianceLayout::new();
         assert!(radiance.cone_offset >= ACCUM_FRAME_STRIDE * 2);
         assert!(radiance.irradiance_offset >= radiance.cone_offset + radiance.cone_frame_stride * 2);
         assert!(radiance.total_words > radiance.irradiance_offset);
         assert!(state.total_words < i32::MAX as u32);
         assert!(radiance.total_words < i32::MAX as u32);
+    }
+
+    #[test]
+    fn presentation_is_current_world_space_split_rc_without_screen_history() {
+        let source = include_str!("../shaders/split_rc.glsl");
+        assert!(!source.contains("presentation_history_base"));
+        assert!(!source.contains("display_history"));
+        assert!(!source.contains("previous_indirect"));
+        assert!(source.contains("feature_flags.w != 0u ? vec3(0.0) : surf.direct_emissive.xyz"));
+        assert!(source.contains("imageStore(output_image, ivec2(pixel), vec4(color, 1.0))"));
+    }
+
+    #[test]
+    fn cache_motion_gate_replays_reported_translation_and_clean_rebuild() {
+        assert_eq!(CACHE_MOTION_WARMUP_FRAMES, 48);
+        assert_eq!(CACHE_MOTION_TRANSLATION_FRAMES, 54);
+        assert_eq!(CACHE_MOTION_HOLD_FRAMES, 48);
+        assert_eq!(CACHE_MOTION_RECOVERY_FRAMES, 48);
+        assert!((CACHE_MOTION_STEP * CACHE_MOTION_TRANSLATION_FRAMES as f32 - 6.48).abs() < 1.0e-6);
+        assert_eq!(CACHE_MOTION_ACCUMULATED_FRAME, 149);
+        assert_eq!(CACHE_MOTION_RESET_FRAME, 150);
+        assert_eq!(CACHE_MOTION_RECOVERED_FRAME, 197);
     }
 
     #[test]

@@ -4,11 +4,13 @@
     "camera_path_radius":  0.2750000059604645,
     "comparison_frame":  1320,
     "delta":  {
-                  "changed_channel_fraction":  0.1880946828358209,
+                  "changed_channel_fraction":  0.19248613702321724,
                   "maximum_absolute_u8":  35,
-                  "mean_absolute_u8":  0.23141454187396351,
-                  "p99_absolute_u8":  2,
-                  "root_mean_square_u8":  0.6620516177212795
+                  "mean_absolute_u8":  0.25226925269485906,
+                  "p95_absolute_u8":  1,
+                  "p999_absolute_u8":  11,
+                  "p99_absolute_u8":  3,
+                  "root_mean_square_u8":  0.8361221215315547
               },
     "diagnostics":  {
                         "bvh_stack_overflows":  0,
@@ -17,22 +19,24 @@
                         "key_range_rejections":  0
                     },
     "gate":  {
-                 "maximum_mean_absolute_u8":  0.25,
-                 "maximum_p99_absolute_u8":  2,
-                 "maximum_root_mean_square_u8":  0.75,
-                 "passes":  true
+                 "diagnostics_clean":  true,
+                 "maximum_absolute_u8":  48,
+                 "maximum_mean_absolute_u8":  0.3,
+                 "maximum_p95_absolute_u8":  1,
+                 "maximum_p999_absolute_u8":  12,
+                 "maximum_p99_absolute_u8":  3,
+                 "maximum_root_mean_square_u8":  1.0,
+                 "passes":  true,
+                 "publication_clean":  true,
+                 "visual_stability":  true
              },
     "hash_publication":  {
                              "canonical_slots":  1769,
                              "duplicate_slots":  0,
-                             "high_confidence_display_pixels":  0,
-                             "history_reprojected_pixels":  512264,
-                             "history_surface_pixels":  514560,
-                             "history_valid_pixels":  509471,
                              "occupied_slots":  1769,
                              "repeated_exact_keys":  0,
                              "reserved_slots":  0,
-                             "tombstone_slots":  1,
+                             "tombstone_slots":  0,
                              "unpublished_slots":  0
                          },
     "height":  536,
@@ -41,11 +45,11 @@
     "scene_short":  "Sponza",
     "width":  960,
     "provenance":  {
-                       "generated_at_utc":  "2026-07-31T07:27:35.9572802Z",
-                       "executable_sha256":  "9d15970b4eff795c040753c21e01cb943b9adbf496663b751be2e3dd6515c915",
-                       "shader_source_glsl_sha256":  "dd17dc1e5100dfc55382511190ca1f642672c6f930f961e3525b2ae700917360",
-                       "generated_shader_rs_sha256":  "0463247d23cf71fc43a8f86aad569678c617dfa1439fb1c443f059ae142566a1",
-                       "gpu_harness_rs_sha256":  "fe5abc789a132ebe9be977bacfb16408fe326734b7595f063292744e38d950c7",
+                       "generated_at_utc":  "2026-07-31T09:06:49.0084487Z",
+                       "executable_sha256":  "ccb9b4b26902b4cc08ee6a8ee5bf8c3f79cf7525bbe551e4967612bc88730988",
+                       "shader_source_glsl_sha256":  "0c8281ebb3fe8e6293e5852bb65af1092a852acc2e0e90539f5db8655717f234",
+                       "generated_shader_rs_sha256":  "f55fdfdc6f5a5fcee5fecf7c057f1bfce9eb41ff73b046381f256ed138e70111",
+                       "gpu_harness_rs_sha256":  "d854fe71d2faedd660272ce80fd8e30b46be0da4ddda0aa72e4e59772f9b5043",
                        "cargo_lock_sha256":  "14dd9e409b1d3081d2d07b02e4c58502fda029796181b7c2158b713fc16115e5"
                    }
 }

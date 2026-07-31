@@ -363,7 +363,9 @@ pub fn write_contact_sheet(paths: &[PathBuf], destination: &Path) -> Result<(), 
 pub struct ImageDelta {
     pub mean_absolute_u8: f64,
     pub root_mean_square_u8: f64,
+    pub p95_absolute_u8: u8,
     pub p99_absolute_u8: u8,
+    pub p999_absolute_u8: u8,
     pub maximum_absolute_u8: u8,
     pub changed_channel_fraction: f64,
 }
@@ -392,25 +394,32 @@ pub fn image_delta(first: &[u8], second: &[u8]) -> Result<ImageDelta, String> {
     if samples == 0 {
         return Err("RGBA8 comparison input is empty".to_owned());
     }
-    let percentile_target = samples * 99 / 100;
-    let mut cumulative = 0_u64;
-    let mut p99 = 0_u8;
-    let mut found_p99 = false;
+    let percentile = |numerator: u64, denominator: u64| {
+        let target = (samples * numerator).div_ceil(denominator);
+        let mut cumulative = 0_u64;
+        for (delta, count) in histogram.iter().copied().enumerate() {
+            cumulative += count;
+            if cumulative >= target {
+                return delta as u8;
+            }
+        }
+        255
+    };
+    let p95 = percentile(95, 100);
+    let p99 = percentile(99, 100);
+    let p999 = percentile(999, 1_000);
     let mut maximum = 0_u8;
     for (delta, count) in histogram.into_iter().enumerate() {
         if count > 0 {
             maximum = delta as u8;
         }
-        cumulative += count;
-        if cumulative >= percentile_target && !found_p99 {
-            p99 = delta as u8;
-            found_p99 = true;
-        }
     }
     Ok(ImageDelta {
         mean_absolute_u8: absolute_sum as f64 / samples as f64,
         root_mean_square_u8: (square_sum as f64 / samples as f64).sqrt(),
+        p95_absolute_u8: p95,
         p99_absolute_u8: p99,
+        p999_absolute_u8: p999,
         maximum_absolute_u8: maximum,
         changed_channel_fraction: changed as f64 / samples as f64,
     })

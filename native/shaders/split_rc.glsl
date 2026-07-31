@@ -267,10 +267,6 @@ uint hit_record_base(uint frame, uint sample_id) {
     return state_layout_1.y + ray_slot_count() * 2u +
            frame * sample_count() * 8u + sample_id * 8u;
 }
-uint presentation_history_base(uint frame, uint pixel) {
-    return radiance_layout_1.z + frame * radiance_layout_1.w + pixel * 16u;
-}
-
 vec4 load_state_vec4(uint base) {
     return vec4(
         uintBitsToFloat(state_words[base].value),
@@ -1771,13 +1767,9 @@ void main() {
     if (any(greaterThanEqual(pixel, dimensions_frame.xy))) return;
     uint pixel_index = pixel.y * dimensions_frame.x + pixel.x;
     surface surf = surfaces[pixel_index];
-    vec3 color = surf.direct_emissive.xyz;
+    vec3 color = feature_flags.w != 0u ? vec3(0.0) : surf.direct_emissive.xyz;
     vec3 indirect = vec3(0.0);
-    vec3 display_history_sum = vec3(0.0);
-    float display_confidence_sum = 0.0;
-    float display_history_count = 0.0;
     if (surf.position.w > 0.5) {
-        atomicAdd(state_words[diagnostics_offset() + 7u].value, 1u);
         float distance = max(max(abs(surf.position.x - camera_time.x), abs(surf.position.y - camera_time.y)), abs(surf.position.z - camera_time.z));
         float normalized = max(1.0, distance / (environment_base_spacing.w * 16.0));
         uint fine = uint(clamp(floor(log2(normalized)), 0.0, 7.0));
@@ -1805,118 +1797,11 @@ void main() {
                 blend
             );
         }
-        if (dimensions_frame.z > 0u && pass_params.y == 0u) {
-            vec4 previous_clip =
-                previous_view_projection * vec4(surf.position.xyz, 1.0);
-            if (previous_clip.w > 0.0) {
-                vec2 previous_uv =
-                    previous_clip.xy / previous_clip.w * 0.5 + vec2(0.5);
-                if (all(greaterThanEqual(previous_uv, vec2(0.0))) &&
-                    all(lessThanEqual(previous_uv, vec2(1.0)))) {
-                    atomicAdd(state_words[diagnostics_offset() + 8u].value, 1u);
-                    ivec2 previous_pixel = ivec2(min(
-                        dimensions_frame.xy - uvec2(1u),
-                        uvec2(previous_uv * vec2(dimensions_frame.xy))
-                    ));
-                    float position_tolerance =
-                        max(0.02, environment_base_spacing.w * 0.12);
-                    vec3 history_sum = vec3(0.0);
-                    float history_count = 0.0;
-                    for (int offset_y = -1; offset_y <= 1; offset_y++) {
-                        for (int offset_x = -1; offset_x <= 1; offset_x++) {
-                            ivec2 candidate_pixel = clamp(
-                                previous_pixel + ivec2(offset_x, offset_y),
-                                ivec2(0),
-                                ivec2(dimensions_frame.xy) - ivec2(1)
-                            );
-                            uint previous_index =
-                                uint(candidate_pixel.y) * dimensions_frame.x +
-                                uint(candidate_pixel.x);
-                            uint previous_base = presentation_history_base(
-                                previous_frame(),
-                                previous_index
-                            );
-                            vec4 previous_position =
-                                load_state_vec4(previous_base);
-                            vec4 previous_normal =
-                                load_state_vec4(previous_base + 4u);
-                            vec3 previous_indirect =
-                                load_state_vec4(previous_base + 8u).xyz;
-                            bool valid_sample =
-                                previous_position.w > 0.5 &&
-                                length(
-                                    previous_position.xyz - surf.position.xyz
-                                ) < position_tolerance &&
-                                dot(
-                                    normalize(previous_normal.xyz),
-                                    normal
-                                ) > 0.99 &&
-                                !any(isnan(previous_indirect)) &&
-                                !any(isinf(previous_indirect));
-                            if (valid_sample) {
-                                history_sum += previous_indirect;
-                                history_count += 1.0;
-                                vec4 previous_display =
-                                    load_state_vec4(previous_base + 12u);
-                                if (!any(isnan(previous_display)) &&
-                                    !any(isinf(previous_display))) {
-                                    display_history_sum += previous_display.xyz;
-                                    display_confidence_sum +=
-                                        max(1.0, previous_display.w);
-                                    display_history_count += 1.0;
-                                }
-                            }
-                        }
-                    }
-                    if (history_count > 0.0) {
-                        atomicAdd(state_words[diagnostics_offset() + 6u].value, 1u);
-                        float presentation_weight =
-                            0.0;
-                        indirect = mix(
-                            indirect,
-                            history_sum / history_count,
-                            presentation_weight
-                        );
-                    }
-                }
-            }
-        }
         color += indirect;
     }
-    uint history_base = presentation_history_base(
-        current_frame(),
-        pixel_index
-    );
-    store_state_vec4(history_base, surf.position);
-    store_state_vec4(
-        history_base + 4u,
-        surf.position.w > 0.5
-            ? vec4(normalize(surf.normal_depth.xyz), 1.0)
-            : vec4(0.0)
-    );
-    store_state_vec4(history_base + 8u, vec4(indirect, 1.0));
     color *= point_color_exposure.w;
     color = color / (vec3(1.0) + color);
     color = pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));
-    float display_confidence = 1.0;
-    if (pass_params.y == 0u && display_history_count > 0.0) {
-        display_confidence = min(
-            4096.0,
-            display_confidence_sum / display_history_count + 1.0
-        );
-        color = mix(
-            color,
-            display_history_sum / display_history_count,
-            0.5
-        );
-    }
-    if (display_confidence > 100.0) {
-        atomicAdd(state_words[diagnostics_offset() + 11u].value, 1u);
-    }
-    store_state_vec4(
-        history_base + 12u,
-        vec4(color, display_confidence)
-    );
     imageStore(output_image, ivec2(pixel), vec4(color, 1.0));
 }
 @end

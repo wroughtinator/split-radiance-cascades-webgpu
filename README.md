@@ -54,26 +54,28 @@ queries makes a conservative five-second upscale probe after sustaining a
 vsync-limited 60 Hz cadence, so a transient slowdown cannot leave the renderer
 permanently downscaled.
 
-The sparse hierarchy retains prior probes inside a bounded view guard so
-trilinear neighborhoods and parent ancestry do not pop as the camera moves.
-After the paper's world-space interval accumulation, a production presentation
-resolve reprojects the tone-mapped result by world position and surface normal.
-It rejects disocclusions and normal changes, so it stabilizes sparse-to-screen
-reconstruction without smearing newly visible geometry. This final resolve is
-an explicitly documented browser-production extension, not a paper equation.
+The sparse hierarchy is recreated from current visible surfaces every frame,
+as specified by Algorithms 1 and 3. Only probes that exist in both frames may
+reuse an exact-key world-space interval. Old off-screen probes are not retained
+as interpolation neighbors. The tone-mapped current Split RC result is
+presented directly; there is no recursive screen-space presentation history.
+These two invariants prevent a long camera translation from accumulating stale
+block-shaped light and ensure that rebuilding history at a fixed pose produces
+the same sparse population.
 
 Stable mode advances the deterministic R2/Cranley-Patterson sequence
 continuously. An odd 32-bit Weyl permutation supplies the global rotation, so
 the 2D rotation pair cannot repeat before the full `2^32`-frame cycle and never
-loses precision through a large float conversion. Paused lighting bootstraps
-at 0.92 for 24 frames, then uses a 0.98 exact-key interval-history blend;
-animated lighting remains at 0.92 and is separately checked for both smooth
-motion and step-response lag. Toggling the lighting clock invalidates history
+loses precision through a large float conversion. Paused lighting accumulates
+an exact-key sample-count-weighted running average, capped at 16,384 effective
+samples per interval; animated lighting uses a bounded 0.92 EMA and is
+separately checked for both smooth motion and step-response lag. Toggling the
+lighting clock invalidates history
 instead of retaining radiance from a discontinuous sun pose. The optional
-secondary cache uses a stronger world-validated presentation history under
-camera motion.
+secondary cache participates in the same exact-key world-space interval
+history and is also presented without a screen-space feedback path.
 
-The built-in audit has eleven independent gates:
+The built-in audit has twelve independent gates:
 
 - matched world-probe irradiance while the camera moves
 - two separately initialized runs of the same camera trajectory, compared from
@@ -81,6 +83,9 @@ The built-in audit has eleven independent gates:
 - uninterrupted adjacent moving-camera frames compared after world-position
   reprojection (baseline and multibounce)
 - the same uninterrupted motion with animated lights enabled
+- the reported low-camera Sponza translation, followed by a same-pose history
+  rebuild; it requires identical per-cascade probe counts, zero diagnostics,
+  clean motion checkpoints, and a low image delta
 - a fixed-camera moving-light step response compared with a freshly converged
   target, which detects excessive temporal lag
 - a deliberate near/far Sponza camera dolly aimed at view-sized distant meshes
@@ -92,10 +97,12 @@ The built-in audit has eleven independent gates:
 - sparse-hash, key-range, capacity, BVH-stack, and WebGPU error diagnostics
 
 On the development NVIDIA RTX 5080, the final 32-frame Sponza motion runs
-measured at most 2/255 at p95 for baseline, moving-light, and multibounce paths;
-the multibounce p99 maximum was 6/255. Every per-capture sparse diagnostic was
-zero. This directly covers the final image rather than inferring stability
-from probe values.
+measured 3/255 at p95 for baseline and moving-light paths and 4/255 for
+multibounce; the multibounce p99 maximum was 9/255. The exact reported
+low-camera translation/rebuild gate measured 3/255 at p95 and 5/255 at p99,
+with identical `[2010, 629, 196, 65]` per-cascade sparse populations. Every
+per-capture sparse diagnostic was zero. This directly covers the final image
+rather than inferring stability from probe values.
 
 ## Twelve validation scenes
 
@@ -130,13 +137,13 @@ Balanced mode bounds the internal screen to 360,000 pixels; the development
 viewport resolves to 800x450 and traces one primary R2 ray per internal-screen
 pixel:
 
-- the final all-scene audit measured Sponza at 7.67 ms GPU and 60 FPS; the
-  slowest callback rate across all 12 scenes was 57.13 FPS
-- baseline, moving-light, and multibounce 32-frame motion gates measure 2/255
-  at p95; multibounce measures 6/255 at p99
-- the 512-spp Sponza reference gate measures 37.74% raw NRMSE, 31.22%
-  99%-trimmed NRMSE, 21.30% low-frequency scale-invariant NRMSE, 0.141
-  scene-linear p95 error, 0.35% severe under-light outliers, and 3.47%
+- the final all-scene audit measured Sponza at 7.01 ms GPU and 60 FPS; the
+  slowest callback rate across all 12 scenes was 55.40 FPS
+- baseline and moving-light 32-frame motion gates measure 3/255 at p95;
+  multibounce measures 4/255 at p95 and 9/255 at p99
+- the 512-spp Sponza reference gate measures 37.74% raw NRMSE, 31.19%
+  99%-trimmed NRMSE, 21.29% low-frequency scale-invariant NRMSE, 0.142
+  scene-linear p95 error, 0.35% severe under-light outliers, and 3.39%
   bright-leak candidates
 - the point-shadow/BVH classification mismatch is 0% in the laboratory and
   Cornell scenes and 1.19% on the large heightmap; corresponding sun-shadow

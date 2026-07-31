@@ -20,6 +20,8 @@ Remove-Item Env:SPLIT_RC_TEMPORAL_JITTER -ErrorAction SilentlyContinue
 Remove-Item Env:SPLIT_RC_ROUGH_SPECULAR -ErrorAction SilentlyContinue
 Remove-Item Env:SPLIT_RC_FREEZE_LIGHTS -ErrorAction SilentlyContinue
 Remove-Item Env:SPLIT_RC_STABILITY_REFERENCE_FRAME -ErrorAction SilentlyContinue
+Remove-Item Env:SPLIT_RC_CACHE_MOTION_OUT -ErrorAction SilentlyContinue
+Remove-Item Env:SPLIT_RC_INDIRECT_ONLY -ErrorAction SilentlyContinue
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $executable = Join-Path $TargetDir "release\split-rc-native.exe"

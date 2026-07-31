@@ -11,7 +11,7 @@
 | Front-to-back merge | `cs_merge` | raw interval is persisted separately from composed cone; missing-plus-missing remains invalid instead of fabricating environment radiance |
 | Spatial interpolation | shade trilinear lookup over at most eight sparse probes | missing weights are renormalized |
 | LOD overlap | primary collection and final shade | continuity tests at the band boundary |
-| Temporal accumulation | double-buffered exact-key raw accumulators plus world/normal-validated presentation history for fixed-light validation | temporal rotation, key-stability audit, full-resolution Lab/Sponza repeated-camera-loop RGB delta gates, and fixed-camera animated-light response gate |
+| Temporal accumulation | double-buffered exact-key raw accumulators; the current tone-mapped Split RC field is presented directly without recursive screen history | temporal rotation, key-stability audit, full-resolution Lab/Sponza repeated-camera-loop raw RGB delta gates, fixed-camera animated-light response, and exact Sponza translation/clean-rebuild gate |
 | Multi-bounce secondary cache | previous-hit stream and irradiance feedback | separate primary/secondary key bit |
 | Directional irradiance cache | filterable RGBA16F atlas with bordered 8×8 octahedral tiles | seam-border shader construction and 12-scene captures |
 | Directional `C(-1)` experiment | screen-space near interval plus 32 equal-area directional integrations weighted by `4π/32` | constant-radiance Lambertian oracle, runtime `M` toggle, and startup environment switch |
@@ -42,9 +42,11 @@ The CPU audit proves deterministic math, scene construction, asset metadata,
 finite lighting, hash publication behavior, radiometric quadrature, and BVH
 agreement. Cross-compilation proves the selected native backends accept the
 complete frame graph. D3D11 capture/readback verifies actual GPU output;
-full-resolution repeated-pose gates measure temporal stability in both the
-laboratory and Sponza; a separate fixed-camera Sponza gate proves that moving
-sun and point lights still produce a strong output response; runtime
+full-resolution repeated-pose gates measure raw-field temporal stability in
+both the laboratory and Sponza; an indirect-only Sponza gate reproduces the
+reported downward/forward translation and compares the accumulated final pose
+with a clean same-pose rebuild; a separate fixed-camera Sponza gate proves that
+moving sun and point lights still produce a strong output response; runtime
 diagnostics expose overflow and publication failures. Performance remains
 machine-specific and is recorded by repeated GPU timestamps distributed
 through the measured interval plus callback throughput rather than inferred

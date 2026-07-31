@@ -14,7 +14,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const metadataBase = new URL(`${protocol}://${host}`);
   const title = "Split Radiance Cascades — WebGPU GI Lab";
   const description =
-    "Sparse world-space probes, split-ray interval deposition, cascade merging, and ten real-time validation scenes.";
+    "Sparse world-space probes, split-ray interval deposition, cascade merging, and twelve real-time validation scenes.";
   return {
     metadataBase,
     title,

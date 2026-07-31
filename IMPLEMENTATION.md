@@ -6,7 +6,6 @@
 sun shadow pass + six-face moving-point shadow pass
   -> G-buffer (world, two-sided normal, albedo/emission, depth)
   -> clear current hash, counters, prefixes, and interval accumulators
-  -> retain the bounded prior sparse hierarchy inside a view guard
   -> insert primary c0 probes from every visible internal-screen pixel
   -> insert secondary c0 probes from previous-frame ray hits at LOD + 2
   -> initialize c1 through c3 parents
@@ -17,8 +16,7 @@ sun shadow pass + six-face moving-point shadow pass
   -> exact-key interval accumulation and merge c3 through c0
   -> prefilter c0 into a filterable bordered 6x6 octahedral atlas
   -> diffuse + C(-1) + rough specular + direct current composite
-  -> world-position/normal-validated temporal resolve
-  -> present
+  -> present the current composite directly
 ```
 
 Every arrow is a WebGPU pass boundary, providing ordering for atomic writes and
@@ -48,9 +46,11 @@ counted as an overflow; they are never silently clamped onto an unrelated key.
 
 Probe centers are half-cell offsets. Merging and final gathers use only
 existing trilinear neighbors and divide by the accumulated weight.
-Prior primary, secondary, and parent probes that remain inside a bounded
-frustum guard are retained before current visibility insertion. This preserves
-the complete sparse interpolation ancestry while keeping the cache bounded.
+The current hierarchy contains only probes induced by current visible surfaces
+and their parent chain. A matching previous key can supply interval history,
+but it is never inserted merely because it existed in the prior frame. This
+matches the paper's per-frame hashmap recreation and prevents stale off-screen
+probes from becoming sparse interpolation neighbors.
 
 LOD selection uses Chebyshev distance. A coarser LOD begins at 90% of its
 nominal boundary; both LODs are initialized and evaluated through the overlap,
@@ -84,8 +84,9 @@ paper's single-frame inspection path.
 The temporal rotation uses an odd 32-bit Weyl permutation whose low/high halves
 approximate the paper's two irrational rotation increments. The complete pair
 does not repeat before `2^32` frames and avoids float precision collapse.
-Exact-key intervals therefore keep converging under paused lighting. Animated
-lighting keeps a 0.92 interval-history blend active and is validated against a
+Exact-key intervals therefore keep converging under paused lighting. Static
+intervals use their accumulated sample counts, capped at 16,384 effective
+samples; animated lighting keeps a bounded 0.92 EMA and is validated against a
 stepped, freshly-converged target.
 
 ## Ray splitting and merge
@@ -141,17 +142,15 @@ described by the paper.
 Hash, interval, and irradiance storage are double-buffered. Temporal reuse
 looks up the exact previous world/LOD/cache key and blends the previous
 directional `(J, beta)` interval before recursive merge; missing, disoccluded,
-or LOD-changed probes reject history. Fixed lighting bootstraps at 0.92 for 24
-frames and then uses 0.98; animated lighting remains at 0.92. Changing the
+or LOD-changed probes reject history. Fixed lighting uses exact sample-count
+accumulation; animated lighting uses a 0.92 EMA. Changing the
 lighting-animation mode invalidates history.
 
-The final sparse-to-screen reconstruction is also double-buffered. The current
-world position is reprojected into the previous view, a 3x3 search chooses the
-closest prior surface, and both world distance and normal agreement must pass
-before history is accepted. Static-light presentation uses at most 0.97
-history; animated lighting uses at most 0.88. Raw and 99.5%-trimmed RMSE are
-both reported so ambiguous disocclusion-edge correspondences remain visible
-without being mislabeled as global shimmer.
+The final current composite is presented directly. Temporal filtering exists
+only in the paper's world-space `(J, beta)` interval history; the renderer does
+not recursively blend tone-mapped screen pixels. Validation captures include
+world position and normal only to compare the same surfaces across moving
+frames, never to feed presentation history back into rendering.
 
 Visible emissive radiance has its own RGB16F G-buffer target. Moving point
 lights render alpha-tested geometry into a six-layer depth texture. Explicit
@@ -159,12 +158,14 @@ face/UV selection samples those layers, so visible direct lighting and GI
 ray-hit lighting both respect occlusion without relying on backend cube-face
 orientation.
 
-The in-app audit includes eleven independent gates: exact-key world-probe
+The in-app audit includes twelve independent gates: exact-key world-probe
 comparison; byte-for-byte replay of independently initialized camera
 trajectories; world-position reprojection between every adjacent frame of an
 uninterrupted moving-camera sequence; the same sequence with moving lights;
 fixed-camera moving-light step response versus a fresh target;
-the deliberate near/far Sponza dolly that covers view-sized surfaces; a
+the deliberate near/far Sponza dolly that covers view-sized surfaces; the
+reported low-camera 6.48-unit Sponza translation followed by a same-pose clean
+history rebuild, including exact per-cascade sparse-population equality; a
 512-spp 64x36 cosine-weighted BVH reference on four representative scenes with
 raw, robust, dark-spot, bright-leak, percentile, energy-bias, and frozen
 per-scene regression gates; raster sun/point shadows compared with exact BVH

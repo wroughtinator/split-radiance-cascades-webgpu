@@ -607,26 +607,6 @@ export const computeShader = sharedCompute + /* wgsl */`
   atomicStore(&slots[slot].index,EMPTY);
 }
 
-@compute @workgroup_size(64) fn retainPreviousProbes(@builtin(global_invocation_id) gid:vec3u){
-  if(!featureEnabled(8u)||historyWeight()<=0.0||gid.x>=HASH_FRAME_STRIDE){return;}
-  var cascade=0u;
-  if(gid.x>=HASH_OFFSETS[3]){cascade=3u;}
-  else if(gid.x>=HASH_OFFSETS[2]){cascade=2u;}
-  else if(gid.x>=HASH_OFFSETS[1]){cascade=1u;}
-  let previousBase=(1u-currentFrame())*HASH_FRAME_STRIDE;
-  let key=atomicLoad(&slots[previousBase+gid.x].key);
-  if(key==EMPTY){return;}
-  let lod=lodFromKey(key);
-  let position=probePositionFromCell(cellFromKey(key),cascade,lod);
-  let clip=frame.viewProj*vec4f(position,1.0);
-  if(clip.w<=0.0){return;}
-  let ndc=clip.xyz/clip.w;
-  // Preserve the complete cascade ancestry, including the secondary cache,
-  // across camera motion. A guard band keeps this a bounded sparse volume.
-  if(abs(ndc.x)>1.18||abs(ndc.y)>1.18||ndc.z<0.0||ndc.z>1.0){return;}
-  insertProbeRaw(cascade,key);
-}
-
 @compute @workgroup_size(8,8) fn initBase(@builtin(global_invocation_id) gid: vec3u) {
   let fullSize=vec2u(u32(frame.resolution.x),u32(frame.resolution.y));
   if(any(gid.xy>=fullSize)){return;}
@@ -935,7 +915,7 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32,record:u32,writ
   // converge instead of tracing the same rays forever.  The non-stable path
   // retains wall-clock scrambling for the paper's single-frame comparison.
   // A continuously advancing deterministic rotation matches Section 5.2:
-  // every retained probe keeps receiving new samples instead of becoming
+  // every probe that remains visible keeps receiving new samples instead of becoming
   // dependent on the camera/history state at an arbitrary freeze frame.
   let sampleFrame=passParams.sampleFrame;
   // An odd 32-bit Weyl multiplier is a permutation of all u32 values. Its low
@@ -1089,6 +1069,7 @@ fn mergedParent(cascade:u32,direction:u32,position:vec3f,lod:u32)->vec4f{
   var interval=vec3f(0);
   var beta=1.0;
   var hasInterval=samples>0u;
+  var resolvedSamples=samples;
   if(samples>0u){
     let denominator=FIXED_SCALE*f32(samples);
     interval=vec3f(f32(atomicLoad(&accum[base])),f32(atomicLoad(&accum[base+1u])),f32(atomicLoad(&accum[base+2u])))/denominator;
@@ -1112,22 +1093,42 @@ fn mergedParent(cascade:u32,direction:u32,position:vec3f,lod:u32)->vec4f{
       )/previousDenominator;
       let previousBeta=f32(atomicLoad(&accum[previousBase+3u]))/previousDenominator;
       if(samples>0u){
-        let temporalWeight=intervalHistoryWeight();
-        interval=mix(interval,previousInterval,temporalWeight);
-        beta=mix(beta,previousBeta,temporalWeight);
+        if(featureEnabled(32u)){
+          // Moving lighting needs a bounded response time.
+          let temporalWeight=intervalHistoryWeight();
+          interval=mix(interval,previousInterval,temporalWeight);
+          beta=mix(beta,previousBeta,temporalWeight);
+          resolvedSamples=1u;
+        }else{
+          // Section 5.2 accumulates rays for semi-static scenes. Preserve an
+          // effective sample count so repeated exact-key probes converge as a
+          // true running average instead of a path-dependent fixed EMA.
+          let boundedPrevious=min(previousSamples,16384u);
+          let totalSamples=samples+boundedPrevious;
+          interval=(
+            interval*f32(samples)+previousInterval*f32(boundedPrevious)
+          )/f32(max(1u,totalSamples));
+          beta=(
+            beta*f32(samples)+previousBeta*f32(boundedPrevious)
+          )/f32(max(1u,totalSamples));
+          resolvedSamples=min(16384u,totalSamples);
+        }
       }else{
         interval=previousInterval;
         beta=previousBeta;
+        resolvedSamples=previousSamples;
       }
     }
   }
   if(hasInterval){
     let safeInterval=clamp(interval,vec3f(0),vec3f(16));
-    atomicStore(&accum[base],u32(safeInterval.r*FIXED_SCALE+0.5));
-    atomicStore(&accum[base+1u],u32(safeInterval.g*FIXED_SCALE+0.5));
-    atomicStore(&accum[base+2u],u32(safeInterval.b*FIXED_SCALE+0.5));
-    atomicStore(&accum[base+3u],u32(clamp(beta,0.0,1.0)*FIXED_SCALE+0.5));
-    atomicStore(&accum[base+4u],1u);
+    let storedSamples=max(1u,resolvedSamples);
+    let storageScale=FIXED_SCALE*f32(storedSamples);
+    atomicStore(&accum[base],u32(safeInterval.r*storageScale+0.5));
+    atomicStore(&accum[base+1u],u32(safeInterval.g*storageScale+0.5));
+    atomicStore(&accum[base+2u],u32(safeInterval.b*storageScale+0.5));
+    atomicStore(&accum[base+3u],u32(clamp(beta,0.0,1.0)*storageScale+0.5));
+    atomicStore(&accum[base+4u],storedSamples);
   }
   if(!hasInterval){
     // Section 5 explicitly ignores zero-count directions. Treating one as a
@@ -1762,82 +1763,17 @@ fn aces(x:vec3f)->vec3f{
 }
 `;
 
-// The paper's interval accumulation stabilizes world-space radiance. The final
-// sparse-to-screen reconstruction still crosses probe/LOD footprints under
-// camera motion, so production presentation adds a conservative temporal
-// resolve. History is accepted only when the reprojected world position agrees;
-// disocclusions and newly visible surfaces therefore use the current frame.
-export const temporalShader = /* wgsl */`
-struct TemporalFrameUniforms {
-  viewProj: mat4x4<f32>,
-  sunViewProj: mat4x4<f32>,
-  cameraPos: vec4f,
-  sunDirTime: vec4f,
-  sunColorIntensity: vec4f,
-  pointPosRange: vec4f,
-  pointColorIntensity: vec4f,
-  envBaseSpacing: vec4f,
-  resolution: vec4f,
-  controls: vec4f,
-  previousViewProj: mat4x4<f32>,
-};
-@group(0) @binding(0) var<uniform> frame: TemporalFrameUniforms;
-@group(0) @binding(1) var currentComposite: texture_2d<f32>;
-@group(0) @binding(2) var previousComposite: texture_2d<f32>;
-@group(0) @binding(3) var currentWorld: texture_2d<f32>;
-@group(0) @binding(4) var previousWorld: texture_2d<f32>;
-@group(0) @binding(5) var currentNormal: texture_2d<f32>;
-@group(0) @binding(6) var previousNormal: texture_2d<f32>;
-
-@vertex fn temporalVS(@builtin(vertex_index) index:u32)->@builtin(position) vec4f{
+// Split RC's temporal accumulation is entirely world-space (Section 5.2).
+// Present the current composite directly so screen-space history cannot retain
+// a camera-path-dependent image after the sparse field has already converged.
+export const presentShader = /* wgsl */`
+@vertex fn presentVS(@builtin(vertex_index) index:u32)->@builtin(position) vec4f{
   let uv=vec2f(f32((index<<1u)&2u),f32(index&2u));
   return vec4f(uv*2.0-1.0,0.0,1.0);
 }
 
-@fragment fn temporalFS(@builtin(position) position:vec4f)->@location(0) vec4f{
-  let pixel=vec2i(position.xy);
-  let size=vec2i(textureDimensions(currentComposite));
-  let current=textureLoad(currentComposite,pixel,0);
-  let world=textureLoad(currentWorld,pixel,0);
-  let historyAvailable=fract(frame.controls.w)>0.0;
-  if(!historyAvailable||world.w<0.5){return current;}
-
-  let clip=frame.previousViewProj*vec4f(world.xyz,1.0);
-  if(clip.w<=1e-6){return current;}
-  let ndc=clip.xy/clip.w;
-  let projected=(vec2f(ndc.x*0.5+0.5,0.5-ndc.y*0.5))*vec2f(size);
-  let center=vec2i(round(projected-vec2f(0.5)));
-  let normal=normalize(textureLoad(currentNormal,pixel,0).xyz);
-  var bestPixel=vec2i(-1);
-  var bestDistance=1e30;
-  for(var y=-1;y<=1;y++){
-    for(var x=-1;x<=1;x++){
-      let candidatePixel=center+vec2i(x,y);
-      if(any(candidatePixel<vec2i(0))||any(candidatePixel>=size)){continue;}
-      let candidateWorld=textureLoad(previousWorld,candidatePixel,0);
-      if(candidateWorld.w<0.5){continue;}
-      let candidateNormal=normalize(textureLoad(previousNormal,candidatePixel,0).xyz);
-      if(dot(normal,candidateNormal)<0.88){continue;}
-      let delta=candidateWorld.xyz-world.xyz;
-      let distance=dot(delta,delta);
-      if(distance<bestDistance){
-        bestDistance=distance;
-        bestPixel=candidatePixel;
-      }
-    }
-  }
-  let tolerance=max(0.015,frame.envBaseSpacing.w*0.06);
-  if(bestPixel.x<0||bestDistance>tolerance*tolerance){return current;}
-
-  let previous=textureLoad(previousComposite,bestPixel,0).rgb;
-  let features=u32(frame.cameraPos.w+0.5);
-  let maximumWeight=select(0.97,0.88,(features&32u)!=0u);
-  let weight=min(fract(frame.controls.w),maximumWeight);
-  return vec4f(mix(current.rgb,previous,weight),1.0);
-}
-
-@group(0) @binding(7) var resolvedComposite: texture_2d<f32>;
+@group(0) @binding(0) var currentComposite: texture_2d<f32>;
 @fragment fn presentFS(@builtin(position) position:vec4f)->@location(0) vec4f{
-  return textureLoad(resolvedComposite,vec2i(position.xy),0);
+  return textureLoad(currentComposite,vec2i(position.xy),0);
 }
 `;

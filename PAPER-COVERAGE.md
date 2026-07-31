@@ -14,7 +14,7 @@ Cascades: Real-Time Global Illumination via Sparse Radiance Probes*
 | Section 5, ray splitting | Rays originate on visible surfaces, face outward, and split at the cascade cutoffs instead of originating at probes. | Path-reference audit and Sponza comparison. |
 | Algorithm 2, equal-area map | Encode/decode use azimuth and uniform sphere height. | Round-trip and distribution unit tests. |
 | Algorithm 3, hierarchical R2 | One ray is assigned to every visible internal-screen pixel. Counts propagate c0-to-c3, reverse offsets assign contiguous parent segments, and each ray receives an exact deterministic local rank plus one global temporal rotation. | Byte-identical independent trajectory replay plus path-reference coverage gate. |
-| Section 5.2, temporal accumulation | Exact world/LOD/cache keys retrieve the previous directional `(J,beta)` interval, which is blended before recursive merge; a bounded guard retains the complete prior sparse ancestry during camera motion. | Baseline and multibounce replay plus uninterrupted motion gates. |
+| Section 5.2, temporal accumulation | Exact world/LOD/cache keys retrieve the previous directional `(J,beta)` interval, which is blended before recursive merge. The current sparse hierarchy is recreated from current visible surfaces and parents; previous-only probes are removed exactly as described in Section 6. | Baseline and multibounce replay, uninterrupted motion, and the exact low-camera Sponza translation/clean-rebuild gate. |
 | Section 6, irradiance optimization | A 6x6 octahedral field with an evaluated one-texel border is written to a double-buffered RGBA16F storage atlas, copied at the WebGPU usage boundary, and consumed through a filterable atlas; final and secondary-cache gathers use one bilinear lookup for each of at most eight sparse neighbors per LOD. | Shader contract tests, four-scene reference comparison, and GPU profiling. |
 | Section 6, multibounce | Previous primary hit points seed a cache two LODs coarser; the cache samples its prior irradiance and can feed itself. | Dedicated repeatability and 32-frame motion gates. |
 | Section 7.1, rough specular | The reflection direction selects a broad c2 cone and composes c1/c0 intervals in front. | Optional live view and shader regression test. |
@@ -41,13 +41,10 @@ screen-ray assignment, interval, merge, LOD, temporal, or shading equations. BVH
 on the packed Sponza asset measures 50 median / 94 p95 node visits and 12
 median / 24 p95 triangle tests across 1,024 representative rays.
 
-The deployment additionally applies a world-position/normal-validated
-presentation resolve after Split RC shading. It is isolated from the paper's
-interval math and rejects disocclusions; its purpose is to remove
-sparse-to-screen reconstruction shimmer in an interactive browser. The audit
-captures world position and surface normal alongside the image and tests the
-paper field (exact-key probes), the deterministic renderer, and this final
-presented image independently.
+The deployment presents the current Split RC composite directly. It does not
+add a recursive screen-space presentation cache. World position and surface
+normal are captured only by the validation harness to establish
+surface-to-surface correspondence between moving frames.
 
 ## Stated method limits
 

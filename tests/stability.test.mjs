@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  computeShader, finalShader, shaderConstants, temporalShader,
+  computeShader, finalShader, presentShader, shaderConstants,
 } from "../public/rc/shaders.js";
 
 test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
@@ -16,6 +16,10 @@ test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
   assert.match(computeShader, /let overlapStart = boundary \* 0\.9/);
   assert.match(computeShader, /lookupProbeFrame\(0u,keyFromCell\(cell\+bits,lod\),previousFrame\)/);
   assert.match(computeShader, /interval=mix\(interval,previousInterval,temporalWeight\)/);
+  assert.match(computeShader, /let boundedPrevious=min\(previousSamples,16384u\)/);
+  assert.match(computeShader, /resolvedSamples=min\(16384u,totalSamples\)/);
+  assert.match(computeShader, /let storageScale=FIXED_SCALE\*f32\(storedSamples\)/);
+  assert.match(computeShader, /atomicStore\(&accum\[base\+4u\],storedSamples\)/);
   assert.match(computeShader, /accumIndexFrame\(cascade,previousProbe,direction,previousFrame\)/);
   assert.match(computeShader, /fn canonicalizeProbes/);
   assert.match(computeShader, /let compactIndex=atomicAdd\(&state\[cascade\],1u\)/);
@@ -34,14 +38,15 @@ test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
   assert.match(computeShader, /f32\(scrambledFrame>>16u\)/);
   assert.match(computeShader, /fn intervalHistoryWeight/);
   assert.match(computeShader, /return historyWeight\(\)/);
-  assert.match(computeShader, /fn retainPreviousProbes/);
+  assert.doesNotMatch(computeShader, /retainPreviousProbes/);
+  assert.doesNotMatch(computeShader, /Preserve the complete cascade ancestry/);
   assert.match(computeShader, /gid\.x>=HASH_FRAME_STRIDE/);
   assert.doesNotMatch(computeShader, /sampleFrame>=32u/);
   assert.match(computeShader, /textureStore\(irradianceAtlasStorage,atlasCoordinate,stored\)/);
   assert.match(computeShader, /textureSampleLevel\(\s*irradianceAtlasSampled,irradianceAtlasSampler,atlasUv,0\.0/);
   assert.match(finalShader, /textureSampleLevel\(irradianceAtlas,irradianceSampler,atlasUv,0\.0\)/);
-  assert.match(temporalShader, /previousViewProj/);
-  assert.match(temporalShader, /bestDistance>tolerance\*tolerance/);
+  assert.match(presentShader, /textureLoad\(currentComposite/);
+  assert.doesNotMatch(presentShader, /previousComposite|previousViewProj|temporalFS/);
   assert.equal(shaderConstants.irradianceTexels, 64);
   assert.equal(shaderConstants.probeCaps[0], 4096);
   assert.match(finalShader, /fn sampleIrradianceLod/);

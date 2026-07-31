@@ -9,9 +9,22 @@ test("production audit gates static-light, moving-light, and multibounce motion"
   assert.match(engine, /matchedPixelRatio >= 0\.35/);
   assert.match(engine, /trimmedRmseByteDelta/);
   assert.match(engine, /maximum\("p95Absolute"\) <= 0\.0045/);
+  assert.match(engine, /warmup: i === 11 \? 96 : 48/);
   assert.match(engine, /p95ByteDeltaMax/);
   assert.match(engine, /multibounceContinuousMotion/);
+  assert.match(engine, /const multibounceMotionPassed = multibounce/);
+  assert.match(engine, /comparison\.p95ByteDelta <= 4/);
+  assert.match(engine, /comparison\.p999ByteDelta <= 32/);
+  assert.match(engine, /comparison\.largeDeltaRatio <= 0\.001/);
   assert.match(engine, /movingLightContinuousMotion/);
+  assert.match(engine, /runLongTranslationCacheAudit/);
+  assert.match(engine, /cacheMotionRecovery/);
+  assert.match(engine, /sparsePopulationMatched/);
+  assert.match(engine, /failedMotionSamples === 0/);
+  assert.match(engine, /comparison\.p95ByteDelta <= 12/);
+  assert.match(engine, /comparison\.p999ByteDelta <= 128/);
+  assert.match(engine, /recoveryDifference\.p95ByteDelta <= 4/);
+  assert.match(engine, /r\.cacheMotionRecovery && !r\.cacheMotionRecovery\.passed/);
   assert.match(engine, /runMovingLightResponseAudit/);
   assert.match(engine, /responseRatio <= 0\.72/);
   assert.match(engine, /movingLights: true/);
@@ -32,8 +45,10 @@ test("production audit gates static-light, moving-light, and multibounce motion"
   assert.match(engine, /diagnosticOverflows === 0/);
   assert.match(engine, /per-capture sparse diagnostics/);
   assert.match(engine, /this\.sampleFrameIndex < 24/);
-  assert.match(engine, /this\.animateLights[\s\S]*0\.88 : 0\.92/);
+  assert.match(engine, /this\.animateLights[\s\S]*\? 0\.92/);
+  assert.doesNotMatch(engine, /this\.multibounce \? 0\.88|this\.multibounce \? 0\.97/);
   assert.match(engine, /animate-lights[\s\S]*this\.resetProbeHistory\(\)/);
+  assert.doesNotMatch(engine, /retainProbes|retainPreviousProbes|temporalPipeline|historyTextures|previousWorldTexture/);
 });
 
 test("quality presets preserve Algorithm 3's one-ray-per-screen-pixel assignment", () => {

@@ -1,0 +1,97 @@
+﻿{
+    "accumulated_diagnostics":  {
+                                    "bvh_stack_overflows":  0,
+                                    "hash_overflows":  0,
+                                    "key_hash_collisions":  0,
+                                    "key_range_rejections":  0
+                                },
+    "accumulated_hash_publication":  {
+                                         "canonical_slots":  1265,
+                                         "duplicate_slots":  0,
+                                         "occupied_slots":  1265,
+                                         "repeated_exact_keys":  0,
+                                         "reserved_slots":  0,
+                                         "tombstone_slots":  0,
+                                         "unpublished_slots":  0
+                                     },
+    "accumulated_probe_counts":  [
+                                     862,
+                                     277,
+                                     99,
+                                     27
+                                 ],
+    "camera_path":  {
+                        "accumulated_frame":  149,
+                        "history_reset_frame":  150,
+                        "hold_frames":  48,
+                        "recovered_frame":  197,
+                        "recovery_frames_after_history_reset":  48,
+                        "start_position":  [
+                                               -9.274269,
+                                               2.607485,
+                                               -0.5
+                                           ],
+                        "start_target":  [
+                                             5.0,
+                                             1.75,
+                                             -0.5
+                                         ],
+                        "total_translation":  6.480000019073486,
+                        "translation_frames":  54,
+                        "translation_per_frame":  0.11999999731779099,
+                        "warmup_frames":  48
+                    },
+    "delta":  {
+                  "changed_channel_fraction":  0.2701285240464345,
+                  "maximum_absolute_u8":  14,
+                  "mean_absolute_u8":  0.31802834784411277,
+                  "p95_absolute_u8":  1,
+                  "p999_absolute_u8":  5,
+                  "p99_absolute_u8":  3,
+                  "root_mean_square_u8":  0.6954919545705077
+              },
+    "gate":  {
+                 "diagnostics_clean":  true,
+                 "image_stable":  true,
+                 "maximum_mean_absolute_u8":  1.0,
+                 "maximum_p95_absolute_u8":  4,
+                 "maximum_p999_absolute_u8":  48,
+                 "maximum_p99_absolute_u8":  12,
+                 "maximum_root_mean_square_u8":  4.0,
+                 "passes":  true,
+                 "publication_clean":  true,
+                 "sparse_population_matched":  true
+             },
+    "height":  536,
+    "recovered_diagnostics":  {
+                                  "bvh_stack_overflows":  0,
+                                  "hash_overflows":  0,
+                                  "key_hash_collisions":  0,
+                                  "key_range_rejections":  0
+                              },
+    "recovered_hash_publication":  {
+                                       "canonical_slots":  1265,
+                                       "duplicate_slots":  0,
+                                       "occupied_slots":  1265,
+                                       "repeated_exact_keys":  0,
+                                       "reserved_slots":  0,
+                                       "tombstone_slots":  0,
+                                       "unpublished_slots":  0
+                                   },
+    "recovered_probe_counts":  [
+                                   862,
+                                   277,
+                                   99,
+                                   27
+                               ],
+    "scene":  "Sponza atrium (paper scene)",
+    "width":  960,
+    "provenance":  {
+                       "generated_at_utc":  "2026-07-31T09:05:55.2761347Z",
+                       "executable_sha256":  "ccb9b4b26902b4cc08ee6a8ee5bf8c3f79cf7525bbe551e4967612bc88730988",
+                       "shader_source_glsl_sha256":  "0c8281ebb3fe8e6293e5852bb65af1092a852acc2e0e90539f5db8655717f234",
+                       "generated_shader_rs_sha256":  "f55fdfdc6f5a5fcee5fecf7c057f1bfce9eb41ff73b046381f256ed138e70111",
+                       "gpu_harness_rs_sha256":  "d854fe71d2faedd660272ce80fd8e30b46be0da4ddda0aa72e4e59772f9b5043",
+                       "cargo_lock_sha256":  "14dd9e409b1d3081d2d07b02e4c58502fda029796181b7c2158b713fc16115e5"
+                   }
+}

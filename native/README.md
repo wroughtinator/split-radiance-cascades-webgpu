@@ -33,6 +33,8 @@ integration, and final shading are explicit GPU compute passes.
   validation uses exact sample-count accumulation; animated lighting uses a
   0.92 exact-key EMA. An already composed cone is never fed back into a near
   interval.
+- The current tone-mapped Split RC field is presented directly. There is no
+  recursive screen-space display history.
 - The secondary surface cache feeds the next bounce through the previous
   irradiance atlas.
 - The diffuse cache is a real filterable RGBA16F texture atlas. Every probe
@@ -124,6 +126,14 @@ camera pose at frames 1200 and 1320:
 .\scripts\stability.ps1
 ```
 
+Reproduce the reported low-camera Sponza translation in indirect-only mode,
+hold the final pose, rebuild temporal resources without moving, and require
+identical sparse populations plus a low full-resolution image delta:
+
+```powershell
+.\scripts\cache-motion.ps1
+```
+
 Run the complementary fixed-camera Sponza response gate. It leaves animated
 lighting enabled, records the actual sun and point-light trajectories, and
 requires a visible framebuffer response plus clean GPU/hash diagnostics:
@@ -147,20 +157,24 @@ The current full-resolution D3D11 Sponza report covers 262,269 triangles and
 records 60.41 callback FPS on the validation machine (display/driver capped).
 Thirty D3D11 timestamp samples are distributed every ten frames across the
 300-frame measured interval after a separate 60-frame warmup. The sum of
-per-stage medians is 9.516 ms, equivalent to about 105.1 GPU-limited FPS; the
-sum of per-stage p95 values is 11.688 ms. The largest median groups are split
-tracing plus indirect shadows at 4.196 ms, sparse probe construction at
-2.411 ms, and primary visibility plus direct shadows at 1.530 ms. The JSON
+per-stage medians is 10.685 ms, equivalent to about 93.6 GPU-limited FPS; the
+sum of per-stage p95 values is 11.719 ms. The largest median groups are split
+tracing plus indirect shadows at 4.176 ms, sparse probe construction at
+2.432 ms, presentation at 2.340 ms, and primary visibility plus direct shadows
+at 1.521 ms. The JSON
 retains every stage's sample count, minimum, median, p95, and maximum.
 
-The advancing-R2 repeated-camera gate passes for both scenes. The laboratory
-reports mean/RMS/p99 deltas of 0.023/0.182/1 RGB code values; Sponza reports
-0.231/0.662/2. Both runs have zero hash overflow, full-key collision,
+The advancing-R2 repeated-camera gate passes for both scenes on the raw current
+field. The laboratory reports mean/RMS/p95/p99/p99.9 deltas of
+0.018/0.166/0/1/1 RGB code values; Sponza reports
+0.252/0.836/1/3/11. Both runs have zero hash overflow, full-key collision,
 key-range rejection, BVH-stack overflow, duplicate slot, reserved slot,
-or unpublished slot, with occupied and canonical counts equal. The Sponza run
-safely canonicalized one transient reservation to a tombstone. See
+or unpublished slot, with occupied and canonical counts equal. The exact
+6.48-unit Sponza translation/rebuild gate reports identical
+`[862, 277, 99, 27]` probe populations, p95 1/255 and p99 3/255, and zero
+runtime/publication diagnostics. See
 `profile/native-benchmark.json`, `validation/*-camera-loop-stability.json`,
-and `captures/contact-sheet.png`.
+`validation/sponza-cache-motion-recovery.json`, and `captures/contact-sheet.png`.
 
 With the Sponza camera fixed, the animated-light response gate changes 93.26%
 of RGB channels with a 17.55/255 mean delta between 2.08 s and 6.08 s. The
@@ -169,7 +183,7 @@ recorded point light moves from `(3.75, 5.20, 4.68)` to
 runtime/publication diagnostics remain zero. The two source frames and delta
 heatmap are stored beside `validation/sponza-animation-response.json`.
 
-Benchmark, stability, and animation-response reports include SHA-256
+Benchmark, stability, cache-motion, and animation-response reports include SHA-256
 provenance for the exact executable, GLSL source, generated multi-backend
 `shader.rs`, GPU harness source, and `Cargo.lock`, plus the UTC generation
 time. Matching hashes make stale evidence detectable.
