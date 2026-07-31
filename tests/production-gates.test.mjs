@@ -3,13 +3,15 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const engine = await readFile(new URL("../public/rc/engine.js", import.meta.url), "utf8");
+const shaders = await readFile(new URL("../public/rc/shaders.js", import.meta.url), "utf8");
+const scenes = await readFile(new URL("../public/rc/scenes.js", import.meta.url), "utf8");
 
 test("production audit gates camera motion, moving lights, floor loops, and sun shadows", () => {
   assert.match(engine, /compareReprojectedFrames/);
   assert.match(engine, /matchedPixelRatio >= 0\.35/);
   assert.match(engine, /trimmedRmseByteDelta/);
   assert.match(engine, /maximum\("p95Absolute"\) <= 0\.006/);
-  assert.match(engine, /warmup: i === 6 \? 192 : \(\[5, 11\]\.includes\(i\) \? 96 : 48\)/);
+  assert.match(engine, /warmup: i === 6 \? 384 : \(\[5, 11\]\.includes\(i\) \? 96 : 48\)/);
   assert.match(engine, /p95ByteDeltaMax/);
   assert.match(engine, /movingLightContinuousMotion/);
   assert.match(engine, /runLongTranslationCacheAudit/);
@@ -91,4 +93,13 @@ test("sampling epochs replay deterministically without stale ray-map tags", () =
   assert.match(engine, /this\.sampleFrameIndex = \(this\.sampleFrameIndex \+ 1\) >>> 0/);
   assert.match(engine, /this\.sampleEpoch = \(\(this\.sampleEpoch \+ 1\) >>> 0\) \|\| 1/);
   assert.doesNotMatch(engine, /sampleEpoch & 0xffff/);
+});
+
+test("presentation preserves shadow detail and height fields use smooth normals", () => {
+  assert.match(shaders, /fn displayEncode\(x:vec3f\)->vec3f/);
+  assert.match(shaders, /pow\(aces\(x\),vec3f\(1\.0\/2\.2\)\)/);
+  assert.match(shaders, /color=displayEncode\(color\*frame\.controls\.y\)/);
+  assert.match(scenes, /const normal=\(point\)=>normalize3/);
+  assert.match(scenes, /const terracing=1\+Math\.tanh/);
+  assert.doesNotMatch(scenes, /const terracing=Math\.floor/);
 });

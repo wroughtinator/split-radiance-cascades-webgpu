@@ -1643,6 +1643,12 @@ fn aces(x:vec3f)->vec3f{
   let a=2.51;let b=0.03;let c=2.43;let d=0.59;let e=0.14;
   return clamp((x*(a*x+b))/(x*(c*x+d)+e),vec3f(0),vec3f(1));
 }
+fn displayEncode(x:vec3f)->vec3f{
+  // The canvas swap chain is an unorm target, not an sRGB render target.
+  // Apply the display transfer after the filmic curve so shadow detail is not
+  // accidentally presented as linear bytes and crushed on an sRGB monitor.
+  return pow(aces(x),vec3f(1.0/2.2));
+}
 @vertex fn fullscreenVS(@builtin(vertex_index) index:u32)->@builtin(position) vec4f{
   let uv=vec2f(f32((index<<1u)&2u),f32(index&2u));
   return vec4f(uv*2.0-1.0,0.0,1.0);
@@ -1653,7 +1659,7 @@ fn aces(x:vec3f)->vec3f{
   let uv=position.xy/frame.resolution.xy;
   if(world.w<0.5){
     let sky=mix(frame.envBaseSpacing.xyz*0.35,frame.envBaseSpacing.xyz*1.5,clamp(1.0-uv.y,0.0,1.0));
-    return vec4f(aces(sky*frame.controls.y),1.0);
+    return vec4f(displayEncode(sky*frame.controls.y),1.0);
   }
   let albedoData=textureLoad(albedoTex,pixel,0);
   let albedo=albedoData.xyz;
@@ -1678,7 +1684,7 @@ fn aces(x:vec3f)->vec3f{
   // Test-only mode 6 removes material color from the comparison so the
   // motion gate measures the reconstructed irradiance field itself.
   if(mode==6u){color=sample.xyz;}
-  if(mode<=2u||mode==6u){color=aces(color*frame.controls.y);}
+  if(mode<=2u||mode==6u){color=displayEncode(color*frame.controls.y);}
   return vec4f(color,1.0);
 }
 `;

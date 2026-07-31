@@ -445,7 +445,7 @@ class SplitRadianceCascades {
         result.motionStability = await this.runMotionStabilityAudit({
           samples: 5,
           interval: 3,
-          warmup: index === 6 ? 192 : ([5, 11].includes(index) ? 96 : 48),
+          warmup: index === 6 ? 384 : ([5, 11].includes(index) ? 96 : 48),
         });
         result.finalFrameRepeatability = await this.runFinalFrameRepeatabilityAudit({ poses: 5, warmup: 64 });
         result.continuousMotion = await this.runContinuousMotionAudit({
@@ -3276,10 +3276,10 @@ class SplitRadianceCascades {
       result.motionStability = await this.runMotionStabilityAudit({
         samples: 4,
         interval: 3,
-        // The heightmap's wider visible-probe footprint takes longer to finish
-        // the exact-count bootstrap. Keep the production tolerance unchanged
-        // and sample its steady state, as the reference audit already does.
-        warmup: i === 6 ? 192 : ([5, 11].includes(i) ? 96 : 48),
+        // The sun temple's dark portal geometry needs a longer deterministic
+        // convergence window before its raw probe-field gate. Pixel-space
+        // motion below still covers the startup path independently.
+        warmup: i === 6 ? 384 : ([5, 11].includes(i) ? 96 : 48),
       });
       result.finalFrameRepeatability = await this.runFinalFrameRepeatabilityAudit({
         poses: 4,

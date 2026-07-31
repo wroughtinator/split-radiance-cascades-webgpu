@@ -147,14 +147,26 @@ class Geometry {
   }
 
   terrain(size, resolution, heightFn, colorFn = () => C.stone, center = [0,0,0]) {
+    const step=size/resolution;
     const sample=(ix,iz)=>{
       const x=(ix/resolution-0.5)*size+center[0],z=(iz/resolution-0.5)*size+center[2];
       return [x,center[1]+heightFn(x,z),z];
     };
+    // A height field is a smooth surface, even though the ray-tracing mesh is
+    // triangulated.  Central-difference vertex normals prevent the lighting
+    // from exposing every triangle as a contour band while preserving the
+    // exact triangle geometry used by the software BVH.
+    const normal=(point)=>normalize3([
+      heightFn(point[0]-step,point[2])-heightFn(point[0]+step,point[2]),
+      2*step,
+      heightFn(point[0],point[2]-step)-heightFn(point[0],point[2]+step),
+    ]);
     for(let z=0;z<resolution;z++)for(let x=0;x<resolution;x++){
       const a=sample(x,z),b=sample(x+1,z),c=sample(x+1,z+1),d=sample(x,z+1);
       const col=colorFn((a[1]+b[1]+c[1]+d[1])*0.25,x,z);
-      this.triangle(a,d,b,col); this.triangle(b,d,c,col);
+      const na=normal(a),nb=normal(b),nc=normal(c),nd=normal(d);
+      this.triangle(a,d,b,col,[0,0,0],[na,nd,nb]);
+      this.triangle(b,d,c,col,[0,0,0],[nb,nd,nc]);
     }
   }
 
@@ -294,7 +306,7 @@ function buildScene3(g) {
     g.cone([x,h+0.4,z],1.0+deterministic(i+7)*0.7,2.9+deterministic(i+12)*1.8,i%8===0?C.yellow:C.leaf,10);
   }
   for(let i=0;i<8;i++)g.sphere([-12+i*3.4,2.0+Math.sin(i),-2+Math.cos(i)*4],0.28,[0.8,0.45,0.08],[5,1.6,0.15],6,10);
-  return {camera:[25,11,26],target:[0,3,0],baseSpacing:1.0,env:[0.008,0.016,0.028],sun:1.4};
+  return {camera:[25,11,26],target:[0,3,0],baseSpacing:1.0,env:[0.035,0.05,0.075],sun:1.65,exposure:1.12};
 }
 
 function buildScene4(g) {
@@ -415,16 +427,25 @@ function buildScene11(g) {
     const bowl=Math.hypot(x+12,z-7);
     const crater=Math.hypot(x-16,z+13);
     const ravineDistance=Math.abs(z-7*Math.sin(x*0.075)-2*Math.sin(x*0.22));
-    const terracing=Math.floor((Math.sin(x*0.055)+Math.cos(z*0.061)+2)*2.2)/2.2;
-    return 2.8*Math.sin(x*0.075)*Math.cos(z*0.068)
+    // Broad, differentiable shelves retain the concave terrace stress case
+    // without quantizing the terrain into conspicuous zebra contours.
+    const terraceSignal=Math.sin(x*0.055)+Math.cos(z*0.061);
+    const terracing=1+Math.tanh(1.45*terraceSignal);
+    const raw=2.8*Math.sin(x*0.075)*Math.cos(z*0.068)
       -10.5*Math.exp(-bowl*bowl/155)
       -7.0*Math.exp(-crater*crater/88)
       -5.8*Math.exp(-ravineDistance*ravineDistance/5.5)
       +0.7*terracing+0.0022*(x*x+z*z);
+    // Blend the outer 18% to a coherent rim so a ravine cannot cut an
+    // accidental single-triangle notch into the finite height-field boundary.
+    const edge=Math.max(Math.abs(x),Math.abs(z))/46;
+    const edgeLinear=Math.max(0,Math.min(1,(edge-0.82)/0.18));
+    const edgeBlend=edgeLinear*edgeLinear*(3-2*edgeLinear);
+    return raw*(1-edgeBlend)+4*edgeBlend;
   };
   g.terrain(
     92,128,height,
-    (y)=>y<-4?[0.16,0.12,0.075]:y>7?[0.58,0.59,0.56]:[0.38,0.29,0.17],
+    ()=>[0.43,0.31,0.16],
   );
   // Shelves and arches create concavities a single-valued height field cannot,
   // while the dense ground remains a genuine heightmap.
@@ -440,7 +461,7 @@ function buildScene11(g) {
   }
   return {
     camera:[67,38,72],target:[0,-1,0],baseSpacing:2.2,
-    env:[0.055,0.075,0.12],sun:5.8,pointIntensity:15.0,
+    env:[0.065,0.085,0.13],sun:2.15,pointIntensity:9.0,exposure:0.88,
     pointOrbit:28,pointBaseHeight:9,pointHeight:6,
     pointColor:[0.12,0.45,1.0],sunHeight:-0.52,sunHorizontal:0.86,
   };
@@ -460,7 +481,8 @@ export function createScene(index) {
       target: [5.0, 2.0, -0.5],
       baseSpacing: 0.32,
       env: [0.55, 0.65, 0.82],
-      sun: 5.2,
+      sun: 1.25,
+      exposure: 1.0,
       geometry,
       radius: Math.hypot(...geometry.boundsMax.map((value, axis) => (value - geometry.boundsMin[axis]) * 0.5)),
     }));

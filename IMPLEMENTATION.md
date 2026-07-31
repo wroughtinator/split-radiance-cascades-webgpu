@@ -153,7 +153,9 @@ or LOD-changed probes reject history. Fixed lighting uses exact sample-count
 accumulation; animated lighting uses a 0.965 EMA. Changing the
 lighting-animation mode invalidates history.
 
-The final current composite is passed through current-frame-only FXAA. Temporal filtering exists
+The final current composite is filmic-tone-mapped, explicitly encoded for the
+unorm canvas's sRGB display transfer, and passed through current-frame-only
+FXAA. Temporal filtering exists
 only in the paper's world-space `(J, beta)` interval history; the renderer does
 not recursively blend tone-mapped screen pixels. Validation captures include
 world position and normal only to compare the same surfaces across moving

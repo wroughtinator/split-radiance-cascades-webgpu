@@ -103,8 +103,8 @@ The built-in audit has twelve independent gates:
 On the development NVIDIA RTX 5080, the full low-floor Sponza forward/backward
 coverage loop measures exactly 0/255 maximum byte delta at every adjacent
 matched surface and at same-pose closure. The corresponding indirect-only loop
-measures 2/255 at p95, 7/255 at p99, and 1.14/255 trimmed RMSE. The same path
-with moving lighting remains 2/255 at p95 and 7/255 at p99. Every per-capture
+measures 1/255 at p95, 3/255 at p99, and 0.65/255 trimmed RMSE. The same path
+with moving lighting remains 1/255 at p95 and 4/255 at p99. Every per-capture
 sparse diagnostic is zero. This directly covers the final image rather than
 inferring stability from probe values.
 
@@ -143,11 +143,11 @@ viewport resolves to 800x450 and traces one primary R2 ray per internal-screen
 pixel:
 
 - the final all-scene audit measured Sponza at 6.49 ms GPU and 60 FPS; the
-  slowest callback rate across all 12 scenes was 55.38 FPS
-- baseline and moving-light 32-frame motion gates measure 3/255 at p95
-- the 512-spp Sponza reference gate measures 37.12% raw NRMSE, 29.91%
-  99%-trimmed NRMSE, 20.64% low-frequency scale-invariant NRMSE, 0.137
-  scene-linear p95 error, 0.35% severe under-light outliers, and 3.21%
+  slowest callback rate across all 12 scenes was 55.40 FPS
+- baseline and moving-light 32-frame motion gates measure 2/255 at p95
+- the 512-spp Sponza reference gate measures 24.20% raw NRMSE, 20.93%
+  99%-trimmed NRMSE, 14.18% low-frequency scale-invariant NRMSE, 0.0467
+  scene-linear p95 error, 0% severe under-light outliers, and 0.65%
   bright-leak candidates
 - the point-shadow/BVH classification mismatch is 0% in the laboratory and
   Cornell scenes and 1.19% on the large heightmap; corresponding sun-shadow

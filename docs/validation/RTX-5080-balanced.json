@@ -1,6 +1,6 @@
 {
   "schema": "split-rc-webgpu-validation-summary-v5",
-  "date": "2026-07-31",
+  "timestamp": "2026-07-31T20:50:49.044Z",
   "adapter": {
     "vendor": "nvidia",
     "architecture": "blackwell",
@@ -10,7 +10,7 @@
   "resolution": [800, 450],
   "algorithm3OwnerStride": 1,
   "referenceSamples": 512,
-  "minFps": 55.38120731031967,
+  "minFps": 55.40166204986149,
   "maxGpuMs": 6.488064,
   "passed": true,
   "gates": {
@@ -30,7 +30,7 @@
   "sponza": {
     "triangles": 262269,
     "gpuMs": 6.488064,
-    "fps": 60.012,
+    "fps": 59.982,
     "coverageForwardBackward": {
       "adjacentP95ByteDelta": 0,
       "adjacentP99ByteDelta": 0,
@@ -38,20 +38,25 @@
       "loopClosureMaxByteDelta": 0
     },
     "indirectForwardBackward": {
-      "p95ByteDelta": 2,
-      "p99ByteDelta": 7,
-      "trimmedRmseByteDelta": 1.139662226
+      "p95ByteDelta": 1,
+      "p99ByteDelta": 3,
+      "trimmedRmseByteDelta": 0.6523604212388813
+    },
+    "movingLightIndirectForwardBackward": {
+      "p95ByteDelta": 1,
+      "p99ByteDelta": 4,
+      "trimmedRmseByteDelta": 0.6648938352434486
     },
     "reference": {
-      "nrmse": 0.371217992,
-      "trimmedNrmse": 0.299072853,
-      "lowFrequencyScaleInvariantNrmse": 0.206436316,
-      "trimmedLowFrequencyNrmse": 0.189404444,
-      "p95SceneLinearError": 0.136866402,
-      "p99SceneLinearError": 0.386302723,
-      "severeUnderlitRatio": 0.003472222,
-      "severeOverlitRatio": 0.032118056,
-      "signedBias": -0.001371228
+      "nrmse": 0.24199242421767397,
+      "trimmedNrmse": 0.20927412220535607,
+      "lowFrequencyScaleInvariantNrmse": 0.14183638795798148,
+      "trimmedLowFrequencyNrmse": 0.1337113635980947,
+      "p95SceneLinearError": 0.04671875923275945,
+      "p99SceneLinearError": 0.09840716935396193,
+      "severeUnderlitRatio": 0,
+      "severeOverlitRatio": 0.006510416666666667,
+      "signedBias": -0.0016663512778675414
     },
     "probeOverflow": [0, 0, 0, 0]
   },
@@ -63,17 +68,17 @@
     "meanAbsoluteMax": 0.042455421406093076
   },
   "scenes": [
-    { "scene": 0, "name": "Color bleed laboratory", "fps": 59.982, "gpuMs": 2.359296, "overflow": 0, "passed": true },
-    { "scene": 1, "name": "Sponza atrium", "fps": 60.012, "gpuMs": 6.488064, "overflow": 0, "passed": true },
-    { "scene": 2, "name": "Concave canyon heightfield", "fps": 59.026, "gpuMs": 1.376256, "overflow": 0, "passed": true },
-    { "scene": 3, "name": "Dense lantern forest", "fps": 59.020, "gpuMs": 1.96608, "overflow": 0, "passed": true },
-    { "scene": 4, "name": "Multi-level atrium", "fps": 60.000, "gpuMs": 1.114112, "overflow": 0, "passed": true },
-    { "scene": 5, "name": "Industrial pipe maze", "fps": 58.997, "gpuMs": 1.179648, "overflow": 0, "passed": true },
-    { "scene": 6, "name": "Sun temple", "fps": 60.012, "gpuMs": 1.081344, "overflow": 0, "passed": true },
-    { "scene": 7, "name": "Orbital sculpture field", "fps": 59.038, "gpuMs": 1.179648, "overflow": 0, "passed": true },
-    { "scene": 8, "name": "Night market", "fps": 59.038, "gpuMs": 1.114112, "overflow": 0, "passed": true },
-    { "scene": 9, "name": "Megacity stress grid", "fps": 57.165, "gpuMs": 1.769472, "overflow": 0, "passed": true },
-    { "scene": 10, "name": "Cornell box reference", "fps": 59.988, "gpuMs": 1.114112, "overflow": 0, "passed": true },
-    { "scene": 11, "name": "Grand concave heightmap", "fps": 55.38120731031967, "gpuMs": 1.441792, "overflow": 0, "passed": true }
+    { "scene": 0, "name": "Color bleed laboratory", "fps": 59.994, "gpuMs": 2.62144, "overflow": 0, "passed": true },
+    { "scene": 1, "name": "Sponza atrium", "fps": 59.982, "gpuMs": 6.488064, "overflow": 0, "passed": true },
+    { "scene": 2, "name": "Concave canyon heightfield", "fps": 59.032, "gpuMs": 1.441792, "overflow": 0, "passed": true },
+    { "scene": 3, "name": "Dense lantern forest", "fps": 58.991, "gpuMs": 1.96608, "overflow": 0, "passed": true },
+    { "scene": 4, "name": "Multi-level atrium", "fps": 59.003, "gpuMs": 1.376256, "overflow": 0, "passed": true },
+    { "scene": 5, "name": "Industrial pipe maze", "fps": 59.032, "gpuMs": 1.441792, "overflow": 0, "passed": true },
+    { "scene": 6, "name": "Sun temple", "fps": 59.976, "gpuMs": 1.14688, "overflow": 0, "passed": true },
+    { "scene": 7, "name": "Orbital sculpture field", "fps": 58.055, "gpuMs": 1.114112, "overflow": 0, "passed": true },
+    { "scene": 8, "name": "Night market", "fps": 59.020, "gpuMs": 6.160384, "overflow": 0, "passed": true },
+    { "scene": 9, "name": "Megacity stress grid", "fps": 57.159, "gpuMs": 2.490368, "overflow": 0, "passed": true },
+    { "scene": 10, "name": "Cornell box reference", "fps": 59.988, "gpuMs": 1.31072, "overflow": 0, "passed": true },
+    { "scene": 11, "name": "Grand concave heightmap", "fps": 55.40166204986149, "gpuMs": 1.835008, "overflow": 0, "passed": true }
   ]
 }
