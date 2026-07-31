@@ -91,9 +91,6 @@ export function RadianceCascadesLab() {
           <label><input id="animate-camera" type="checkbox" defaultChecked /><span>Camera path</span></label>
           <label><input id="animate-lights" type="checkbox" defaultChecked /><span>Moving lights</span></label>
           <label><input id="temporal-stability" type="checkbox" defaultChecked /><span>Stable history</span></label>
-          <label><input id="multibounce" type="checkbox" /><span>Secondary bounce (extension)</span></label>
-          <label><input id="rough-specular" type="checkbox" /><span>Rough specular (extension)</span></label>
-          <label><input id="c-minus-one" type="checkbox" /><span>Directional C(-1) (extension)</span></label>
           <label><input id="show-profiler" type="checkbox" defaultChecked /><span>Pass profiler</span></label>
         </section>
 

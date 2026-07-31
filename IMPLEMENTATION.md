@@ -6,17 +6,15 @@
 sun shadow pass + six-face moving-point shadow pass
   -> G-buffer (world, two-sided normal, albedo/emission, depth)
   -> clear current hash, counters, prefixes, and interval accumulators
-  -> insert primary c0 probes from every visible internal-screen pixel
-  -> insert secondary c0 probes from previous-frame ray hits at LOD + 2
+  -> insert four surface-tangent c0 support probes per visible pixel
   -> initialize c1 through c3 parents
   -> assign one ray per visible internal-screen pixel and count rays bottom-up
   -> assign deterministic hierarchical R2 offsets c3 through c0
   -> trace and split primary rays
-  -> trace and split secondary-cache rays
   -> exact-key interval accumulation and merge c3 through c0
   -> prefilter c0 into a filterable bordered 6x6 octahedral atlas
-  -> diffuse + C(-1) + rough specular + direct current composite
-  -> present the current composite directly
+  -> diffuse indirect + direct current composite
+  -> current-frame FXAA presentation
 ```
 
 Every arrow is a WebGPU pass boundary, providing ordering for atomic writes and
@@ -40,12 +38,21 @@ sphere directions.
 
 Each cascade owns an open-addressed hash range. A compare/exchange claims an
 empty slot and maps the key to a compact probe index. Keys contain signed
-9-bit cell coordinates, a 3-bit LOD, and a primary/secondary cache tag.
+9-bit cell coordinates and a 3-bit LOD.
 Coordinates outside the representable scene-local range are rejected and
 counted as an overflow; they are never silently clamped onto an unrelated key.
 
-Probe centers are half-cell offsets. Merging and final gathers use only
-existing trilinear neighbors and divide by the accumulated weight.
+Probe centers are half-cell offsets. The paper's nearest-only c0 insertion is
+its documented performance tradeoff; it can make the set of available
+trilinear neighbors change under sub-pixel camera motion. Production c0
+initialization therefore inserts the four interpolation neighbors in the
+surface's dominant tangent plane. Algorithm 3 still assigns exactly one ray to
+the nearest probe per visible pixel. Final gathers use the same four-neighbor
+footprint, renormalize away the normal-axis weight, and divide by the active
+tangent support. This supplies deterministic floor and wall coverage without
+allocating the four probes across the surface normal or leaking through thin
+walls.
+
 The current hierarchy contains only probes induced by current visible surfaces
 and their parent chain. A matching previous key can supply interval history,
 but it is never inserted merely because it existed in the prior frame. This
@@ -86,7 +93,7 @@ approximate the paper's two irrational rotation increments. The complete pair
 does not repeat before `2^32` frames and avoids float precision collapse.
 Exact-key intervals therefore keep converging under paused lighting. Static
 intervals use their accumulated sample counts, capped at 16,384 effective
-samples; animated lighting keeps a bounded 0.92 EMA and is validated against a
+samples; animated lighting keeps a bounded 0.965 EMA and is validated against a
 stepped, freshly-converged target.
 
 ## Ray splitting and merge
@@ -115,27 +122,27 @@ angular interpolation. A traced sky miss explicitly deposits environment
 radiance at c3; an absent parent gather remains invalid instead of inventing
 environment light through missing coverage.
 
-## Irradiance and extensions
+## Irradiance and surface filtering
 
 Diffuse shading prefilters 32 c0 directions into a 6x6 octahedral field inside
 an evaluated one-texel border (an 8x8 allocation). Every active probe writes
 its tile into a double-buffered RGBA16F storage atlas. WebGPU requires writable
 storage and filtered sampling to occupy separate usage resources, so the
 completed frame half is copied into a filterable atlas before final and
-secondary-cache gathers. Each gather performs one bilinear texture lookup per
-sparse trilinear neighbor: at most eight filtered samples per LOD, including
+gathers. Each gather performs one bilinear texture lookup per active
+surface-tangent neighbor: at most four filtered samples per LOD, including
 octahedral interpolation.
 
-The secondary cache consumes previous-frame primary hit points, initializes
-probes two LODs coarser, and samples its previous irradiance at new ray hits.
-The cache can therefore feed itself for temporally converged multiple bounces.
+Raster materials use a 25-layer `rgba8unorm-srgb` texture array with a complete
+ten-level GPU-generated mip chain. The main G-buffer samples with the original
+UV gradients and 16x anisotropy, preventing fractional atlas addressing from
+creating seam derivatives. GI hit materials use a fixed low-frequency mip,
+which is appropriate for diffuse transport and prevents high-frequency albedo
+aliasing from being mistaken for radiance instability.
 
-Rough specular selects c2 as a broad cone, samples it along the reflection
-direction, then composes c1 and c0 `(J, beta)` intervals in front.
-
-`C(-1)` evaluates 32 directional screen-space near intervals and composes them
-in front of the world-space c0 cones, matching the directional extension
-described by the paper.
+The shipped baseline intentionally contains only the paper's diffuse Split RC
+path. Secondary bounce, rough-specular, and directional `C(-1)` experiment
+switches and pipelines are not compiled into production.
 
 ## Stability and diagnostics
 
@@ -143,10 +150,10 @@ Hash, interval, and irradiance storage are double-buffered. Temporal reuse
 looks up the exact previous world/LOD/cache key and blends the previous
 directional `(J, beta)` interval before recursive merge; missing, disoccluded,
 or LOD-changed probes reject history. Fixed lighting uses exact sample-count
-accumulation; animated lighting uses a 0.92 EMA. Changing the
+accumulation; animated lighting uses a 0.965 EMA. Changing the
 lighting-animation mode invalidates history.
 
-The final current composite is presented directly. Temporal filtering exists
+The final current composite is passed through current-frame-only FXAA. Temporal filtering exists
 only in the paper's world-space `(J, beta)` interval history; the renderer does
 not recursively blend tone-mapped screen pixels. Validation captures include
 world position and normal only to compare the same surfaces across moving
@@ -172,9 +179,10 @@ per-scene regression gates; raster sun/point shadows compared with exact BVH
 visibility; plus explicit per-capture hash/key/capacity/BVH/device diagnostics.
 Cornell additionally requires the shadow oracle to exercise all six
 point-shadow array layers.
-Baseline and multibounce
-Sponza paths both run
-the replay and continuous-motion checks. Captures include the world and normal
+The Sponza baseline runs replay and continuous-motion checks in final,
+indirect-only, raw irradiance, and probe-coverage views. The low-floor
+forward/backward coverage loop additionally requires byte-identical matched
+pixels and exact same-pose closure. Captures include the world and normal
 buffers so opposite-facing surfaces are never paired as temporal
 correspondences. A path-reference/Split-RC/error triptych is rendered with the
 report. The audit also records FPS, GPU timestamps, ray/probe counts,

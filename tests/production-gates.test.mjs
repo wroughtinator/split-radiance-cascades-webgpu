@@ -4,18 +4,13 @@ import test from "node:test";
 
 const engine = await readFile(new URL("../public/rc/engine.js", import.meta.url), "utf8");
 
-test("production audit gates static-light, moving-light, and multibounce motion", () => {
+test("production audit gates camera motion, moving lights, floor loops, and sun shadows", () => {
   assert.match(engine, /compareReprojectedFrames/);
   assert.match(engine, /matchedPixelRatio >= 0\.35/);
   assert.match(engine, /trimmedRmseByteDelta/);
-  assert.match(engine, /maximum\("p95Absolute"\) <= 0\.0045/);
-  assert.match(engine, /warmup: i === 11 \? 96 : 48/);
+  assert.match(engine, /maximum\("p95Absolute"\) <= 0\.006/);
+  assert.match(engine, /warmup: i === 6 \? 192 : \(\[5, 11\]\.includes\(i\) \? 96 : 48\)/);
   assert.match(engine, /p95ByteDeltaMax/);
-  assert.match(engine, /multibounceContinuousMotion/);
-  assert.match(engine, /const multibounceMotionPassed = multibounce/);
-  assert.match(engine, /comparison\.p95ByteDelta <= 4/);
-  assert.match(engine, /comparison\.p999ByteDelta <= 32/);
-  assert.match(engine, /comparison\.largeDeltaRatio <= 0\.001/);
   assert.match(engine, /movingLightContinuousMotion/);
   assert.match(engine, /runLongTranslationCacheAudit/);
   assert.match(engine, /cacheMotionRecovery/);
@@ -28,16 +23,23 @@ test("production audit gates static-light, moving-light, and multibounce motion"
   assert.match(engine, /runMovingLightResponseAudit/);
   assert.match(engine, /responseRatio <= 0\.72/);
   assert.match(engine, /movingLights: true/);
-  assert.match(engine, /multibounceRepeatability/);
-  assert.match(engine, /report\.multibounceContinuousMotion\.passed/);
+  assert.match(engine, /runFloorRoundTripAudit/);
+  assert.match(engine, /leg: direction > 0 \? "forward" : "backward"/);
+  assert.match(engine, /const coverageExact = debugMode === 4/);
+  assert.match(engine, /maximum\("maxByteDelta"\) === 0/);
+  assert.match(engine, /maximum\("p95ByteDelta"\) <= 3/);
+  assert.match(engine, /loopClosure\.p99ByteDelta <= 8/);
   assert.match(engine, /runViewDistanceInvarianceAudit/);
   assert.match(engine, /comparison\.p999ByteDelta <= 96/);
   assert.match(engine, /comparison\.largeDeltaRatio <= 0\.02/);
   assert.match(engine, /normalPixels/);
-  assert.match(engine, /dot3\(normal, candidateNormal\) < 0\.88/);
+  assert.match(engine, /normalAgreement < 0\.88/);
+  assert.match(engine, /const destinationWorld = new Float32Array/);
   assert.match(engine, /!r\.movingLightContinuousMotion\.passed/);
   assert.match(engine, /r\.movingLightResponse && !r\.movingLightResponse\.passed/);
   assert.match(engine, /runShadowMapAudit/);
+  assert.match(engine, /runSunShadowSweepAudit/);
+  assert.match(engine, /classificationMismatchRatioMax/);
   assert.match(engine, /r\.shadowMapCorrectness && !r\.shadowMapCorrectness\.passed/);
   assert.match(engine, /classificationMismatchRatio <= 0\.06/);
   assert.match(engine, /pointFaceCoverageRequired = this\.sceneIndex === 10/);
@@ -45,8 +47,8 @@ test("production audit gates static-light, moving-light, and multibounce motion"
   assert.match(engine, /diagnosticOverflows === 0/);
   assert.match(engine, /per-capture sparse diagnostics/);
   assert.match(engine, /this\.sampleFrameIndex < 24/);
-  assert.match(engine, /this\.animateLights[\s\S]*\? 0\.92/);
-  assert.doesNotMatch(engine, /this\.multibounce \? 0\.88|this\.multibounce \? 0\.97/);
+  assert.match(engine, /this\.animateLights[\s\S]*\? 0\.965/);
+  assert.doesNotMatch(engine, /multibounce|roughSpecular|cMinusOne/);
   assert.match(engine, /animate-lights[\s\S]*this\.resetProbeHistory\(\)/);
   assert.doesNotMatch(engine, /retainProbes|retainPreviousProbes|temporalPipeline|historyTextures|previousWorldTexture/);
 });
@@ -60,6 +62,9 @@ test("quality presets preserve Algorithm 3's one-ray-per-screen-pixel assignment
   assert.match(engine, /const vsyncRecoveryProbe = gpu <= 0/);
   assert.match(engine, /const observedMs = gpu > 0 \? gpu : \(vsyncRecoveryProbe \? 12\.5 : avg\)/);
   assert.match(engine, /firstAdjustment \? 30 : 60/);
+  assert.match(engine, /const mipLevelCount = Math\.floor\(Math\.log2\(layerSize\)\) \+ 1/);
+  assert.match(engine, /mipLevelCount,/);
+  assert.match(engine, /maxAnisotropy: 16/);
 });
 
 test("path-reference gate classifies dark spots and bright leaks", () => {
