@@ -1,11 +1,11 @@
 import {
   adaptiveBudgetScale, add3, clamp, cross3, dot3, mat4LookAt, mat4Multiply, mat4Ortho,
   mat4Perspective, mul3, normalize3, sub3,
-} from "./math.js";
-import { createScene, SCENE_INFO } from "./scenes.js";
+} from "./math.js?v=2026-07-31-cache2";
+import { createScene, SCENE_INFO } from "./scenes.js?v=2026-07-31-cache2";
 import {
   computeShader, finalShader, presentShader, rasterShader, shaderConstants as K,
-} from "./shaders.js";
+} from "./shaders.js?v=2026-07-31-cache2";
 
 const SUN_CASCADE_COUNT = 4;
 

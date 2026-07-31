@@ -1,4 +1,4 @@
-import { buildBVH, cross3, normalize3, sub3, TAU } from "./math.js";
+import { buildBVH, cross3, normalize3, sub3, TAU } from "./math.js?v=2026-07-31-cache2";
 
 const C = {
   chalk: [0.72, 0.75, 0.72],

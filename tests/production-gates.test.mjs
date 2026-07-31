@@ -5,6 +5,8 @@ import test from "node:test";
 const engine = await readFile(new URL("../public/rc/engine.js", import.meta.url), "utf8");
 const shaders = await readFile(new URL("../public/rc/shaders.js", import.meta.url), "utf8");
 const scenes = await readFile(new URL("../public/rc/scenes.js", import.meta.url), "utf8");
+const app = await readFile(new URL("../app/radiance-cascades-lab.tsx", import.meta.url), "utf8");
+const standalone = await readFile(new URL("../standalone/index.html", import.meta.url), "utf8");
 
 test("production audit gates camera motion, moving lights, floor loops, and sun shadows", () => {
   assert.match(engine, /compareReprojectedFrames/);
@@ -102,4 +104,14 @@ test("presentation preserves shadow detail and height fields use smooth normals"
   assert.match(scenes, /const normal=\(point\)=>normalize3/);
   assert.match(scenes, /const terracing=1\+Math\.tanh/);
   assert.doesNotMatch(scenes, /const terracing=Math\.floor/);
+});
+
+test("production module graph uses a release cache key", () => {
+  const releaseKey = "v=2026-07-31-cache2";
+  assert.ok(app.includes(`/rc/engine.js?${releaseKey}`));
+  assert.ok(standalone.includes(`/rc/engine.js?${releaseKey}`));
+  assert.ok(engine.includes(`./math.js?${releaseKey}`));
+  assert.ok(engine.includes(`./scenes.js?${releaseKey}`));
+  assert.ok(engine.includes(`./shaders.js?${releaseKey}`));
+  assert.ok(scenes.includes(`./math.js?${releaseKey}`));
 });
