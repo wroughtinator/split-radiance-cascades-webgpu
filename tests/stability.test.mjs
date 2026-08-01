@@ -102,6 +102,9 @@ test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
   assert.match(finalShader, /directionIndexValue=0u;directionIndexValue<14u/);
   assert.match(computeShader, /fn classifyEnvironmentAccess/);
   assert.match(computeShader, /atomicStore\(&state\[8\],1u\)/);
+  assert.match(computeShader, /const ACCESS_RAY_COUNT=512u/);
+  assert.match(computeShader, /let origin=frame\.cameraPos\.xyz\+direction/);
+  assert.doesNotMatch(computeShader, /if\(world\.w<0\.5\)\{atomicStore\(&state\[8\]/);
   assert.match(finalShader, /atomicLoad\(&frameState\[8\]\)==0u/);
   assert.match(finalShader, /let intervalEnd=frame\.envBaseSpacing\.w/);
   assert.match(finalShader, /frame\.sceneBounds\.w\*1\.001/);

@@ -1,13 +1,13 @@
 import {
   adaptiveBudgetScale, add3, clamp, cross3, dot3, mat4LookAt, mat4Multiply, mat4Ortho,
   mat4Perspective, mul3, normalize3, sub3,
-} from "./math.js?v=2026-07-31-daylight-door10";
+} from "./math.js?v=2026-08-01-door-zoom11";
 import {
   createDynamicSceneGeometry, createScene, dynamicSceneKey, SCENE_INFO,
-} from "./scenes.js?v=2026-07-31-daylight-door10";
+} from "./scenes.js?v=2026-08-01-door-zoom11";
 import {
   computeShader, finalShader, presentShader, rasterShader, shaderConstants as K,
-} from "./shaders.js?v=2026-07-31-daylight-door10";
+} from "./shaders.js?v=2026-08-01-door-zoom11";
 
 const SUN_CASCADE_COUNT = 4;
 
@@ -350,6 +350,11 @@ class SplitRadianceCascades {
         await this.loadScene(1);
         const report = await this.runViewDistanceInvarianceAudit();
         this.exposeTestReport(report);
+      }, 200);
+    } else if (automaticTest === "door-zoom") {
+      setTimeout(async () => {
+        await this.loadScene(8);
+        this.exposeTestReport(await this.runDoorZoomContinuityAudit({ preservePose: true }));
       }, 200);
     } else if (automaticTest?.startsWith("probe-")) {
       setTimeout(async () => {
@@ -835,7 +840,7 @@ class SplitRadianceCascades {
   }
 
   async createMaterialAtlas() {
-    const response = await fetch("/models/sponza-atlas.webp?v=2026-07-31-daylight-door10");
+    const response = await fetch("/models/sponza-atlas.webp?v=2026-08-01-door-zoom11");
     if (!response.ok) throw new Error(`Sponza material atlas request failed (${response.status}).`);
     const bitmap = await createImageBitmap(await response.blob(), { colorSpaceConversion: "default" });
     const layerSize = 811;
@@ -1605,7 +1610,7 @@ class SplitRadianceCascades {
     let pass = encoder.beginComputePass({ label: "classify environment access" });
     pass.setPipeline(this.computePipelines.classifyEnvironmentAccess);
     pass.setBindGroup(0, this.computeBindGroups[0]);
-    pass.dispatchWorkgroups(Math.ceil(this.width / 8), Math.ceil(this.height / 8));
+    pass.dispatchWorkgroups(Math.ceil(512 / 64));
     pass.end();
     pass = encoder.beginComputePass({
       label: "reset sparse hash",
@@ -1759,7 +1764,7 @@ class SplitRadianceCascades {
       const diagnosticBuffer = createBuffer(
         d,
         "per-capture sparse diagnostics",
-        32,
+        64,
         GPU.COPY_DST | GPU.MAP_READ,
       );
       encoder.copyTextureToBuffer(
@@ -1777,7 +1782,7 @@ class SplitRadianceCascades {
         { buffer: normalBuffer, bytesPerRow: normalBytesPerRow, rowsPerImage: this.height },
         [this.width, this.height],
       );
-      encoder.copyBufferToBuffer(this.stateBuffer, 0, diagnosticBuffer, 0, 32);
+      encoder.copyBufferToBuffer(this.stateBuffer, 0, diagnosticBuffer, 0, 64);
       captureResources = {
         ...captureJob,
         buffer,
@@ -1803,8 +1808,8 @@ class SplitRadianceCascades {
     let stateRead;
     const readState = !this.statusPending && this.frameIndex % 30 === 0;
     if (readState) {
-      stateRead = createBuffer(d, "diagnostic readback", 32, GPU.COPY_DST | GPU.MAP_READ);
-      encoder.copyBufferToBuffer(this.stateBuffer, 0, stateRead, 0, 32);
+      stateRead = createBuffer(d, "diagnostic readback", 64, GPU.COPY_DST | GPU.MAP_READ);
+      encoder.copyBufferToBuffer(this.stateBuffer, 0, stateRead, 0, 64);
       this.statusPending = true;
     }
     d.queue.submit([encoder.finish()]);
@@ -1883,6 +1888,7 @@ class SplitRadianceCascades {
       this.rayCount = s[4];
       this.hitCount = s[5];
       this.overflowCount = s[6] + s[7];
+      this.environmentAccess = s[8] !== 0;
     } catch (error) {
       console.warn("[Split RC] diagnostic readback failed", error);
     } finally {
@@ -3375,6 +3381,123 @@ class SplitRadianceCascades {
     }
   }
 
+  async runDoorZoomContinuityAudit({ warmup = 64, settleFrames = 1, preservePose = false } = {}) {
+    const saved = {
+      sceneIndex: this.sceneIndex,
+      camera: { ...this.camera, target: [...this.camera.target] },
+      animateCamera: this.animateCamera,
+      animateLights: this.animateLights,
+      temporalStability: this.temporalStability,
+      debugMode: this.debugMode,
+      testTimeOverride: this.testTimeOverride,
+    };
+    const target = [0, 2.2, 3.5];
+    const distances = [8.6, 8.3, 8.0, 7.7, 7.4, 7.1, 6.8, 6.5];
+    const luminanceStatistics = (frame) => {
+      const values = [];
+      let maximum = 0;
+      for (let y = 0; y < frame.height; y++) {
+        const pixelRow = y * frame.bytesPerRow;
+        const worldRow = y * (frame.worldBytesPerRow / 4);
+        for (let x = 0; x < frame.width; x++) {
+          if (frame.worldPixels[worldRow + x * 4 + 3] < 0.5) continue;
+          const pixel = pixelRow + x * 4;
+          const value = frame.pixels[pixel] * 0.2126
+            + frame.pixels[pixel + 1] * 0.7152
+            + frame.pixels[pixel + 2] * 0.0722;
+          values.push(value);
+          maximum = Math.max(maximum, value);
+        }
+      }
+      values.sort((a, b) => a - b);
+      const percentile = (p) => values[
+        Math.min(values.length - 1, Math.floor((values.length - 1) * p))
+      ] || 0;
+      return {
+        surfacePixels: values.length,
+        p50LuminanceByte: percentile(0.5),
+        p95LuminanceByte: percentile(0.95),
+        p99LuminanceByte: percentile(0.99),
+        maximumLuminanceByte: maximum,
+      };
+    };
+    try {
+      if (this.sceneIndex !== 8) await this.loadScene(8);
+      this.animateCamera = false;
+      this.animateLights = false;
+      this.temporalStability = true;
+      this.debugMode = 1;
+      this.testTimeOverride = 4.0;
+      this.setCameraPose([0, 2.7, distances[0]], target);
+      this.resetProbeHistory();
+      await this.waitFrames(warmup);
+      let previous = await this.captureFinalFrame();
+      const samples = [{
+        cameraZ: distances[0],
+        environmentAccess: previous.diagnostics[8] !== 0,
+        luminance: luminanceStatistics(previous),
+      }];
+      for (const cameraZ of distances.slice(1)) {
+        this.setCameraPose([0, 2.7, cameraZ], target);
+        await this.waitFrames(settleFrames);
+        const current = await this.captureFinalFrame();
+        samples.push({
+          cameraZ,
+          environmentAccess: current.diagnostics[8] !== 0,
+          luminance: luminanceStatistics(current),
+          transition: this.compareReprojectedFrames(previous, current, {
+            pixelStep: 1,
+            searchRadius: 5,
+            worldToleranceScale: 0.3,
+          }),
+        });
+        previous = current;
+      }
+
+      // The same universal classifier must make the complementary decision
+      // for the closed topology. No scene-specific radiance threshold or
+      // lighting override participates in rendering this frame.
+      this.testTimeOverride = 0.7;
+      this.setCameraPose([0, 2.7, 3.5], [0, 2.2, 0]);
+      this.resetProbeHistory();
+      await this.waitFrames(warmup);
+      const closed = await this.captureFinalFrame();
+      const closedDoor = {
+        environmentAccess: closed.diagnostics[8] !== 0,
+        luminance: luminanceStatistics(closed),
+        overflows: closed.diagnosticOverflows,
+      };
+      const transitions = samples.slice(1).map((sample) => sample.transition);
+      const report = {
+        scene: 8,
+        pose: "open doorway dolly through the former viewport-coverage boundary",
+        warmup,
+        settleFrames,
+        samples,
+        closedDoor,
+        metrics: this.metricsSnapshot(),
+      };
+      report.passed = samples.every((sample) => sample.environmentAccess)
+        && samples.every((sample) => sample.luminance.p99LuminanceByte >= 4)
+        && Math.min(...transitions.map((sample) => sample.matchedPixelRatio)) >= 0.45
+        && Math.max(...transitions.map((sample) => sample.p95ByteDelta)) <= 14
+        && Math.max(...transitions.map((sample) => sample.p99ByteDelta)) <= 42
+        && Math.max(...transitions.map((sample) => sample.largeDeltaRatio)) <= 0.02
+        && !closedDoor.environmentAccess
+        && closedDoor.luminance.maximumLuminanceByte <= 1
+        && closedDoor.overflows === 0
+        && !report.metrics.gpuError;
+      return report;
+    } finally {
+      if (!preservePose) {
+        if (this.sceneIndex !== saved.sceneIndex) await this.loadScene(saved.sceneIndex);
+        Object.assign(this, saved);
+        this.camera = saved.camera;
+        this.resetProbeHistory();
+      }
+    }
+  }
+
   async runEnclosureLeakAudit({ warmup = 128, samples = 512, preservePose = false } = {}) {
     const saved = {
       sceneIndex: this.sceneIndex,
@@ -3882,6 +4005,7 @@ class SplitRadianceCascades {
       probes: [...this.probeCounts],
       rays: this.rayCount,
       hitRate: this.rayCount ? this.hitCount/this.rayCount : 0,
+      environmentAccess: this.environmentAccess ?? null,
       overflows: this.overflowCount,
       gpuError: this.lastGpuError || null,
     };
@@ -3979,6 +4103,10 @@ class SplitRadianceCascades {
         $("audit-title").textContent = "Testing closed-volume light-leak rejection";
         result.enclosureLeak = await this.runEnclosureLeakAudit();
       }
+      if (i === 8) {
+        $("audit-title").textContent = "Testing open-door zoom continuity and closed-room darkness";
+        result.doorZoomContinuity = await this.runDoorZoomContinuityAudit();
+      }
       if (i === 10) {
         $("audit-title").textContent = "Replaying reported Cornell artifact poses";
         result.cornellArtifacts = await this.runCornellArtifactAudit();
@@ -4002,6 +4130,7 @@ class SplitRadianceCascades {
       || (r.shadowMapCorrectness && !r.shadowMapCorrectness.passed)
       || (r.pathTracedReference && !r.pathTracedReference.passed)
       || (r.enclosureLeak && !r.enclosureLeak.passed)
+      || (r.doorZoomContinuity && !r.doorZoomContinuity.passed)
       || (r.cornellArtifacts && !r.cornellArtifacts.passed)
     );
     const report = {

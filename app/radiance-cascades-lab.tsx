@@ -14,7 +14,7 @@ export function RadianceCascadesLab() {
     let active = true;
     const script = document.createElement("script");
     script.type = "module";
-    script.src = "/rc/engine.js?v=2026-07-31-daylight-door10";
+    script.src = "/rc/engine.js?v=2026-08-01-door-zoom11";
     script.dataset.splitRcLoader = "true";
     script.addEventListener("load", () => {
       if (active && window.__splitRCLoaderGeneration === generation) {

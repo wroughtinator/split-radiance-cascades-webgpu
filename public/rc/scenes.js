@@ -5,7 +5,7 @@ import {
   normalize3,
   sub3,
   TAU,
-} from "./math.js?v=2026-07-31-daylight-door10";
+} from "./math.js?v=2026-08-01-door-zoom11";
 
 const C = {
   chalk: [0.72, 0.75, 0.72],
@@ -226,7 +226,7 @@ let sponzaGeometryPromise;
 async function loadPackedSponzaGeometry() {
   if (!sponzaGeometryPromise) {
     sponzaGeometryPromise = (async () => {
-      const response = await fetch("/models/sponza.rcb?v=2026-07-31-daylight-door10");
+      const response = await fetch("/models/sponza.rcb?v=2026-08-01-door-zoom11");
       if (!response.ok) throw new Error(`Sponza geometry request failed (${response.status}).`);
       if (typeof DecompressionStream === "undefined") {
         throw new Error("This browser does not expose the gzip decompressor required by the Sponza scene.");

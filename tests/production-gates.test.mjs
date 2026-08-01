@@ -51,6 +51,11 @@ test("production audit gates camera motion, moving lights, floor loops, and sun 
   assert.match(engine, /displayLeak\.severePixelRatio === 0/);
   assert.match(engine, /report\.trajectory\.p95ByteDeltaMax <= 4/);
   assert.match(engine, /r\.enclosureLeak && !r\.enclosureLeak\.passed/);
+  assert.match(engine, /runDoorZoomContinuityAudit/);
+  assert.match(engine, /automaticTest === "door-zoom"/);
+  assert.match(engine, /samples\.every\(\(sample\) => sample\.environmentAccess\)/);
+  assert.match(engine, /closedDoor\.luminance\.maximumLuminanceByte <= 1/);
+  assert.match(engine, /r\.doorZoomContinuity && !r\.doorZoomContinuity\.passed/);
   assert.match(engine, /classificationMismatchRatio <= 0\.06/);
   assert.match(engine, /pointFaceCoverageRequired = this\.sceneIndex === 10/);
   assert.match(engine, /point\.perFace\.every\(\(face\) => face\.samples >= 4\)/);
@@ -126,7 +131,7 @@ test("presentation preserves shadow detail and height fields use smooth normals"
 });
 
 test("production module graph uses a release cache key", () => {
-  const releaseKey = "v=2026-07-31-daylight-door10";
+  const releaseKey = "v=2026-08-01-door-zoom11";
   assert.ok(app.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(standalone.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(engine.includes(`./math.js?${releaseKey}`));

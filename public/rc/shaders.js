@@ -980,27 +980,33 @@ export const computeShader = sharedCompute + /* wgsl */`
   atomicStore(&slots[slot].index,EMPTY);
 }
 
-// Decide once per frame whether an unlit/non-emissive view has any actual
-// connection to the environment. A screen miss or an exactly sun-visible
-// primary surface proves the connection. The final pass then uses one
-// estimator for the whole frame, avoiding camera-dependent per-pixel wedges.
-@compute @workgroup_size(8,8) fn classifyEnvironmentAccess(
+// Decide once per frame whether the camera's connected region has any path to
+// the environment. This must not inspect the G-buffer: using a background
+// pixel or a visible sunlit surface made the result depend on framing, so the
+// entire indirect field changed estimator when a dolly removed the final sky
+// pixel. A dense, deterministic spherical Fibonacci set instead queries the
+// scene BVH in world space. It is invariant to FOV and screen coverage, sees
+// apertures in every direction (including an open door behind the camera), and
+// remains exact for a genuinely sealed volume.
+@compute @workgroup_size(64) fn classifyEnvironmentAccess(
   @builtin(global_invocation_id) gid:vec3u
 ){
   if(featureEnabled(64u)||frame.pointColorIntensity.w>0.0001){
-    if(all(gid.xy==vec2u(0))){atomicStore(&state[8],1u);}
+    if(gid.x==0u){atomicStore(&state[8],1u);}
     return;
   }
-  let size=vec2u(u32(frame.resolution.x),u32(frame.resolution.y));
-  if(any(gid.xy>=size)){return;}
-  let world=textureLoad(worldTex,vec2i(gid.xy),0);
-  if(world.w<0.5){atomicStore(&state[8],1u);return;}
-  let normal=gbufferNormal(vec2i(gid.xy));
-  let direction=normalize(-frame.sunDirTime.xyz);
-  if(dot(normal,direction)<=0.001){return;}
-  let origin=world.xyz+normal*max(0.008,frame.envBaseSpacing.w*0.012);
-  let blocker=traceScene(origin,direction,frame.sceneBounds.w*1.001);
-  if(blocker.t>=frame.sceneBounds.w*1.001){atomicStore(&state[8],1u);}
+  const ACCESS_RAY_COUNT=512u;
+  if(gid.x>=ACCESS_RAY_COUNT){return;}
+  if(atomicLoad(&state[8])!=0u){return;}
+  let sample=f32(gid.x)+0.5;
+  let y=1.0-2.0*sample/f32(ACCESS_RAY_COUNT);
+  let radius=sqrt(max(0.0,1.0-y*y));
+  let phi=6.28318530718*fract(sample*0.61803398875);
+  let direction=vec3f(cos(phi)*radius,y,sin(phi)*radius);
+  let traceEnd=frame.sceneBounds.w*1.001;
+  let origin=frame.cameraPos.xyz+direction*max(0.004,frame.envBaseSpacing.w*0.006);
+  let blocker=traceScene(origin,direction,traceEnd+0.001);
+  if(blocker.t>=traceEnd){atomicStore(&state[8],1u);}
 }
 
 fn insertTangentSupport(position:vec3f,normal:vec3f,lod:u32){
