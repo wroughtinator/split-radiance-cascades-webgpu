@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 import test from "node:test";
 
-test("the packed paper-scene Sponza payload has a valid production BVH", async () => {
+test("the packed official Sponza payload has a valid production BVH", async () => {
   const [compressed, atlas] = await Promise.all([
     readFile(new URL("../public/models/sponza.rcb", import.meta.url)),
     readFile(new URL("../public/models/sponza-atlas.webp", import.meta.url)),
@@ -14,8 +14,8 @@ test("the packed paper-scene Sponza payload has a valid production BVH", async (
 
   assert.equal(header[0], 0x31424352);
   assert.equal(header[1], 3);
-  assert.equal(header[5], 262269 * 3);
-  assert.equal(header[7], 262269);
+  assert.equal(header[5], 262267 * 3);
+  assert.equal(header[7], 262267);
   assert.ok(header[6] > 100_000, "expected a non-trivial packed BVH");
   assert.ok(compressed.byteLength < 18_000_000, "scene payload should remain web-deliverable");
   assert.ok(atlas.byteLength > 1_000_000, "expected the official base-color material atlas");
@@ -66,5 +66,5 @@ test("the packed paper-scene Sponza payload has a valid production BVH", async (
     const agreement = face.reduce((sum, value, axis) => sum + value * authored[axis], 0);
     assert.ok(agreement > 0, "emissive BVH winding must agree with its authored radiometric normal");
   }
-  assert.equal(emissiveTriangles, 2, "paper Sponza should contain the red area-emitter quad");
+  assert.equal(emissiveTriangles, 0, "official Sponza must not contain synthetic baked emitters");
 });

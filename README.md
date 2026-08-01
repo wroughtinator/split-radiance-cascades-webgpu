@@ -26,12 +26,23 @@ is required.
 - automatic asset-scale probe spacing with no per-scene GI presets
 - four camera-fitted, texel-stabilized directional shadow cascades with
   cross-faded boundaries and 5x5 tent PCF
+- a production dynamic-scene extension: immutable object-space BLASes,
+  per-frame current/swept/emissive TLASes, and motion-local cone invalidation
 
 WebGPU does not expose a portable hardware ray-tracing pipeline. Rays and
 shadow queries therefore traverse a binned-SAH triangle BVH in WGSL. This
 changes the traversal backend, not the Split RC interval or merge math.
 The equation-by-equation audit is in
 [PAPER-COVERAGE.md](./PAPER-COVERAGE.md).
+
+The paper assumes static geometry. Dynamic rigid objects are therefore labeled
+as an extension, not misrepresented as paper baseline behavior. Static Sponza
+remains one immutable world BLAS; four reusable local mesh BLASes feed 48
+independent instances. The current TLAS, swept-change TLAS, emissive-only TLAS,
+and packed instance records share the existing node/triangle arenas so the
+compute pipeline remains within WebGPU's portable eight-storage-buffer limit.
+Raster, four sun shadows, six point shadows, compute rays, and final `C(-1)`
+visibility all consume the same frame's instance records.
 
 ## Stability
 
@@ -74,6 +85,15 @@ current-frame FXAA; there is no recursive screen-space presentation history.
 These two invariants prevent a long camera translation from accumulating stale
 block-shaped light and ensure that rebuilding history at a fixed pose produces
 the same sparse population.
+
+For dynamic geometry, each previous directional interval is additionally
+tested against the mover swept-change TLAS. Only cone/radial intervals that
+overlap changed geometry reject history; unaffected Sponza cones retain their
+full convergence. Support-probe and final-atlas historical fallbacks are
+rejected near the same swept bounds. Moving emitters have a compact emissive
+TLAS and exact near-field polygon integration, while stochastic ray hits use
+the transformed emitter radiance. This change-projected temporal extension is
+shared by the Sponza stress scene and the daylight door.
 
 For enclosed geometry below c0 spacing, an exact BVH `C(-1)` resolve evaluates
 a rotation-balanced 14-point ambient quadrature. Blocker distance is filtered
@@ -135,10 +155,12 @@ and the displayed image.
 ## Thirteen validation scenes
 
 1. Color bleed laboratory - near-field transfer and emissive geometry.
-2. Sponza atrium - the official Crytek/Khronos geometry reconstructed with the
-   paper's neutral/cyan presentation and a real red area-emitter quad as
-   262,269 triangles, a 158,359-node SAH BVH, and a 25-layer 811px sRGB texture
-   array with complete mip chains made from all official base-color materials.
+2. Dynamic Sponza atrium - the official Crytek/Khronos geometry reconstructed with the
+   paper's neutral/cyan presentation as 262,267 triangles, a 158,309-node SAH
+   BVH, and a 25-layer 811px sRGB texture array with complete mip chains made
+   from all official base-color materials, plus 48 moving rigid instances
+   (seven emissive panels) sharing five local BLASes. No synthetic surface is
+   baked into the reference asset.
    The paper does not distribute its exact
    prepared asset, camera, or exposure, so visual matching is not mislabeled
    as byte-identical scene provenance.
@@ -181,6 +203,12 @@ pixel:
   Cornell scenes and 1.19% on the large heightmap; corresponding sun-shadow
   mismatch is 0%, 1.52%, and 1.04%
 - no sparse-hash, capacity, BVH-stack, or WebGPU error was observed
+- the dedicated dynamic-Sponza gate passes at 60 FPS / 7.09 ms GPU with 48
+  movers, seven mesh lights, 0.70 ms CPU-update p95, 20,384 upload bytes/frame,
+  2/255 motion p95, 6/255 motion p99, and 2/255 clean round-trip p95; an
+  emitter-off/on gate changes 0.734% of indirect-only channels with a 4/255
+  peak, and its 128-spp reference has 23.22% NRMSE with zero severe under-light
+  outliers
 
 The final machine-readable summary is
 [`docs/validation/RTX-5080-balanced.json`](docs/validation/RTX-5080-balanced.json).
@@ -211,9 +239,11 @@ The runtime sends no user data and makes no third-party requests.
 ## Known physical limits
 
 Like the paper, the technique is biased by probe interpolation, can overblur
-hard indirect detail, and cannot represent sharp mirror reflections. Static
-geometry is supported; changing meshes requires rebuilding their BVH. These
-are method limits, not silent feature omissions.
+hard indirect detail, and cannot represent sharp mirror reflections. Rigid
+dynamic instances, nonuniform scale, material overrides, and moving mesh
+emitters are supported. Topology-changing/deforming meshes require a BLAS
+refit or rebuild and are not claimed by this demo. These are stated method
+limits, not silent feature omissions.
 
 This is a from-paper WebGPU implementation, not the authors' unreleased source
 code. WebGPU's portable software BVH and deterministic key-ordered allocation

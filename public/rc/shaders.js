@@ -30,11 +30,17 @@ struct FrameUniforms {
   resolution: vec4f,
   controls: vec4f,
   sceneBounds: vec4f,
+  dynamicInfo: vec4u,
 };
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(0) @binding(1) var albedoAtlas: texture_2d_array<f32>;
 @group(0) @binding(2) var atlasSampler: sampler;
 @group(0) @binding(3) var<uniform> lightViewProj: mat4x4<f32>;
+struct RasterDynamicRecord {
+  a:vec4f, b:vec4f, c:vec4f, albedo:vec4f, emissive:vec4f,
+  uvAB:vec4f, uvCMaterial:vec4f, normalOct:vec4u,
+};
+@group(0) @binding(4) var<storage,read> rasterDynamicData:array<RasterDynamicRecord>;
 
 struct VertexIn {
   @location(0) position: vec3f,
@@ -62,6 +68,29 @@ struct VertexOut {
   o.emissive = v.emissive;
   o.uv = v.uv;
   o.materialCutoff = v.materialCutoff;
+  return o;
+}
+fn rasterQuaternionRotate(vector:vec3f,quaternion:vec4f)->vec3f{
+  let doubled=2.0*cross(quaternion.xyz,vector);
+  return vector+quaternion.w*doubled+cross(quaternion.xyz,doubled);
+}
+@vertex fn dynamicGbufferVS(v:VertexIn)->VertexOut{
+  let instanceIndex=u32(v.materialCutoff.x+0.5);
+  let instance=rasterDynamicData[frame.dynamicInfo.y+instanceIndex];
+  let world=instance.a.xyz+rasterQuaternionRotate(
+    v.position*instance.c.xyz,instance.b
+  );
+  let normal=normalize(rasterQuaternionRotate(
+    v.normal/instance.c.xyz,instance.b
+  ));
+  var o:VertexOut;
+  o.clip=frame.viewProj*vec4f(world,1);
+  o.world=world;
+  o.normal=normal;
+  o.albedo=v.albedo*instance.albedo.xyz;
+  o.emissive=instance.emissive.xyz;
+  o.uv=v.uv;
+  o.materialCutoff=vec2f(-1.0,v.materialCutoff.y);
   return o;
 }
 struct GBufferOut {
@@ -145,6 +174,18 @@ struct ShadowOut {
   o.materialCutoff=v.materialCutoff;
   return o;
 }
+@vertex fn dynamicShadowVS(v:VertexIn)->ShadowOut{
+  let instanceIndex=u32(v.materialCutoff.x+0.5);
+  let instance=rasterDynamicData[frame.dynamicInfo.y+instanceIndex];
+  let world=instance.a.xyz+rasterQuaternionRotate(
+    v.position*instance.c.xyz,instance.b
+  );
+  var o:ShadowOut;
+  o.clip=lightViewProj*vec4f(world,1);
+  o.uv=v.uv;
+  o.materialCutoff=vec2f(-1.0,v.materialCutoff.y);
+  return o;
+}
 @fragment fn shadowFS(v:ShadowOut) {
   let surface=materialSample(v.uv,v.materialCutoff.x);
   if(v.materialCutoff.y>0.0&&surface.a<v.materialCutoff.y){discard;}
@@ -154,6 +195,18 @@ struct ShadowOut {
   o.clip=lightViewProj*vec4f(v.position,1.0);
   o.uv=v.uv;
   o.materialCutoff=v.materialCutoff;
+  return o;
+}
+@vertex fn dynamicPointShadowVS(v:VertexIn)->ShadowOut{
+  let instanceIndex=u32(v.materialCutoff.x+0.5);
+  let instance=rasterDynamicData[frame.dynamicInfo.y+instanceIndex];
+  let world=instance.a.xyz+rasterQuaternionRotate(
+    v.position*instance.c.xyz,instance.b
+  );
+  var o:ShadowOut;
+  o.clip=lightViewProj*vec4f(world,1);
+  o.uv=v.uv;
+  o.materialCutoff=vec2f(-1.0,v.materialCutoff.y);
   return o;
 }
 `;
@@ -171,6 +224,7 @@ struct FrameUniforms {
   resolution: vec4f,
   controls: vec4f,
   sceneBounds: vec4f,
+  dynamicInfo: vec4u,
 };
 struct HashSlot { key: atomic<u32>, index: atomic<u32> };
 // Keep the frame and history epoch as independent 32-bit values. Packing both
@@ -194,7 +248,7 @@ struct Triangle {
 };
 struct Hit {
   t: f32, normal: vec3f, albedo: vec3f, emissive: vec3f,
-  triangleIndex: u32,
+  sourceMinimum: vec3f, sourceMaximum: vec3f, triangleIndex: u32,
 };
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
@@ -333,7 +387,11 @@ fn featureEnabled(bit:u32)->bool {
 }
 
 fn intervalHistoryWeight()->f32{
-  return historyWeight();
+  // Dynamic scenes retain converged static cones, but even a mover outside a
+  // cone can change the direct-light visibility at its endpoint. Bound that
+  // residual response to a short EMA; cones intersecting swept geometry are
+  // rejected completely by dynamicConeHistoryValid below.
+  return select(historyWeight(),min(historyWeight(),0.88),featureEnabled(128u));
 }
 
 fn lookupProbeFrame(cascade: u32, key: u32, frameIndex: u32) -> u32 {
@@ -495,12 +553,113 @@ fn traceTriangle(origin: vec3f, direction: vec3f, tri: Triangle, maxDistance: f3
   return vec3f(maxDistance,0,0);
 }
 
+fn quaternionRotate(vector:vec3f,quaternion:vec4f)->vec3f{
+  let doubled=2.0*cross(quaternion.xyz,vector);
+  return vector+quaternion.w*doubled+cross(quaternion.xyz,doubled);
+}
+
+fn inverseInstanceVector(vector:vec3f,instance:Triangle)->vec3f{
+  return quaternionRotate(vector,vec4f(-instance.b.xyz,instance.b.w))/instance.c.xyz;
+}
+
+fn instancePoint(localPoint:vec3f,instance:Triangle)->vec3f{
+  return instance.a.xyz+quaternionRotate(localPoint*instance.c.xyz,instance.b);
+}
+
+fn traceDynamicInstance(
+  origin:vec3f,direction:vec3f,instanceIndex:u32,best:Hit
+)->Hit{
+  let instance=triangles[frame.dynamicInfo.y+instanceIndex];
+  let localOrigin=inverseInstanceVector(origin-instance.a.xyz,instance);
+  let localDirection=inverseInstanceVector(direction,instance);
+  let inverseLocalDirection=select(
+    vec3f(-1e20),vec3f(1e20),localDirection>=vec3f(0)
+  )/max(vec3f(1),abs(localDirection)*1e20);
+  var result=best;
+  var stack:array<u32,64>;
+  var stackSize=1u;
+  stack[0]=instance.normalOct.x;
+  loop{
+    if(stackSize==0u){break;}
+    stackSize-=1u;
+    let nodeIndex=stack[stackSize];
+    let node=bvhNodes[nodeIndex];
+    if(rayBoxNear(
+      localOrigin,inverseLocalDirection,node.minMeta.xyz,node.maxMeta.xyz,result.t
+    )>=result.t){continue;}
+    let left=bitcast<u32>(node.minMeta.w);
+    let right=bitcast<u32>(node.maxMeta.w);
+    if((left&0x80000000u)!=0u){
+      let first=left&0x7fffffffu;
+      for(var triangleOffset=0u;triangleOffset<right;triangleOffset++){
+        let triangleIndex=first+triangleOffset;
+        let triangle=triangles[triangleIndex];
+        let intersection=traceTriangle(
+          localOrigin,localDirection,triangle,result.t
+        );
+        if(intersection.x<result.t){
+          let barycentric=vec3f(
+            1.0-intersection.y-intersection.z,intersection.y,intersection.z
+          );
+          let localNormal=normalize(
+            decodeOctNormal(triangle.normalOct.x)*barycentric.x
+            +decodeOctNormal(triangle.normalOct.y)*barycentric.y
+            +decodeOctNormal(triangle.normalOct.z)*barycentric.z
+          );
+          var worldNormal=normalize(quaternionRotate(
+            localNormal/instance.c.xyz,instance.b
+          ));
+          if(dot(worldNormal,direction)>0.0){worldNormal=-worldNormal;}
+          let sourceFrontFace=dot(cross(
+            triangle.b.xyz-triangle.a.xyz,
+            triangle.c.xyz-triangle.a.xyz
+          ),localDirection)<0.0;
+          let worldA=instancePoint(triangle.a.xyz,instance);
+          let worldB=instancePoint(triangle.b.xyz,instance);
+          let worldC=instancePoint(triangle.c.xyz,instance);
+          let isEmitter=(instance.normalOct.w&1u)!=0u&&sourceFrontFace;
+          result=Hit(
+            intersection.x,worldNormal,
+            triangle.albedo.xyz*instance.albedo.xyz,
+            select(vec3f(0),instance.emissive.xyz,isEmitter),
+            min(worldA,min(worldB,worldC)),max(worldA,max(worldB,worldC)),
+            0x80000000u|triangleIndex
+          );
+        }
+      }
+    }else{
+      let leftNear=rayBoxNear(
+        localOrigin,inverseLocalDirection,bvhNodes[left].minMeta.xyz,
+        bvhNodes[left].maxMeta.xyz,result.t
+      );
+      let rightNear=rayBoxNear(
+        localOrigin,inverseLocalDirection,bvhNodes[right].minMeta.xyz,
+        bvhNodes[right].maxMeta.xyz,result.t
+      );
+      if(leftNear<result.t&&rightNear<result.t){
+        if(stackSize>61u){atomicAdd(&state[7],1u);break;}
+        if(leftNear<rightNear){stack[stackSize]=right;stack[stackSize+1u]=left;}
+        else{stack[stackSize]=left;stack[stackSize+1u]=right;}
+        stackSize+=2u;
+      }else if(leftNear<result.t){
+        if(stackSize>62u){atomicAdd(&state[7],1u);break;}
+        stack[stackSize]=left;stackSize+=1u;
+      }else if(rightNear<result.t){
+        if(stackSize>62u){atomicAdd(&state[7],1u);break;}
+        stack[stackSize]=right;stackSize+=1u;
+      }
+    }
+  }
+  return result;
+}
+
 fn traceScene(origin: vec3f, directionIn: vec3f, maxDistance: f32) -> Hit {
   let direction=normalize(directionIn);
   let inverseDirection=select(vec3f(-1e20),vec3f(1e20),direction>=vec3f(0))
     /max(vec3f(1),abs(direction)*1e20);
   var result=Hit(
-    maxDistance,vec3f(0,1,0),vec3f(0),vec3f(0),0xffffffffu
+    maxDistance,vec3f(0,1,0),vec3f(0),vec3f(0),
+    vec3f(0),vec3f(0),0xffffffffu
   );
   var stack: array<u32,64>;
   var stackSize=1u;
@@ -535,7 +694,9 @@ fn traceScene(origin: vec3f, directionIn: vec3f, maxDistance: f32) -> Hit {
           )<0.0;
           result=Hit(
             intersection.x,n,tri.albedo.xyz*surface.rgb,
-            select(vec3f(0),tri.emissive.xyz,sourceFrontFace),first+j
+            select(vec3f(0),tri.emissive.xyz,sourceFrontFace),
+            min(tri.a.xyz,min(tri.b.xyz,tri.c.xyz)),
+            max(tri.a.xyz,max(tri.b.xyz,tri.c.xyz)),first+j
           );
         }
       }
@@ -565,7 +726,132 @@ fn traceScene(origin: vec3f, directionIn: vec3f, maxDistance: f32) -> Hit {
       }
     }
   }
+  if(frame.dynamicInfo.x!=0xffffffffu){
+    var dynamicStack:array<u32,32>;
+    var dynamicStackSize=1u;
+    dynamicStack[0]=frame.dynamicInfo.x;
+    loop{
+      if(dynamicStackSize==0u){break;}
+      dynamicStackSize-=1u;
+      let nodeIndex=dynamicStack[dynamicStackSize];
+      let node=bvhNodes[nodeIndex];
+      if(rayBoxNear(
+        origin,inverseDirection,node.minMeta.xyz,node.maxMeta.xyz,result.t
+      )>=result.t){continue;}
+      let left=bitcast<u32>(node.minMeta.w);
+      let right=bitcast<u32>(node.maxMeta.w);
+      if((left&0x80000000u)!=0u){
+        let first=left&0x7fffffffu;
+        for(var instanceOffset=0u;instanceOffset<right;instanceOffset++){
+          result=traceDynamicInstance(
+            origin,direction,first+instanceOffset,result
+          );
+        }
+      }else{
+        let leftNear=rayBoxNear(
+          origin,inverseDirection,bvhNodes[left].minMeta.xyz,
+          bvhNodes[left].maxMeta.xyz,result.t
+        );
+        let rightNear=rayBoxNear(
+          origin,inverseDirection,bvhNodes[right].minMeta.xyz,
+          bvhNodes[right].maxMeta.xyz,result.t
+        );
+        if(leftNear<result.t&&rightNear<result.t){
+          if(dynamicStackSize>29u){atomicAdd(&state[7],1u);break;}
+          if(leftNear<rightNear){
+            dynamicStack[dynamicStackSize]=right;
+            dynamicStack[dynamicStackSize+1u]=left;
+          }else{
+            dynamicStack[dynamicStackSize]=left;
+            dynamicStack[dynamicStackSize+1u]=right;
+          }
+          dynamicStackSize+=2u;
+        }else if(leftNear<result.t){
+          dynamicStack[dynamicStackSize]=left;dynamicStackSize+=1u;
+        }else if(rightNear<result.t){
+          dynamicStack[dynamicStackSize]=right;dynamicStackSize+=1u;
+        }
+      }
+    }
+  }
   return result;
+}
+
+fn segmentIntersectsExpandedBox(
+  origin:vec3f,inverseDirection:vec3f,minimum:vec3f,maximum:vec3f,
+  startDistance:f32,endDistance:f32,expansion:f32
+)->bool{
+  let expandedMinimum=minimum-vec3f(expansion);
+  let expandedMaximum=maximum+vec3f(expansion);
+  let t0=(expandedMinimum-origin)*inverseDirection;
+  let t1=(expandedMaximum-origin)*inverseDirection;
+  let near3=min(t0,t1);
+  let far3=max(t0,t1);
+  let nearDistance=max(max(near3.x,near3.y),near3.z);
+  let farDistance=min(min(far3.x,far3.y),far3.z);
+  return farDistance>=max(0.0,startDistance)&&nearDistance<=endDistance;
+}
+
+fn dynamicConeHistoryValid(
+  origin:vec3f,directionIn:vec3f,cascade:u32,lod:u32
+)->bool{
+  let sweptRoot=frame.dynamicInfo.w;
+  if(sweptRoot==0xffffffffu){return true;}
+  let direction=normalize(directionIn);
+  let inverseDirection=select(vec3f(-1e20),vec3f(1e20),direction>=vec3f(0))
+    /max(vec3f(1),abs(direction)*1e20);
+  let baseLength=frame.envBaseSpacing.w*exp2(f32(lod&3u))*1.6;
+  let intervalScale=exp2(f32(cascade)*2.0);
+  let endDistance=baseLength*intervalScale;
+  let startDistance=select(0.0,baseLength*intervalScale*0.25,cascade>0u);
+  // The directional bin is a cone, not a line. Expanding swept nodes by the
+  // probe/cascade footprint conservatively rejects every cone a mover could
+  // have entered while leaving unrelated, already-converged Sponza history.
+  let footprint=cascadeSpacing(cascade,lod)*0.72;
+  var stack:array<u32,32>;
+  var stackSize=1u;
+  stack[0]=sweptRoot;
+  loop{
+    if(stackSize==0u){break;}
+    stackSize-=1u;
+    let nodeIndex=stack[stackSize];
+    let node=bvhNodes[nodeIndex];
+    if(!segmentIntersectsExpandedBox(
+      origin,inverseDirection,node.minMeta.xyz,node.maxMeta.xyz,
+      startDistance,endDistance,footprint
+    )){continue;}
+    let left=bitcast<u32>(node.minMeta.w);
+    let right=bitcast<u32>(node.maxMeta.w);
+    if((left&0x80000000u)!=0u){return false;}
+    if(stackSize>29u){return false;}
+    stack[stackSize]=left;
+    stack[stackSize+1u]=right;
+    stackSize+=2u;
+  }
+  return true;
+}
+
+fn dynamicPointHistoryValid(position:vec3f,radius:f32)->bool{
+  let sweptRoot=frame.dynamicInfo.w;
+  if(sweptRoot==0xffffffffu){return true;}
+  var stack:array<u32,32>;
+  var stackSize=1u;
+  stack[0]=sweptRoot;
+  loop{
+    if(stackSize==0u){break;}
+    stackSize-=1u;
+    let node=bvhNodes[stack[stackSize]];
+    let delta=max(max(node.minMeta.xyz-position,vec3f(0)),position-node.maxMeta.xyz);
+    if(dot(delta,delta)>radius*radius){continue;}
+    let left=bitcast<u32>(node.minMeta.w);
+    let right=bitcast<u32>(node.maxMeta.w);
+    if((left&0x80000000u)!=0u){return false;}
+    if(stackSize>29u){return false;}
+    stack[stackSize]=left;
+    stack[stackSize+1u]=right;
+    stackSize+=2u;
+  }
+  return true;
 }
 
 fn octTexel(normalIn:vec3f)->u32{
@@ -608,6 +894,7 @@ fn samplePrimaryIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
   let fraction=fract(grid);
   let fixedBits=vec3i(floor(position/spacing))-cell;
   let absoluteNormal=abs(normal);
+  let allowHistoricalSupport=dynamicPointHistoryValid(position,spacing*1.75);
   var normalAxis=2u;
   if(absoluteNormal.x>=absoluteNormal.y&&absoluteNormal.x>=absoluteNormal.z){
     normalAxis=0u;
@@ -646,7 +933,7 @@ fn samplePrimaryIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
     // history whether the current probe is empty or merely has no ray yet.
     // This is the continuity bridge; restricting it to an existing current
     // probe made coverage itself flicker under camera translation.
-    if(irradiance.a<0.001){
+    if(irradiance.a<0.001&&allowHistoricalSupport){
       for(var age=1u;age<4u;age++){
         let historyFrame=(currentFrame()+4u-age)&3u;
         let historyProbe=lookupProbeFrame(0u,key,historyFrame);
@@ -944,6 +1231,48 @@ fn primaryNearEmissiveIrradiance(
       stack[stackSize]=left;
       stack[stackSize+1u]=right;
       stackSize+=2u;
+    }
+  }
+  if(frame.dynamicInfo.z!=0xffffffffu){
+    var dynamicStack:array<u32,32>;
+    var dynamicStackSize=1u;
+    dynamicStack[0]=frame.dynamicInfo.z;
+    loop{
+      if(dynamicStackSize==0u){break;}
+      dynamicStackSize-=1u;
+      let node=bvhNodes[dynamicStack[dynamicStackSize]];
+      if(primaryPointAabbDistanceSquared(
+        origin,node.minMeta.xyz,node.maxMeta.xyz
+      )>radiusSquared){continue;}
+      let left=bitcast<u32>(node.minMeta.w);
+      let right=bitcast<u32>(node.maxMeta.w);
+      if((left&0x80000000u)!=0u){
+        let firstInstance=left&0x7fffffffu;
+        for(var instanceOffset=0u;instanceOffset<right;instanceOffset++){
+          let instance=triangles[
+            frame.dynamicInfo.y+firstInstance+instanceOffset
+          ];
+          if((instance.normalOct.w&1u)==0u){continue;}
+          for(var triangleOffset=0u;triangleOffset<instance.normalOct.z;triangleOffset++){
+            let localTriangle=triangles[instance.normalOct.y+triangleOffset];
+            let worldTriangle=Triangle(
+              vec4f(instancePoint(localTriangle.a.xyz,instance),0),
+              vec4f(instancePoint(localTriangle.b.xyz,instance),0),
+              vec4f(instancePoint(localTriangle.c.xyz,instance),0),
+              vec4f(0),vec4f(instance.emissive.xyz,0),
+              vec4f(0),vec4f(0),vec4u(0)
+            );
+            result+=primaryEmissiveTriangleIrradiance(
+              origin,normal,worldTriangle,radius
+            );
+          }
+        }
+      }else{
+        if(dynamicStackSize>29u){break;}
+        dynamicStack[dynamicStackSize]=left;
+        dynamicStack[dynamicStackSize+1u]=right;
+        dynamicStackSize+=2u;
+      }
     }
   }
   return result;
@@ -1397,15 +1726,8 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
   // light remains in the stochastic transport field.
   if(didHit&&hit.triangleIndex!=0xffffffffu
     &&max(hit.emissive.x,max(hit.emissive.y,hit.emissive.z))>0.0){
-    let sourceTriangle=triangles[hit.triangleIndex];
-    let sourceMinimum=min(
-      sourceTriangle.a.xyz,min(sourceTriangle.b.xyz,sourceTriangle.c.xyz)
-    );
-    let sourceMaximum=max(
-      sourceTriangle.a.xyz,max(sourceTriangle.b.xyz,sourceTriangle.c.xyz)
-    );
     let sourceProximity=sqrt(primaryPointAabbDistanceSquared(
-      surfaceOrigin,sourceMinimum,sourceMaximum
+      surfaceOrigin,hit.sourceMinimum,hit.sourceMaximum
     ));
     let nearSourceRadius=frame.envBaseSpacing.w*1.5;
     let sourceOwnership=1.0-smoothstep(
@@ -1523,7 +1845,11 @@ fn mergedParent(
   let key=probeKeyFromInfo(probeInfo,cascade);
   let previousFrame=(currentFrame()+3u)&3u;
   let previousProbe=lookupProbeFrame(cascade,key,previousFrame);
-  if(historyWeight()>0.0&&previousProbe!=EMPTY&&previousProbe<PROBE_CAPS[cascade]){
+  let coneHistoryValid=dynamicConeHistoryValid(
+    probeInfo.xyz,directionFromIndex(direction,cascade),cascade,lod
+  );
+  if(historyWeight()>0.0&&coneHistoryValid
+    &&previousProbe!=EMPTY&&previousProbe<PROBE_CAPS[cascade]){
     let previousBase=accumIndexFrame(cascade,previousProbe,direction,previousFrame);
     let previousSamples=atomicLoad(&accum[previousBase+4u]);
     if(previousSamples>0u){
@@ -1689,7 +2015,8 @@ const TANGENT_OFFSETS=array<vec2i,8>(
     let key=probeKeyFromInfo(info,0u);
     let previousFrame=(currentFrame()+3u)&3u;
     let previousProbe=lookupProbeFrame(0u,key,previousFrame);
-    if(previousProbe!=EMPTY&&previousProbe<PROBE_CAPS[0]){
+    if(dynamicPointHistoryValid(info.xyz,frame.envBaseSpacing.w*1.75)
+      &&previousProbe!=EMPTY&&previousProbe<PROBE_CAPS[0]){
       let previous=irradiance[
         previousFrame*IRRADIANCE_FRAME_STRIDE+previousProbe*64u+texel
       ];
@@ -1997,6 +2324,7 @@ struct FrameUniforms {
   resolution: vec4f,
   controls: vec4f,
   sceneBounds: vec4f,
+  dynamicInfo: vec4u,
 };
 struct SunShadowUniforms {
   matrices: array<mat4x4<f32>,4>,
@@ -2046,6 +2374,51 @@ fn gbufferNormal(pixel:vec2i)->vec3f{
 }
 fn finalFeatureEnabled(bit:u32)->bool{
   return (u32(frame.cameraPos.w+0.5)&bit)!=0u;
+}
+
+fn finalDynamicPointHistoryValid(position:vec3f,radius:f32)->bool{
+  let sweptRoot=frame.dynamicInfo.w;
+  if(sweptRoot==0xffffffffu){return true;}
+  var stack:array<u32,32>;
+  var stackSize=1u;
+  stack[0]=sweptRoot;
+  loop{
+    if(stackSize==0u){break;}
+    stackSize-=1u;
+    let node=shortBvhNodes[stack[stackSize]];
+    let delta=max(max(node.minMeta.xyz-position,vec3f(0)),position-node.maxMeta.xyz);
+    if(dot(delta,delta)>radius*radius){continue;}
+    let left=bitcast<u32>(node.minMeta.w);
+    let right=bitcast<u32>(node.maxMeta.w);
+    if((left&0x80000000u)!=0u){return false;}
+    if(stackSize>29u){return false;}
+    stack[stackSize]=left;
+    stack[stackSize+1u]=right;
+    stackSize+=2u;
+  }
+  return true;
+}
+fn finalDynamicPointNearCurrent(position:vec3f,radius:f32)->bool{
+  let currentRoot=frame.dynamicInfo.x;
+  if(currentRoot==0xffffffffu){return false;}
+  var stack:array<u32,32>;
+  var stackSize=1u;
+  stack[0]=currentRoot;
+  loop{
+    if(stackSize==0u){break;}
+    stackSize-=1u;
+    let node=shortBvhNodes[stack[stackSize]];
+    let delta=max(max(node.minMeta.xyz-position,vec3f(0)),position-node.maxMeta.xyz);
+    if(dot(delta,delta)>radius*radius){continue;}
+    let left=bitcast<u32>(node.minMeta.w);
+    let right=bitcast<u32>(node.maxMeta.w);
+    if((left&0x80000000u)!=0u){return true;}
+    if(stackSize>29u){return true;}
+    stack[stackSize]=left;
+    stack[stackSize+1u]=right;
+    stackSize+=2u;
+  }
+  return false;
 }
 
 const EMPTY:u32=0xffffffffu;
@@ -2149,6 +2522,7 @@ fn sampleIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
   }
   let octCoordinate=clamp((oct*0.5+0.5)*6.0+vec2f(0.5),vec2f(0),vec2f(7));
   let frameIndex=u32(floor(frame.controls.w))&3u;
+  let allowHistoricalSupport=finalDynamicPointHistoryValid(position,spacing*1.75);
   var value=vec3f(0);
   var total=0.0;
   for(var corner=0u;corner<4u;corner++){
@@ -2174,7 +2548,7 @@ fn sampleIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
       let atlasUv=(tile+octCoordinate+vec2f(0.5))/vec2f(512.0,8192.0);
       irradiance=textureSampleLevel(irradianceAtlas,irradianceSampler,atlasUv,0.0);
     }
-    if(irradiance.a<0.001){
+    if(irradiance.a<0.001&&allowHistoricalSupport){
       for(var age=1u;age<4u;age++){
         let historyFrame=(frameIndex+4u-age)&3u;
         let historyProbe=lookupProbeCascadeFrame(0u,key,historyFrame);
@@ -2543,8 +2917,100 @@ fn shortTriangleWatertight(
     edgeC*inverseDeterminant
   );
 }
+fn shortQuaternionRotate(vector:vec3f,quaternion:vec4f)->vec3f{
+  let doubled=2.0*cross(quaternion.xyz,vector);
+  return vector+quaternion.w*doubled+cross(quaternion.xyz,doubled);
+}
+fn traceShortDynamicInstance(
+  origin:vec3f,direction:vec3f,instanceIndex:u32,watertight:bool,best:ShortHit
+)->ShortHit{
+  let instance=shortTriangles[frame.dynamicInfo.y+instanceIndex];
+  let inverseRotation=vec4f(-instance.b.xyz,instance.b.w);
+  let localOrigin=shortQuaternionRotate(
+    origin-instance.a.xyz,inverseRotation
+  )/instance.c.xyz;
+  let localDirection=shortQuaternionRotate(direction,inverseRotation)/instance.c.xyz;
+  let inverseLocalDirection=select(
+    vec3f(-1e20),vec3f(1e20),localDirection>=vec3f(0)
+  )/max(vec3f(1),abs(localDirection)*1e20);
+  var result=best;
+  var stack:array<u32,64>;
+  var stackSize=1u;
+  stack[0]=instance.normalOct.x;
+  loop{
+    if(stackSize==0u){break;}
+    stackSize-=1u;
+    let node=shortBvhNodes[stack[stackSize]];
+    if(shortRayBoxNear(
+      localOrigin,inverseLocalDirection,node.minMeta.xyz,node.maxMeta.xyz,result.t
+    )>=result.t){continue;}
+    let left=bitcast<u32>(node.minMeta.w);
+    let right=bitcast<u32>(node.maxMeta.w);
+    if((left&0x80000000u)!=0u){
+      let first=left&0x7fffffffu;
+      for(var triangleOffset=0u;triangleOffset<right;triangleOffset++){
+        let triangle=shortTriangles[first+triangleOffset];
+        var intersection=shortTriangle(
+          localOrigin,localDirection,triangle,result.t
+        );
+        if(watertight){
+          intersection=shortTriangleWatertight(
+            localOrigin,localDirection,triangle,result.t
+          );
+        }
+        if(intersection.x<result.t){
+          let barycentric=vec3f(
+            1.0-intersection.y-intersection.z,intersection.y,intersection.z
+          );
+          let localNormal=normalize(
+            shortNormal(triangle.normalOct.x)*barycentric.x
+            +shortNormal(triangle.normalOct.y)*barycentric.y
+            +shortNormal(triangle.normalOct.z)*barycentric.z
+          );
+          var worldNormal=normalize(shortQuaternionRotate(
+            localNormal/instance.c.xyz,instance.b
+          ));
+          if(dot(worldNormal,direction)>0.0){worldNormal=-worldNormal;}
+          let sourceFrontFace=dot(cross(
+            triangle.b.xyz-triangle.a.xyz,
+            triangle.c.xyz-triangle.a.xyz
+          ),localDirection)<0.0;
+          let isEmitter=(instance.normalOct.w&1u)!=0u&&sourceFrontFace;
+          result=ShortHit(
+            intersection.x,worldNormal,
+            triangle.albedo.xyz*instance.albedo.xyz,
+            select(vec3f(0),instance.emissive.xyz,isEmitter)
+          );
+        }
+      }
+    }else{
+      let leftNear=shortRayBoxNear(
+        localOrigin,inverseLocalDirection,shortBvhNodes[left].minMeta.xyz,
+        shortBvhNodes[left].maxMeta.xyz,result.t
+      );
+      let rightNear=shortRayBoxNear(
+        localOrigin,inverseLocalDirection,shortBvhNodes[right].minMeta.xyz,
+        shortBvhNodes[right].maxMeta.xyz,result.t
+      );
+      if(leftNear<result.t&&rightNear<result.t){
+        if(stackSize>61u){break;}
+        if(leftNear<rightNear){stack[stackSize]=right;stack[stackSize+1u]=left;}
+        else{stack[stackSize]=left;stack[stackSize+1u]=right;}
+        stackSize+=2u;
+      }else if(leftNear<result.t){
+        if(stackSize>62u){break;}
+        stack[stackSize]=left;stackSize+=1u;
+      }else if(rightNear<result.t){
+        if(stackSize>62u){break;}
+        stack[stackSize]=right;stackSize+=1u;
+      }
+    }
+  }
+  return result;
+}
 fn traceShortRangeImpl(
-  origin:vec3f,directionIn:vec3f,maxDistance:f32,watertight:bool
+  origin:vec3f,directionIn:vec3f,maxDistance:f32,watertight:bool,
+  includeDynamic:bool
 )->ShortHit{
   let direction=normalize(directionIn);
   let inverseDirection=select(vec3f(-1e20),vec3f(1e20),direction>=vec3f(0))
@@ -2620,15 +3086,67 @@ fn traceShortRangeImpl(
       }
     }
   }
+  if(includeDynamic&&frame.dynamicInfo.x!=0xffffffffu){
+    var dynamicStack:array<u32,32>;
+    var dynamicStackSize=1u;
+    dynamicStack[0]=frame.dynamicInfo.x;
+    loop{
+      if(dynamicStackSize==0u){break;}
+      dynamicStackSize-=1u;
+      let node=shortBvhNodes[dynamicStack[dynamicStackSize]];
+      if(shortRayBoxNear(
+        origin,inverseDirection,node.minMeta.xyz,node.maxMeta.xyz,result.t
+      )>=result.t){continue;}
+      let left=bitcast<u32>(node.minMeta.w);
+      let right=bitcast<u32>(node.maxMeta.w);
+      if((left&0x80000000u)!=0u){
+        let first=left&0x7fffffffu;
+        for(var instanceOffset=0u;instanceOffset<right;instanceOffset++){
+          result=traceShortDynamicInstance(
+            origin,direction,first+instanceOffset,watertight,result
+          );
+        }
+      }else{
+        let leftNear=shortRayBoxNear(
+          origin,inverseDirection,shortBvhNodes[left].minMeta.xyz,
+          shortBvhNodes[left].maxMeta.xyz,result.t
+        );
+        let rightNear=shortRayBoxNear(
+          origin,inverseDirection,shortBvhNodes[right].minMeta.xyz,
+          shortBvhNodes[right].maxMeta.xyz,result.t
+        );
+        if(leftNear<result.t&&rightNear<result.t){
+          if(dynamicStackSize>29u){break;}
+          if(leftNear<rightNear){
+            dynamicStack[dynamicStackSize]=right;
+            dynamicStack[dynamicStackSize+1u]=left;
+          }else{
+            dynamicStack[dynamicStackSize]=left;
+            dynamicStack[dynamicStackSize+1u]=right;
+          }
+          dynamicStackSize+=2u;
+        }else if(leftNear<result.t){
+          dynamicStack[dynamicStackSize]=left;dynamicStackSize+=1u;
+        }else if(rightNear<result.t){
+          dynamicStack[dynamicStackSize]=right;dynamicStackSize+=1u;
+        }
+      }
+    }
+  }
   return result;
 }
 fn traceShortRange(origin:vec3f,direction:vec3f,maxDistance:f32)->ShortHit{
-  return traceShortRangeImpl(origin,direction,maxDistance,false);
+  return traceShortRangeImpl(origin,direction,maxDistance,false,true);
 }
 fn traceShortRangeWatertight(
   origin:vec3f,direction:vec3f,maxDistance:f32
 )->ShortHit{
-  return traceShortRangeImpl(origin,direction,maxDistance,true);
+  return traceShortRangeImpl(origin,direction,maxDistance,true,true);
+}
+fn traceShortRangeWatertightStatic(
+  origin:vec3f,direction:vec3f,maxDistance:f32
+)->ShortHit{
+  return traceShortRangeImpl(origin,direction,maxDistance,true,false);
 }
 
 fn fastSunVisibility(world:vec3f,normal:vec3f)->f32{
@@ -2824,6 +3342,11 @@ fn emissiveTriangleIrradiance(
   }
   return result*intervalBlend;
 }
+fn shortInstancePoint(localPoint:vec3f,instance:Triangle)->vec3f{
+  return instance.a.xyz+shortQuaternionRotate(
+    localPoint*instance.c.xyz,instance.b
+  );
+}
 fn nearEmissiveIrradiance(
   origin:vec3f,normal:vec3f,radius:f32
 )->vec3f{
@@ -2854,6 +3377,48 @@ fn nearEmissiveIrradiance(
       stack[stackSize]=left;
       stack[stackSize+1u]=right;
       stackSize+=2u;
+    }
+  }
+  if(frame.dynamicInfo.z!=0xffffffffu){
+    var dynamicStack:array<u32,32>;
+    var dynamicStackSize=1u;
+    dynamicStack[0]=frame.dynamicInfo.z;
+    loop{
+      if(dynamicStackSize==0u){break;}
+      dynamicStackSize-=1u;
+      let node=shortBvhNodes[dynamicStack[dynamicStackSize]];
+      if(pointAabbDistanceSquared(
+        origin,node.minMeta.xyz,node.maxMeta.xyz
+      )>radiusSquared){continue;}
+      let left=bitcast<u32>(node.minMeta.w);
+      let right=bitcast<u32>(node.maxMeta.w);
+      if((left&0x80000000u)!=0u){
+        let firstInstance=left&0x7fffffffu;
+        for(var instanceOffset=0u;instanceOffset<right;instanceOffset++){
+          let instance=shortTriangles[
+            frame.dynamicInfo.y+firstInstance+instanceOffset
+          ];
+          if((instance.normalOct.w&1u)==0u){continue;}
+          for(var triangleOffset=0u;triangleOffset<instance.normalOct.z;triangleOffset++){
+            let localTriangle=shortTriangles[instance.normalOct.y+triangleOffset];
+            let worldTriangle=Triangle(
+              vec4f(shortInstancePoint(localTriangle.a.xyz,instance),0),
+              vec4f(shortInstancePoint(localTriangle.b.xyz,instance),0),
+              vec4f(shortInstancePoint(localTriangle.c.xyz,instance),0),
+              vec4f(0),vec4f(instance.emissive.xyz,0),
+              vec4f(0),vec4f(0),vec4u(0)
+            );
+            result+=emissiveTriangleIrradiance(
+              origin,normal,worldTriangle,radius
+            );
+          }
+        }
+      }else{
+        if(dynamicStackSize>29u){break;}
+        dynamicStack[dynamicStackSize]=left;
+        dynamicStack[dynamicStackSize+1u]=right;
+        dynamicStackSize+=2u;
+      }
     }
   }
   return result;

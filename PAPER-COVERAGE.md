@@ -24,6 +24,26 @@ and rough-specular experiments. The ambient-form `C(-1)` direction proposed
 in Section 7.1 is shipped as a production extension because the paper itself
 identifies sub-c0 visibility and interpolation leakage as unresolved limits.
 
+## Dynamic geometry extension (outside the paper)
+
+The paper does not claim dynamic objects. This implementation adds
+change-projected radiance cascades for rigid instances: immutable local BLASes,
+current/swept/emissive TLASes, affine local-ray traversal, inverse-transpose
+normals, and shared raster/shadow/ray transforms. World-space probe identity is
+retained; mover swept bounds invalidate only overlapping directional/radial
+history instead of globally resetting the field or carrying an object-local
+lighting cache. Moving mesh lights participate in stochastic ray hits and
+exact near-field polygon integration.
+
+The dynamic-Sponza audit requires 48 movers, at least six mesh lights, under
+64 KiB upload/frame, CPU update p95 below 1 ms, GPU time below 16.67 ms, zero
+overflows/errors, smooth 1/60-second motion, clean time round-trip closure,
+raster/BVH shadow agreement, and a traced-reference pass.
+The same gate also holds camera and geometry fixed, disables only dynamic mesh
+emission, reconverges, reenables emission, and requires a localized nonzero
+indirect response before the traced-reference result can pass. A disabled
+legacy point light is explicitly reported as not applicable.
+
 ## Backend substitutions
 
 The authors' unreleased implementation uses LuisaCompute, CUDA, OptiX,

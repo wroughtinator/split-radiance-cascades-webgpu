@@ -21,6 +21,40 @@ sun shadow pass + six-face moving-point shadow pass
 Every arrow is a WebGPU pass boundary, providing ordering for atomic writes and
 subsequent reads.
 
+## Dynamic-scene extension
+
+The paper's scene is static. Production dynamics use a two-level acceleration
+structure without altering the Split RC interval equations:
+
+- Sponza remains an immutable world-space BLAS rooted at node zero.
+- Box, sphere, torus, cylinder, and two-sided radiometric-panel prototypes have
+  immutable object-space BLASes shared by all instances.
+- A balanced current TLAS is rebuilt for 48 moving instances each frame. A
+  swept-change TLAS contains unions of previous/current bounds, and a compact
+  emissive TLAS contains only the seven moving mesh lights.
+- Rays are transformed into object space without normalizing the transformed
+  direction, so the affine ray parameter remains world distance under
+  nonuniform scaling. Normals use the inverse-transpose equivalent.
+- The static BVH, all dynamic BLASes/TLASes, and 128-byte instance records are
+  co-packed into the existing node/triangle buffers, preserving WebGPU's
+  portable eight-storage-buffer compute limit.
+- Raster and all ten shadow views transform immutable local vertices in the
+  vertex stage from the same records used by compute and final traversal.
+
+Temporal reuse remains world-space. Before a previous `(J,beta)` interval is
+accepted, its cascade cone segment is tested against the swept-change TLAS
+with expansion by the cone footprint. Intersecting history is rejected;
+unaffected static history keeps converging. Irradiance support history is also
+rejected near swept volumes. This avoids global resets and object-local caches
+that would incorrectly carry incident radiance through space.
+
+The dedicated `?autotest=dynamic-sponza` gate checks 1/60-second camera/object/
+light motion, time round-trip closure against a clean rebuild, a fixed-pose
+mesh-light off/on indirect-response signal, raster-shadow versus combined-BVH
+visibility, a 128-spp reference, the 60 Hz GPU budget, CPU update p95,
+per-frame upload bytes, and every overflow/error diagnostic. Disabled legacy
+point lights are reported as not applicable rather than as zero-sample passes.
+
 ## Cascade configuration
 
 For cascade `n` and LOD `d`:

@@ -1,13 +1,14 @@
 import {
   adaptiveBudgetScale, add3, clamp, cross3, dot3, mat4LookAt, mat4Multiply, mat4Ortho,
   mat4Perspective, mul3, normalize3, sub3,
-} from "./math.js?v=2026-08-01-door-zoom11";
+} from "./math.js?v=2026-08-01-dynamic-tlas10";
 import {
-  createDynamicSceneGeometry, createScene, dynamicSceneKey, SCENE_INFO,
-} from "./scenes.js?v=2026-08-01-door-zoom11";
+  createScene, SCENE_INFO,
+} from "./scenes.js?v=2026-08-01-dynamic-tlas10";
+import { createDynamicScene } from "./dynamic.js?v=2026-08-01-dynamic-tlas10";
 import {
   computeShader, finalShader, presentShader, rasterShader, shaderConstants as K,
-} from "./shaders.js?v=2026-08-01-door-zoom11";
+} from "./shaders.js?v=2026-08-01-dynamic-tlas10";
 
 const SUN_CASCADE_COUNT = 4;
 
@@ -260,6 +261,9 @@ class SplitRadianceCascades {
     this.testFrameTime = null;
     this.testFrameStep = null;
     this.captureRequest = null;
+    this.dynamicCpuSamples = [];
+    this.dynamicUpdateMs = 0;
+    this.dynamicUploadBytes = 0;
   }
 
   async initialize() {
@@ -355,6 +359,42 @@ class SplitRadianceCascades {
       setTimeout(async () => {
         await this.loadScene(8);
         this.exposeTestReport(await this.runDoorZoomContinuityAudit({ preservePose: true }));
+      }, 200);
+    } else if (automaticTest === "dynamic-sponza") {
+      setTimeout(async () => {
+        await this.loadScene(1);
+        this.testTimeOverride = 2.0;
+        const report = {
+          scene: 1,
+          motion: await this.runContinuousMotionAudit({
+            frames: 48,
+            warmup: 72,
+            startTime: 0.8,
+            timeStep: 1 / 60,
+            movingLights: true,
+          }),
+          roundTrip: await this.runDynamicRoundTripAudit(),
+          emitterResponse: await this.runDynamicEmitterResponseAudit(),
+          shadowAgreement: await this.runShadowMapAudit(),
+          reference: await this.runPathTracedReferenceAudit({
+            warmup: 96,
+            samples: 128,
+          }),
+          metrics: this.metricsSnapshot(),
+        };
+        report.passed = report.motion.passed
+          && report.roundTrip.passed
+          && report.emitterResponse.passed
+          && report.shadowAgreement.passed
+          && report.reference.passed
+          && report.metrics.dynamicInstances >= 48
+          && report.metrics.dynamicEmissiveInstances >= 6
+          && report.metrics.gpuMs <= 16.67
+          && report.metrics.dynamicUpdateP95Ms <= 1.0
+          && report.metrics.dynamicUploadBytes < 65536
+          && !report.metrics.overflows
+          && !report.metrics.gpuError;
+        this.exposeTestReport(report);
       }, 200);
     } else if (automaticTest?.startsWith("probe-")) {
       setTimeout(async () => {
@@ -559,9 +599,14 @@ class SplitRadianceCascades {
           SCENE_INFO.length - 1,
         );
         await this.loadScene(index);
-        const requestedTime = Number(new URLSearchParams(location.search).get("time"));
+        const sceneParams = new URLSearchParams(location.search);
+        const requestedTime = sceneParams.has("time")
+          ? Number(sceneParams.get("time"))
+          : NaN;
         if (Number.isFinite(requestedTime)) this.testTimeOverride = requestedTime;
-        const requestedMode = Number(new URLSearchParams(location.search).get("mode"));
+        const requestedMode = sceneParams.has("mode")
+          ? Number(sceneParams.get("mode"))
+          : NaN;
         if (Number.isFinite(requestedMode)) {
           this.debugMode = clamp(Math.floor(requestedMode), 0, 6);
           const debugView = document.getElementById("debug-view");
@@ -654,6 +699,19 @@ class SplitRadianceCascades {
       ],
     });
     this.rasterLayout = device.createPipelineLayout({ bindGroupLayouts: [this.frameLayout] });
+    this.dynamicFrameLayout = device.createBindGroupLayout({
+      label: "dynamic-frame-uniform-layout",
+      entries: [
+        { binding: 0, visibility: SHADER.VERTEX | SHADER.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 1, visibility: SHADER.FRAGMENT, texture: { sampleType: "float", viewDimension: "2d-array" } },
+        { binding: 2, visibility: SHADER.FRAGMENT, sampler: { type: "filtering" } },
+        { binding: 3, visibility: SHADER.VERTEX, buffer: { type: "uniform" } },
+        { binding: 4, visibility: SHADER.VERTEX, buffer: { type: "read-only-storage" } },
+      ],
+    });
+    this.dynamicRasterLayout = device.createPipelineLayout({
+      bindGroupLayouts: [this.dynamicFrameLayout],
+    });
     const vertexBuffers = [{
       arrayStride: 64,
       attributes: [
@@ -684,6 +742,22 @@ class SplitRadianceCascades {
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
     });
+    this.dynamicGbufferPipeline = device.createRenderPipeline({
+      label: "Dynamic instance G-buffer pipeline",
+      layout: this.dynamicRasterLayout,
+      vertex: { module: rasterModule, entryPoint: "dynamicGbufferVS", buffers: vertexBuffers },
+      fragment: {
+        module: rasterModule,
+        entryPoint: "gbufferFS",
+        targets: [
+          { format: "rgba8unorm" },
+          { format: "rgba16float" },
+          { format: "rgba32float" },
+        ],
+      },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+    });
     this.shadowPipeline = device.createRenderPipeline({
       label: "Sun shadow pipeline",
       layout: this.rasterLayout,
@@ -692,10 +766,32 @@ class SplitRadianceCascades {
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 1.5 },
     });
+    this.dynamicShadowPipeline = device.createRenderPipeline({
+      label: "Dynamic instance sun shadow pipeline",
+      layout: this.dynamicRasterLayout,
+      vertex: { module: rasterModule, entryPoint: "dynamicShadowVS", buffers: vertexBuffers },
+      fragment: { module: rasterModule, entryPoint: "shadowFS", targets: [] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 1.5 },
+    });
     this.pointShadowPipeline = device.createRenderPipeline({
       label: "Point-light cube shadow pipeline",
       layout: this.rasterLayout,
       vertex: { module: rasterModule, entryPoint: "pointShadowVS", buffers: vertexBuffers },
+      fragment: { module: rasterModule, entryPoint: "shadowFS", targets: [] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: {
+        format: "depth32float",
+        depthWriteEnabled: true,
+        depthCompare: "less",
+        depthBias: 2,
+        depthBiasSlopeScale: 1.5,
+      },
+    });
+    this.dynamicPointShadowPipeline = device.createRenderPipeline({
+      label: "Dynamic instance point shadow pipeline",
+      layout: this.dynamicRasterLayout,
+      vertex: { module: rasterModule, entryPoint: "dynamicPointShadowVS", buffers: vertexBuffers },
       fragment: { module: rasterModule, entryPoint: "shadowFS", targets: [] },
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: {
@@ -840,7 +936,7 @@ class SplitRadianceCascades {
   }
 
   async createMaterialAtlas() {
-    const response = await fetch("/models/sponza-atlas.webp?v=2026-08-01-door-zoom11");
+    const response = await fetch("/models/sponza-atlas.webp?v=2026-08-01-dynamic-tlas10");
     if (!response.ok) throw new Error(`Sponza material atlas request failed (${response.status}).`);
     const bitmap = await createImageBitmap(await response.blob(), { colorSpaceConversion: "default" });
     const layerSize = 811;
@@ -962,7 +1058,7 @@ class SplitRadianceCascades {
 
   createPersistentResources() {
     const d = this.device;
-    this.frameBuffer = createBuffer(d, "frame uniforms", 272, GPU.UNIFORM | GPU.COPY_DST);
+    this.frameBuffer = createBuffer(d, "frame uniforms", 288, GPU.UNIFORM | GPU.COPY_DST);
     this.hashBuffer = createBuffer(d, "world-key probe hash history", K.totalHashSlots * K.hashFrames * 8, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
     this.stateBuffer = createBuffer(d, "probe counters, ray prefixes, and diagnostics", K.stateWords * 4, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
     this.probeMetaBuffer = createBuffer(d, "sparse probe metadata", K.totalProbeMeta * 16, GPU.STORAGE | GPU.COPY_DST);
@@ -1182,6 +1278,32 @@ class SplitRadianceCascades {
 
   rebuildBindGroups() {
     if (!this.worldTexture || !this.bvhNodeBuffer) return;
+    const dynamicEntries = (lightBuffer) => [
+      { binding: 0, resource: { buffer: this.frameBuffer } },
+      { binding: 1, resource: this.materialAtlasView },
+      { binding: 2, resource: this.materialSampler },
+      { binding: 3, resource: { buffer: lightBuffer } },
+      { binding: 4, resource: { buffer: this.triangleBuffer } },
+    ];
+    this.dynamicRasterBindGroup = this.dynamicScene ? this.device.createBindGroup({
+      label: "dynamic G-buffer instance arena",
+      layout: this.dynamicFrameLayout,
+      entries: dynamicEntries(this.sunShadowBuffers[0]),
+    }) : null;
+    this.dynamicSunShadowBindGroups = this.dynamicScene
+      ? this.sunShadowBuffers.map((buffer, cascade) => this.device.createBindGroup({
+        label: `dynamic sun shadow instance arena ${cascade}`,
+        layout: this.dynamicFrameLayout,
+        entries: dynamicEntries(buffer),
+      }))
+      : [];
+    this.dynamicPointShadowBindGroups = this.dynamicScene
+      ? this.pointShadowBuffers.map((buffer, face) => this.device.createBindGroup({
+        label: `dynamic point shadow instance arena ${face}`,
+        layout: this.dynamicFrameLayout,
+        entries: dynamicEntries(buffer),
+      }))
+      : [];
     const commonEntries = (passBuffer) => [
       { binding: 0, resource: { buffer: this.frameBuffer } },
       { binding: 1, resource: this.worldTexture.createView() },
@@ -1260,19 +1382,32 @@ class SplitRadianceCascades {
     if (token !== this.loadToken) return;
     await this.device.queue.onSubmittedWorkDone();
     this.vertexBuffer?.destroy();
+    this.dynamicVertexBuffer?.destroy();
     this.bvhNodeBuffer?.destroy();
     this.triangleBuffer?.destroy();
     this.emissiveBvhNodeBuffer?.destroy();
     this.emissiveTriangleBuffer?.destroy();
     const geometry = scene.geometry;
+    const dynamicScene = createDynamicScene(index, geometry);
+    const rayNodes = dynamicScene?.combinedNodes ?? geometry.nodes;
+    const rayTriangles = dynamicScene?.combinedTriangles ?? geometry.triangles;
     this.vertexBuffer = createBuffer(this.device, `${info.short} raster geometry`, geometry.vertices.byteLength, GPU.VERTEX | GPU.COPY_DST, geometry.vertices);
-    // A moving primitive can change SAH partitioning by a few nodes without
-    // changing triangle topology. Reserve a small bounded margin so the door
-    // can update the hierarchy in-place without reallocating GPU resources or
-    // rebuilding bind groups during animation.
-    const bvhNodeCapacity = geometry.nodes.byteLength + (scene.dynamicGeometry ? 4096 : 0);
-    this.bvhNodeBuffer = createBuffer(this.device, `${info.short} BVH nodes`, bvhNodeCapacity, GPU.STORAGE | GPU.COPY_DST, geometry.nodes);
-    this.triangleBuffer = createBuffer(this.device, `${info.short} BVH triangles`, geometry.triangles.byteLength, GPU.STORAGE | GPU.COPY_DST, geometry.triangles);
+    this.dynamicVertexBuffer = dynamicScene
+      ? createBuffer(
+        this.device,
+        `${info.short} dynamic raster instances`,
+        dynamicScene.rasterVertices.byteLength,
+        GPU.VERTEX | GPU.COPY_DST,
+        dynamicScene.rasterVertices,
+      )
+      : null;
+    if (dynamicScene) dynamicScene.rasterDirty = false;
+    // The portable WebGPU compute limit is eight storage bindings and this
+    // renderer already uses all eight. Dynamic TLAS/BLAS data therefore lives
+    // in reserved arenas inside the existing node/triangle buffers instead of
+    // relying on a ninth, device-specific storage binding.
+    this.bvhNodeBuffer = createBuffer(this.device, `${info.short} static BLAS + dynamic TLAS/BLAS nodes`, rayNodes.byteLength, GPU.STORAGE | GPU.COPY_DST, rayNodes);
+    this.triangleBuffer = createBuffer(this.device, `${info.short} static triangles + dynamic mesh/instance arena`, rayTriangles.byteLength, GPU.STORAGE | GPU.COPY_DST, rayTriangles);
     this.emissiveBvhNodeBuffer = createBuffer(
       this.device,
       `${info.short} emissive-only BVH nodes`,
@@ -1287,14 +1422,10 @@ class SplitRadianceCascades {
       GPU.STORAGE | GPU.COPY_DST,
       geometry.emissiveGeometry.triangles,
     );
-    this.dynamicGeometryCapacities = {
-      vertices: geometry.vertices.byteLength,
-      nodes: bvhNodeCapacity,
-      triangles: geometry.triangles.byteLength,
-      emissiveNodes: geometry.emissiveGeometry.nodes.byteLength,
-      emissiveTriangles: geometry.emissiveGeometry.triangles.byteLength,
-    };
-    this.dynamicGeometryKey = dynamicSceneKey(index, 0);
+    this.dynamicScene = dynamicScene;
+    this.dynamicCpuSamples.length = 0;
+    this.dynamicUpdateMs = 0;
+    this.dynamicUploadBytes = 0;
     this.scene = scene;
     this.sceneIndex = index;
     this.setCameraFromScene(scene);
@@ -1309,40 +1440,53 @@ class SplitRadianceCascades {
       index,
       name: info.name,
       triangles: geometry.triangleCount,
+      dynamicInstances: dynamicScene?.instanceCount || 0,
+      dynamicTriangles: dynamicScene?.triangleCount || 0,
       bvhNodes: geometry.nodeCount,
       emissiveTriangles: geometry.emissiveGeometry.emissiveTriangleCount,
     });
   }
 
   updateDynamicSceneGeometry(seconds) {
-    if (!this.scene?.dynamicGeometry) return;
-    const key = dynamicSceneKey(this.sceneIndex, seconds);
-    if (key == null || key === this.dynamicGeometryKey) return;
-    const geometry = createDynamicSceneGeometry(this.sceneIndex, seconds);
-    if (!geometry) return;
-    const sizes = {
-      vertices: geometry.vertices.byteLength,
-      nodes: geometry.nodes.byteLength,
-      triangles: geometry.triangles.byteLength,
-      emissiveNodes: geometry.emissiveGeometry.nodes.byteLength,
-      emissiveTriangles: geometry.emissiveGeometry.triangles.byteLength,
-    };
-    for (const [name, size] of Object.entries(sizes)) {
-      if (size > this.dynamicGeometryCapacities[name]) {
-        throw new Error(`Dynamic scene exceeded ${name} capacity (${size} bytes).`);
+    if (!this.dynamicScene) return;
+    const updateStarted = performance.now();
+    const dynamic = this.dynamicScene.update(seconds);
+    this.device.queue.writeBuffer(
+      this.bvhNodeBuffer,
+      dynamic.tlasNodeOffset * 32,
+      dynamic.tlasData,
+    );
+    this.device.queue.writeBuffer(
+      this.bvhNodeBuffer,
+      dynamic.sweptTlasNodeOffset * 32,
+      dynamic.sweptTlasData,
+    );
+    this.device.queue.writeBuffer(
+      this.bvhNodeBuffer,
+      dynamic.emissiveTlasNodeOffset * 32,
+      dynamic.emissiveTlasData,
+    );
+    this.device.queue.writeBuffer(
+      this.triangleBuffer,
+      dynamic.instanceRecordOffset * 128,
+      dynamic.instanceData,
+    );
+    if (dynamic.rasterDirty) {
+      if (dynamic.rasterVertices.byteLength > this.dynamicVertexBuffer.size) {
+        throw new Error("Dynamic raster topology exceeded its prepared vertex capacity.");
       }
+      this.device.queue.writeBuffer(this.dynamicVertexBuffer, 0, dynamic.rasterVertices);
+      dynamic.rasterDirty = false;
     }
-    this.device.queue.writeBuffer(this.vertexBuffer, 0, geometry.vertices);
-    this.device.queue.writeBuffer(this.bvhNodeBuffer, 0, geometry.nodes);
-    this.device.queue.writeBuffer(this.triangleBuffer, 0, geometry.triangles);
-    this.device.queue.writeBuffer(
-      this.emissiveBvhNodeBuffer, 0, geometry.emissiveGeometry.nodes,
-    );
-    this.device.queue.writeBuffer(
-      this.emissiveTriangleBuffer, 0, geometry.emissiveGeometry.triangles,
-    );
-    this.scene.geometry = geometry;
-    this.dynamicGeometryKey = geometry.dynamicKey;
+    this.dynamicUploadBytes = dynamic.tlasData.byteLength
+      + dynamic.sweptTlasData.byteLength
+      + dynamic.emissiveTlasData.byteLength
+      + dynamic.instanceData.byteLength;
+    const elapsed = performance.now() - updateStarted;
+    this.dynamicCpuSamples.push(elapsed);
+    if (this.dynamicCpuSamples.length > 120) this.dynamicCpuSamples.shift();
+    const sorted = [...this.dynamicCpuSamples].sort((a, b) => a - b);
+    this.dynamicUpdateMs = sorted[Math.floor((sorted.length - 1) * 0.95)] || elapsed;
   }
 
   setCameraFromScene(scene) {
@@ -1474,13 +1618,15 @@ class SplitRadianceCascades {
       }
     }
 
-    const u = new Float32Array(68);
+    const u = new Float32Array(72);
     u.set(viewProjection, 0);
     u.set(sunVP, 16);
     const featureFlags = (this.temporalStability ? 8 : 0)
       | (this.scene.paperPalette ? 16 : 0)
       | (this.animateLights ? 32 : 0)
-      | (this.scene.geometry.emissiveGeometry.emissiveTriangleCount > 0 ? 64 : 0);
+      | (this.scene.geometry.emissiveGeometry.emissiveTriangleCount > 0
+        || (this.dynamicScene?.emissiveInstanceCount || 0) > 0 ? 64 : 0)
+      | (this.dynamicScene ? 128 : 0);
     u.set([...cameraPosition, featureFlags], 32);
     u.set([...sunDirection, seconds], 36);
     u.set([...sunColor, this.scene.sun], 40);
@@ -1514,6 +1660,11 @@ class SplitRadianceCascades {
       boundsMax[2] - boundsMin[2],
     );
     u.set([...boundsMin, Math.max(this.scene.baseSpacing, sceneDiagonal)], 64);
+    const uniformWords = new Uint32Array(u.buffer);
+    uniformWords.set(
+      this.dynamicScene?.frameInfo() ?? [0xffffffff, 0, 0, 0],
+      68,
+    );
     this.device.queue.writeBuffer(this.frameBuffer, 0, u);
   }
 
@@ -1565,6 +1716,12 @@ class SplitRadianceCascades {
       shadow.setBindGroup(0, this.sunShadowBindGroups[cascade]);
       shadow.setVertexBuffer(0, this.vertexBuffer);
       shadow.draw(this.scene.geometry.vertexCount);
+      if (this.dynamicScene?.vertexCount) {
+        shadow.setPipeline(this.dynamicShadowPipeline);
+        shadow.setBindGroup(0, this.dynamicSunShadowBindGroups[cascade]);
+        shadow.setVertexBuffer(0, this.dynamicVertexBuffer);
+        shadow.draw(this.dynamicScene.vertexCount);
+      }
       shadow.end();
     }
 
@@ -1584,6 +1741,12 @@ class SplitRadianceCascades {
         pointShadow.setBindGroup(0, this.pointShadowBindGroups[face]);
         pointShadow.setVertexBuffer(0, this.vertexBuffer);
         pointShadow.draw(this.scene.geometry.vertexCount);
+        if (this.dynamicScene?.vertexCount) {
+          pointShadow.setPipeline(this.dynamicPointShadowPipeline);
+          pointShadow.setBindGroup(0, this.dynamicPointShadowBindGroups[face]);
+          pointShadow.setVertexBuffer(0, this.dynamicVertexBuffer);
+          pointShadow.draw(this.dynamicScene.vertexCount);
+        }
         pointShadow.end();
       }
     }
@@ -1602,6 +1765,12 @@ class SplitRadianceCascades {
     gbuffer.setBindGroup(0, this.rasterBindGroup);
     gbuffer.setVertexBuffer(0, this.vertexBuffer);
     gbuffer.draw(this.scene.geometry.vertexCount);
+    if (this.dynamicScene?.vertexCount) {
+      gbuffer.setPipeline(this.dynamicGbufferPipeline);
+      gbuffer.setBindGroup(0, this.dynamicRasterBindGroup);
+      gbuffer.setVertexBuffer(0, this.dynamicVertexBuffer);
+      gbuffer.draw(this.dynamicScene.vertexCount);
+    }
     gbuffer.end();
 
     encoder.clearBuffer(this.stateBuffer);
@@ -1958,6 +2127,13 @@ class SplitRadianceCascades {
       if ($(`pass-${name}`)) $(`pass-${name}`).textContent = value ? `${value.toFixed(2)} ms` : "sampling";
       if ($(`bar-${name}`)) $(`bar-${name}`).style.width = `${clamp(value / 22 * 100, 2, 100)}%`;
     }
+    if ($("dynamic-profiler-row")) {
+      $("dynamic-profiler-row").hidden = !this.dynamicScene;
+      if (this.dynamicScene && $("pass-dynamic")) {
+        $("pass-dynamic").textContent = `${this.dynamicScene.instanceCount} inst · ${this.dynamicUpdateMs.toFixed(2)} ms CPU · ${(this.dynamicUploadBytes / 1024).toFixed(1)} KiB`;
+        $("bar-dynamic").style.width = `${clamp(this.dynamicUpdateMs / 2 * 100, 2, 100)}%`;
+      }
+    }
     // Default tiers hold one Algorithm 3 owner per internal pixel, but adapt
     // that internal pixel budget on slower devices. This directly targets
     // sustained frame time instead of inferring performance from DPR or user
@@ -2004,7 +2180,8 @@ class SplitRadianceCascades {
   updateSceneUI() {
     const info = SCENE_INFO[this.sceneIndex];
     $("scene-name").textContent = info.name;
-    $("scene-description").textContent = `${info.description} ${this.scene.geometry.triangleCount.toLocaleString()} ray-traced triangles.`;
+    const totalTriangles = this.scene.geometry.triangleCount + (this.dynamicScene?.triangleCount || 0);
+    $("scene-description").textContent = `${info.description} ${totalTriangles.toLocaleString()} ray-traced triangles.`;
     $("scene-index").textContent = `${String(this.sceneIndex+1).padStart(2,"0")} / ${SCENE_INFO.length}`;
     $("scene-select").value = String(this.sceneIndex);
     document.querySelectorAll(".scene-strip button").forEach((button, i) => button.classList.toggle("active", i === this.sceneIndex));
@@ -2780,6 +2957,125 @@ class SplitRadianceCascades {
     }
   }
 
+  async runDynamicRoundTripAudit({
+    startTime = 0.8,
+    movedTime = 3.15,
+    warmup = 72,
+    movedWarmup = 24,
+    recoveryWarmup = 72,
+  } = {}) {
+    const saved = {
+      camera: { ...this.camera, target: [...this.camera.target] },
+      animateCamera: this.animateCamera,
+      animateLights: this.animateLights,
+      temporalStability: this.temporalStability,
+      debugMode: this.debugMode,
+      testTimeOverride: this.testTimeOverride,
+    };
+    try {
+      this.animateCamera = false;
+      this.animateLights = false;
+      this.temporalStability = true;
+      this.debugMode = 1;
+      this.testTimeOverride = startTime;
+      this.resetProbeHistory();
+      await this.waitFrames(warmup);
+      const start = await this.captureFinalFrame();
+      this.testTimeOverride = movedTime;
+      await this.waitFrames(movedWarmup);
+      const moved = await this.captureFinalFrame();
+      this.testTimeOverride = startTime;
+      await this.waitFrames(recoveryWarmup);
+      const returned = await this.captureFinalFrame();
+      this.resetProbeHistory();
+      await this.waitFrames(warmup);
+      const clean = await this.captureFinalFrame();
+      const movement = this.compareReprojectedFrames(start, moved, {
+        pixelStep: 1,
+        searchRadius: 0,
+        worldToleranceScale: 0.08,
+      });
+      const closure = this.compareReprojectedFrames(returned, clean, {
+        pixelStep: 1,
+        searchRadius: 0,
+        worldToleranceScale: 0.08,
+      });
+      return {
+        startTime,
+        movedTime,
+        movement,
+        closure,
+        changed: movement.rmseByteDelta > 0.5,
+        passed: movement.rmseByteDelta > 0.5
+          && closure.matchedPixelRatio >= 0.98
+          && closure.p95ByteDelta <= 3
+          && closure.p99ByteDelta <= 9
+          && closure.trimmedRmseByteDelta <= 1.75,
+      };
+    } finally {
+      Object.assign(this, saved);
+      this.camera = saved.camera;
+      this.resetProbeHistory();
+    }
+  }
+
+  async runDynamicEmitterResponseAudit({
+    time = 2.0,
+    warmup = 72,
+  } = {}) {
+    const savedEmissionScale = this.dynamicScene?.emissionScale ?? 1;
+    const saved = {
+      camera: { ...this.camera, target: [...this.camera.target] },
+      animateCamera: this.animateCamera,
+      animateLights: this.animateLights,
+      temporalStability: this.temporalStability,
+      debugMode: this.debugMode,
+      testTimeOverride: this.testTimeOverride,
+    };
+    try {
+      if (!this.dynamicScene || this.dynamicScene.emissiveInstanceCount < 1) {
+        return { applicable: false, passed: false, reason: "No dynamic mesh lights." };
+      }
+      this.animateCamera = false;
+      this.animateLights = false;
+      this.temporalStability = true;
+      this.debugMode = 1;
+      this.testTimeOverride = time;
+
+      this.dynamicScene.emissionScale = 0;
+      this.resetProbeHistory();
+      await this.waitFrames(warmup);
+      const lightsOff = await this.captureFinalFrame();
+
+      this.dynamicScene.emissionScale = 1;
+      this.resetProbeHistory();
+      await this.waitFrames(warmup);
+      const lightsOn = await this.captureFinalFrame();
+      const signal = this.compareFinalFrames(lightsOff, lightsOn);
+      return {
+        applicable: true,
+        time,
+        warmup,
+        signal,
+        // This is indirect-only at one fixed camera and geometry pose. A
+        // measurable difference can therefore only come from transported
+        // radiance emitted by dynamic mesh-light records and their TLAS.
+        // Mesh lights are deliberately small and local, so a whole-frame p95
+        // is expected to be zero. Require a spatially non-vacuous affected
+        // region plus both RMS and peak energy instead of rewarding a source
+        // that brightens every pixel by an imperceptible amount.
+        passed: signal.rmseByteDelta >= 0.05
+          && signal.changedChannelRatio >= 0.005
+          && signal.maxByteDelta >= 2,
+      };
+    } finally {
+      if (this.dynamicScene) this.dynamicScene.emissionScale = savedEmissionScale;
+      Object.assign(this, saved);
+      this.camera = saved.camera;
+      this.resetProbeHistory();
+    }
+  }
+
   async runContinuousMotionAudit({
     frames = 24,
     warmup = 64,
@@ -3086,8 +3382,10 @@ class SplitRadianceCascades {
       const pointFaceCoverageRequired = this.sceneIndex === 10;
       const pointFaceCoveragePassed = !pointFaceCoverageRequired
         || point.perFace.every((face) => face.samples >= 4);
-      const pointPassed = !this.pointShadowsEnabled
-        || (lightPassed(point, 32) && pointFaceCoveragePassed);
+      const pointApplicable = this.pointShadowsEnabled;
+      const pointPassed = pointApplicable
+        ? (lightPassed(point, 32) && pointFaceCoveragePassed)
+        : null;
       const sunPassed = lightPassed(sun, 32);
       return {
         resolution: [width, height],
@@ -3097,9 +3395,10 @@ class SplitRadianceCascades {
         sun,
         pointFaceCoverageRequired,
         pointFaceCoveragePassed,
+        pointApplicable,
         pointPassed,
         sunPassed,
-        passed: pointPassed && sunPassed,
+        passed: (pointPassed ?? true) && sunPassed,
       };
     } finally {
       auditBuffer?.destroy();
@@ -4001,7 +4300,14 @@ class SplitRadianceCascades {
       name: SCENE_INFO[this.sceneIndex].name,
       fps: avg ? 1000/avg : 0,
       gpuMs: gpu,
-      triangles: this.scene?.geometry.triangleCount || 0,
+      triangles: (this.scene?.geometry.triangleCount || 0)
+        + (this.dynamicScene?.triangleCount || 0),
+      dynamicInstances: this.dynamicScene?.instanceCount || 0,
+      dynamicEmissiveInstances: this.dynamicScene?.emissiveInstanceCount || 0,
+      dynamicTlasNodes: this.dynamicScene?.tlasNodeCount || 0,
+      dynamicSweptNodes: this.dynamicScene?.sweptTlasNodeCount || 0,
+      dynamicUpdateP95Ms: this.dynamicUpdateMs || 0,
+      dynamicUploadBytes: this.dynamicUploadBytes || 0,
       probes: [...this.probeCounts],
       rays: this.rayCount,
       hitRate: this.rayCount ? this.hitCount/this.rayCount : 0,
@@ -4165,7 +4471,7 @@ class SplitRadianceCascades {
     this.running = false;
     for (const fn of this.cleanup) fn();
     for (const resource of [
-      this.vertexBuffer, this.bvhNodeBuffer, this.triangleBuffer,
+      this.vertexBuffer, this.dynamicVertexBuffer, this.bvhNodeBuffer, this.triangleBuffer,
       this.emissiveBvhNodeBuffer, this.emissiveTriangleBuffer, this.frameBuffer,
       this.hashBuffer, this.stateBuffer, this.probeMetaBuffer, this.accumBuffer,
       this.coneBuffer, this.irradianceBuffer, this.queryResolveBuffer,

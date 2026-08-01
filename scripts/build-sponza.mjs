@@ -134,11 +134,6 @@ for (const mesh of gltf.meshes) {
   }
 }
 
-// The paper's Sponza experiment adds a large red area emitter at the end of
-// the atrium.  Keep it as real geometry so rasterization, BVH visibility,
-// primary GI rays, and the path-traced reference all see exactly the same
-// light source.
-triangleCount += 2;
 const vertices = new Float32Array(triangleCount * 3 * 16);
 const triangles = new Array(triangleCount);
 const boundsMin = [Infinity, Infinity, Infinity];
@@ -189,48 +184,6 @@ for (const primitive of primitiveData) {
       alphaCutoff: primitive.alphaCutoff,
     };
   }
-}
-
-const emitterCorners = [
-  [7.10, 0.12, -2.75],
-  [11.65, 0.12, -2.75],
-  [11.65, 0.12, 1.75],
-  [7.10, 0.12, 1.75],
-];
-// Counter-clockwise from above: the geometric normal must agree with the
-// authored +Y normal. The previous winding produced -Y BVH normals, so the
-// raster pass displayed a bright panel while all GI/reference rays above it
-// treated the emitter as back-facing and left the lion head nearly black.
-const emitterTriangles = [[0, 2, 1], [0, 3, 2]];
-for (const indices of emitterTriangles) {
-  const points = indices.map((index) => emitterCorners[index]);
-  for (let corner = 0; corner < 3; corner++) {
-    const position = points[corner];
-    vertices.set([
-      ...position,
-      0, 1, 0,
-      0.92, 0.025, 0.012,
-      2.6, 0.0175, 0.0075,
-      corner === 1 ? 1 : 0, corner === 2 ? 1 : 0,
-      -1, 0,
-    ], vertexOffset);
-    vertexOffset += 16;
-    for (let axis = 0; axis < 3; axis++) {
-      boundsMin[axis] = Math.min(boundsMin[axis], position[axis]);
-      boundsMax[axis] = Math.max(boundsMax[axis], position[axis]);
-    }
-  }
-  triangles[triangleOffset++] = {
-    a: points[0],
-    b: points[1],
-    c: points[2],
-    albedo: [0.92, 0.025, 0.012],
-    emissive: [2.6, 0.0175, 0.0075],
-    normals: [[0, 1, 0], [0, 1, 0], [0, 1, 0]],
-    uvs: [[0, 0], [1, 0], [1, 1]],
-    material: -1,
-    alphaCutoff: 0,
-  };
 }
 
 const bvh = buildBVH(triangles, 4);

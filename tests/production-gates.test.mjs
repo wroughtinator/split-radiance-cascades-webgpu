@@ -131,13 +131,29 @@ test("presentation preserves shadow detail and height fields use smooth normals"
 });
 
 test("production module graph uses a release cache key", () => {
-  const releaseKey = "v=2026-08-01-door-zoom11";
+  const releaseKey = "v=2026-08-01-dynamic-tlas10";
   assert.ok(app.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(standalone.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(engine.includes(`./math.js?${releaseKey}`));
   assert.ok(engine.includes(`./scenes.js?${releaseKey}`));
   assert.ok(engine.includes(`./shaders.js?${releaseKey}`));
   assert.ok(scenes.includes(`./math.js?${releaseKey}`));
+});
+
+test("dynamic geometry uses two-level traversal and motion-local history rejection", () => {
+  assert.match(engine, /createDynamicScene/);
+  assert.match(engine, /dynamicUploadBytes < 65536/);
+  assert.match(engine, /runDynamicRoundTripAudit/);
+  assert.match(engine, /runDynamicEmitterResponseAudit/);
+  assert.match(engine, /pointApplicable = this\.pointShadowsEnabled/);
+  assert.match(engine, /sceneParams\.has\("time"\)/);
+  assert.match(shaders, /fn traceDynamicInstance/);
+  assert.match(shaders, /fn traceShortDynamicInstance/);
+  assert.match(shaders, /fn dynamicConeHistoryValid/);
+  assert.match(shaders, /frame\.dynamicInfo\.w/);
+  assert.match(shaders, /fn finalDynamicPointHistoryValid/);
+  assert.match(shaders, /dynamicGbufferVS/);
+  assert.match(shaders, /dynamicShadowVS/);
 });
 
 test("world-space GI inputs retain full precision within the WebGPU MRT budget", () => {

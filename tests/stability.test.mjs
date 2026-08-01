@@ -40,7 +40,9 @@ test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
   assert.match(computeShader, /let scrambledFrame=sampleFrame\*0x91e1c141u/);
   assert.match(computeShader, /f32\(scrambledFrame>>16u\)/);
   assert.match(computeShader, /fn intervalHistoryWeight/);
-  assert.match(computeShader, /return historyWeight\(\)/);
+  assert.match(computeShader, /featureEnabled\(128u\)/);
+  assert.match(computeShader, /fn dynamicConeHistoryValid/);
+  assert.match(computeShader, /&&coneHistoryValid/);
   assert.doesNotMatch(computeShader, /retainPreviousProbes/);
   assert.doesNotMatch(computeShader, /Preserve the complete cascade ancestry/);
   assert.match(computeShader, /gid\.x>=HASH_FRAME_STRIDE/);

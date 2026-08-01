@@ -5,7 +5,7 @@ import {
   normalize3,
   sub3,
   TAU,
-} from "./math.js?v=2026-08-01-door-zoom11";
+} from "./math.js?v=2026-08-01-dynamic-tlas10";
 
 const C = {
   chalk: [0.72, 0.75, 0.72],
@@ -226,7 +226,7 @@ let sponzaGeometryPromise;
 async function loadPackedSponzaGeometry() {
   if (!sponzaGeometryPromise) {
     sponzaGeometryPromise = (async () => {
-      const response = await fetch("/models/sponza.rcb?v=2026-08-01-door-zoom11");
+      const response = await fetch("/models/sponza.rcb?v=2026-08-01-dynamic-tlas10");
       if (!response.ok) throw new Error(`Sponza geometry request failed (${response.status}).`);
       if (typeof DecompressionStream === "undefined") {
         throw new Error("This browser does not expose the gzip decompressor required by the Sponza scene.");
@@ -266,7 +266,7 @@ async function loadPackedSponzaGeometry() {
 
 export const SCENE_INFO = [
   {name:"Color bleed laboratory",short:"Lab",description:"Near-field red/green transfer, hard occluders, emissive geometry, and moving dual lights."},
-  {name:"Sponza atrium (paper scene)",short:"Sponza",description:"The official 262k-triangle Crytek Sponza geometry, recreated neutral/cyan paper palette, and red area emitter, with exact software-BVH traversal."},
+  {name:"Dynamic Sponza atrium",short:"Sponza",description:"The official 262k-triangle Crytek Sponza scene plus 48 independently moving rigid meshes, including emissive movers, traced through a two-level dynamic acceleration structure."},
   {name:"Concave canyon heightfield",short:"Canyon",description:"A 72×72 terrain mesh with nested craters, ravines, overhangs, and a moving low sun."},
   {name:"Dense lantern forest",short:"Forest",description:"Thousands of thin triangles, deep occlusion, high-frequency foliage, and colored moving lanterns."},
   {name:"Multi-level atrium",short:"Atrium",description:"Stairs, balconies, skylight transfer, curved sculptures, and cross-floor indirect illumination."},
@@ -387,7 +387,7 @@ function buildScene7(g) {
   return {camera:[30,14,32],target:[0,0,0],env:[0.025,0.035,0.09],sun:2.0};
 }
 
-function daylightDoorOpenAmount(seconds) {
+export function daylightDoorOpenAmount(seconds) {
   // Eight-second cycle with deliberate closed/open holds so both states are
   // easy to inspect. The cubic ramps have zero velocity at either end.
   const phase=((seconds%8)+8)%8;
@@ -419,21 +419,9 @@ function buildScene8(g, seconds = 0) {
   g.box([doorHalfWidth+sideWidth*0.5,doorHeight*0.5,front],[sideWidth,doorHeight,0.4],wall);
   g.box([0,doorHeight+(roomHeight-doorHeight)*0.5,front],[roomWidth,roomHeight-doorHeight,0.4],wall);
 
-  const openness=daylightDoorOpenAmount(seconds);
-  const angle=openness*Math.PI*0.49;
-  // The leaf overlaps all four sides of the structural opening, like a real
-  // rebated exterior door. Merely matching the aperture edge leaves a
-  // zero-width geometric seam through which exact floating-point rays can
-  // travel even though raster coverage looks closed.
-  const doorOverlap=0.18;
-  const hinge=[-doorHalfWidth-doorOverlap,doorHeight*0.5-0.02,front-0.27];
-  const leafWidth=doorHalfWidth*2+doorOverlap*2;
-  const center=[
-    hinge[0]+Math.cos(angle)*leafWidth*0.5,
-    hinge[1],
-    hinge[2]+Math.sin(angle)*leafWidth*0.5,
-  ];
-  g.boxRotatedY(center,[leafWidth,doorHeight+0.32,0.28],angle,[0.18,0.21,0.22]);
+  // The leaf itself is a reusable dynamic cube instance. It is deliberately
+  // absent from this immutable room BLAS; the general TLAS path supplies the
+  // same overlapping dimensions to raster, shadow, GI, and C(-1) traversal.
 
   // Sunlit exterior ground and a pair of chunky portals make the changing
   // daylight direction legible through the open doorway without adding any
@@ -462,7 +450,7 @@ function buildScene8(g, seconds = 0) {
     // compact daylight pool rather than a several-metre grazing needle. This
     // is authored lighting (the universal GI path is unchanged), and the
     // lower filmic peak retains detail instead of clipping the pool to white.
-    sunHorizontal:0.65,sunHeight:-0.88,dynamicGeometry:true,
+    sunHorizontal:0.65,sunHeight:-0.88,dynamicInstances:true,
   };
 }
 
@@ -616,23 +604,6 @@ const BUILDERS=[
 export function automaticBaseSpacing(radius, triangleCount) {
   const density = Math.pow(Math.max(1, triangleCount), 0.12);
   return Math.max(0.22, radius * 0.077 / density);
-}
-
-export function dynamicSceneKey(index, seconds) {
-  if(index!==8)return null;
-  // Quantizing more finely than the visible angular motion prevents needless
-  // rebuilds during the two hold phases while keeping the hinge animation
-  // visually continuous.
-  return Math.round(daylightDoorOpenAmount(seconds)*480)/480;
-}
-
-export function createDynamicSceneGeometry(index, seconds) {
-  if(index!==8)return null;
-  const g=new Geometry();
-  BUILDERS[index](g,seconds);
-  const geometry=g.finish();
-  geometry.dynamicKey=dynamicSceneKey(index,seconds);
-  return geometry;
 }
 
 export function createScene(index) {

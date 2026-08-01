@@ -14,7 +14,7 @@ export function RadianceCascadesLab() {
     let active = true;
     const script = document.createElement("script");
     script.type = "module";
-    script.src = "/rc/engine.js?v=2026-08-01-door-zoom11";
+    script.src = "/rc/engine.js?v=2026-08-01-dynamic-tlas10";
     script.dataset.splitRcLoader = "true";
     script.addEventListener("load", () => {
       if (active && window.__splitRCLoaderGeneration === generation) {
@@ -119,6 +119,7 @@ export function RadianceCascadesLab() {
           <div><span>Geometry</span><i><b id="bar-geometry" /></i><output id="pass-geometry">—</output></div>
           <div><span>Ray split + merge</span><i><b id="bar-gi" /></i><output id="pass-gi">—</output></div>
           <div><span>Composite</span><i><b id="bar-composite" /></i><output id="pass-composite">—</output></div>
+          <div id="dynamic-profiler-row" hidden><span>Dynamic TLAS + upload</span><i><b id="bar-dynamic" /></i><output id="pass-dynamic">—</output></div>
         </section>
 
         <footer>
