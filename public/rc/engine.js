@@ -1,11 +1,11 @@
 import {
   adaptiveBudgetScale, add3, clamp, cross3, dot3, mat4LookAt, mat4Multiply, mat4Ortho,
   mat4Perspective, mul3, normalize3, sub3,
-} from "./math.js?v=2026-07-31-universal16";
-import { createScene, SCENE_INFO } from "./scenes.js?v=2026-07-31-universal16";
+} from "./math.js?v=2026-07-31-near-emitter1";
+import { createScene, SCENE_INFO } from "./scenes.js?v=2026-07-31-near-emitter1";
 import {
   computeShader, finalShader, presentShader, rasterShader, shaderConstants as K,
-} from "./shaders.js?v=2026-07-31-universal16";
+} from "./shaders.js?v=2026-07-31-near-emitter1";
 
 const SUN_CASCADE_COUNT = 4;
 
@@ -63,6 +63,19 @@ const REFERENCE_BASELINES = Object.freeze({
     lowFrequencyScaleInvariantNrmse: 0.19,
     trimmedLowFrequencyScaleInvariantNrmse99: 0.18,
     p95Absolute: 0.07, p99Absolute: 0.15,
+  }),
+});
+
+// Release-regression views reconstructed from the two reported Cornell
+// failures. They are camera tests only; no scene identity enters GI settings.
+const CORNELL_ARTIFACT_POSES = Object.freeze({
+  "cornell-skylight": Object.freeze({
+    position: Object.freeze([-0.35, 1.8, 2.1]),
+    target: Object.freeze([0.0, 3.1, -3.3]),
+  }),
+  "cornell-box-gap": Object.freeze({
+    position: Object.freeze([-0.1, 4.65, -0.25]),
+    target: Object.freeze([0.0, 1.25, -3.25]),
   }),
 });
 
@@ -290,6 +303,11 @@ class SplitRadianceCascades {
         await this.loadScene(0);
         this.exposeTestReport(await this.runEnclosureLeakAudit({ preservePose: true }));
       }, 200);
+    } else if (automaticTest === "cornell-artifacts") {
+      setTimeout(async () => {
+        await this.loadScene(10);
+        this.exposeTestReport(await this.runCornellArtifactAudit({ preservePose: true }));
+      }, 200);
     } else if (automaticTest === "reference") {
       setTimeout(async () => {
         await this.loadScene(1);
@@ -413,13 +431,19 @@ class SplitRadianceCascades {
         const requested = Number(automaticTest.slice(5));
         const index = clamp(Number.isFinite(requested) ? Math.floor(requested) : 0, 0, SCENE_INFO.length - 1);
         const requestedWarmup = Number(new URLSearchParams(location.search).get("warmup"));
+        const requestedSamples = Number(new URLSearchParams(location.search).get("samples"));
         const pathWarmup = Number.isFinite(requestedWarmup) && requestedWarmup > 0
           ? Math.floor(requestedWarmup)
           : 96;
         await this.loadScene(index);
         const report = {
           scene: index,
-          reference: await this.runPathTracedReferenceAudit({ warmup: pathWarmup }),
+          reference: await this.runPathTracedReferenceAudit({
+            warmup: pathWarmup,
+            samples: Number.isFinite(requestedSamples) && requestedSamples > 0
+              ? Math.floor(requestedSamples)
+              : 512,
+          }),
           metrics: this.metricsSnapshot(),
         };
         report.passed = report.reference.passed
@@ -490,6 +514,9 @@ class SplitRadianceCascades {
         if (index === 0) {
           result.enclosureLeak = await this.runEnclosureLeakAudit();
         }
+        if (index === 10) {
+          result.cornellArtifacts = await this.runCornellArtifactAudit();
+        }
         result.passed = !result.overflows
           && !result.gpuError
           && result.motionStability.passed
@@ -499,7 +526,8 @@ class SplitRadianceCascades {
           && (!result.movingLightResponse || result.movingLightResponse.passed)
           && (!result.cacheMotionRecovery || result.cacheMotionRecovery.passed)
           && (!result.pathTracedReference || result.pathTracedReference.passed)
-          && (!result.enclosureLeak || result.enclosureLeak.passed);
+          && (!result.enclosureLeak || result.enclosureLeak.passed)
+          && (!result.cornellArtifacts || result.cornellArtifacts.passed);
         this.exposeTestReport(result);
       }, 200);
     } else if (automaticTest != null) {
@@ -513,6 +541,21 @@ class SplitRadianceCascades {
         this.animateLights = false;
         this.setCameraPose([-2.2, 1.25, 0.5], [-1.3, 1.72, -0.42]);
         this.resetProbeHistory();
+      }, 200);
+    } else if (CORNELL_ARTIFACT_POSES[new URLSearchParams(location.search).get("pose")]) {
+      setTimeout(async () => {
+        const pose = CORNELL_ARTIFACT_POSES[new URLSearchParams(location.search).get("pose")];
+        await this.loadScene(10);
+        this.animateCamera = false;
+        this.animateLights = false;
+        this.temporalStability = true;
+        this.debugMode = 1;
+        this.testTimeOverride = 0.7;
+        this.setCameraPose(pose.position, pose.target);
+        this.resetProbeHistory();
+        if ($("view-mode")) $("view-mode").value = "1";
+        if ($("animate-camera")) $("animate-camera").checked = false;
+        if ($("animate-lights")) $("animate-lights").checked = false;
       }, 200);
     }
   }
@@ -715,6 +758,8 @@ class SplitRadianceCascades {
           texture: { sampleType: "float", viewDimension: "2d-array" },
         },
         { binding: 18, visibility: SHADER.FRAGMENT, sampler: { type: "filtering" } },
+        { binding: 19, visibility: SHADER.FRAGMENT, buffer: { type: "read-only-storage" } },
+        { binding: 20, visibility: SHADER.FRAGMENT, buffer: { type: "read-only-storage" } },
       ],
     });
     this.finalPipeline = device.createRenderPipeline({
@@ -1139,6 +1184,8 @@ class SplitRadianceCascades {
         { binding: 16, resource: { buffer: this.triangleBuffer } },
         { binding: 17, resource: this.materialAtlasView },
         { binding: 18, resource: this.materialSampler },
+        { binding: 19, resource: { buffer: this.emissiveBvhNodeBuffer } },
+        { binding: 20, resource: { buffer: this.emissiveTriangleBuffer } },
       ],
     });
     this.presentBindGroup = this.device.createBindGroup({
@@ -1163,10 +1210,26 @@ class SplitRadianceCascades {
     this.vertexBuffer?.destroy();
     this.bvhNodeBuffer?.destroy();
     this.triangleBuffer?.destroy();
+    this.emissiveBvhNodeBuffer?.destroy();
+    this.emissiveTriangleBuffer?.destroy();
     const geometry = scene.geometry;
     this.vertexBuffer = createBuffer(this.device, `${info.short} raster geometry`, geometry.vertices.byteLength, GPU.VERTEX | GPU.COPY_DST, geometry.vertices);
     this.bvhNodeBuffer = createBuffer(this.device, `${info.short} BVH nodes`, geometry.nodes.byteLength, GPU.STORAGE | GPU.COPY_DST, geometry.nodes);
     this.triangleBuffer = createBuffer(this.device, `${info.short} BVH triangles`, geometry.triangles.byteLength, GPU.STORAGE | GPU.COPY_DST, geometry.triangles);
+    this.emissiveBvhNodeBuffer = createBuffer(
+      this.device,
+      `${info.short} emissive-only BVH nodes`,
+      geometry.emissiveGeometry.nodes.byteLength,
+      GPU.STORAGE | GPU.COPY_DST,
+      geometry.emissiveGeometry.nodes,
+    );
+    this.emissiveTriangleBuffer = createBuffer(
+      this.device,
+      `${info.short} emissive-only BVH triangles`,
+      geometry.emissiveGeometry.triangles.byteLength,
+      GPU.STORAGE | GPU.COPY_DST,
+      geometry.emissiveGeometry.triangles,
+    );
     this.scene = scene;
     this.sceneIndex = index;
     this.setCameraFromScene(scene);
@@ -1177,7 +1240,13 @@ class SplitRadianceCascades {
     this.frameSamples.length = 0;
     this.gpuSamples.length = 0;
     hideStatus();
-    console.info("[Split RC] scene-loaded", { index, name: info.name, triangles: geometry.triangleCount, bvhNodes: geometry.nodeCount });
+    console.info("[Split RC] scene-loaded", {
+      index,
+      name: info.name,
+      triangles: geometry.triangleCount,
+      bvhNodes: geometry.nodeCount,
+      emissiveTriangles: geometry.emissiveGeometry.emissiveTriangleCount,
+    });
   }
 
   setCameraFromScene(scene) {
@@ -2152,7 +2221,7 @@ class SplitRadianceCascades {
       for (let destinationX = 0; destinationX < b.width; destinationX++) {
         const destinationPixel = destinationY * b.width + destinationX;
         const world = this.worldAt(b, destinationX, destinationY);
-        if (!(world[3] > 0.5) || !world.every(Number.isFinite)) continue;
+        if (!(world[3] >= 0.5) || !world.every(Number.isFinite)) continue;
         const normal = this.normalAt(b, destinationX, destinationY);
         if (!normal.every(Number.isFinite)) continue;
         destinationWorld.set(world, destinationPixel * 4);
@@ -2163,7 +2232,7 @@ class SplitRadianceCascades {
     for (let y = 0; y < a.height; y += pixelStep) {
       for (let x = 0; x < a.width; x += pixelStep) {
         const world = this.worldAt(a, x, y);
-        if (!(world[3] > 0.5) || !world.every(Number.isFinite)) continue;
+        if (!(world[3] >= 0.5) || !world.every(Number.isFinite)) continue;
         const normal = this.normalAt(a, x, y);
         if (!normal.every(Number.isFinite)) continue;
         surfacePixels++;
@@ -2933,6 +3002,253 @@ class SplitRadianceCascades {
     };
   }
 
+  summarizePlanarContinuity(frame) {
+    const deltas = [];
+    const strongestEdges = [];
+    let planarTriplets = 0;
+    let abruptSteps = 0;
+    let maximumStepContrast = 0;
+    let severeEdges = 0;
+    let samples = 0;
+    const luminance = (x, y) => {
+      const offset = y * frame.bytesPerRow + x * 4;
+      return frame.pixels[offset] * 0.2126
+        + frame.pixels[offset + 1] * 0.7152
+        + frame.pixels[offset + 2] * 0.0722;
+    };
+    const emissionEncoded = (x, y) => {
+      if (this.worldAt(frame, x, y)[3] > 1.25) return 1;
+      const index = (y * frame.normalBytesPerRow + x * 8) >> 1;
+      return Math.max(
+        halfToFloat(frame.normalPixels[index + 2]),
+        halfToFloat(frame.normalPixels[index + 3]),
+      );
+    };
+    const compare = (x0, y0, x1, y1) => {
+      const worldA = this.worldAt(frame, x0, y0);
+      const worldB = this.worldAt(frame, x1, y1);
+      if (!(worldA[3] >= 0.5) || !(worldB[3] >= 0.5)) return;
+      const normalA = this.normalAt(frame, x0, y0);
+      const normalB = this.normalAt(frame, x1, y1);
+      if (dot3(normalA, normalB) < 0.995) return;
+      // The emitter silhouette is an intentional material boundary, not a
+      // probe-grid discontinuity. Green/blue HDR emission are packed in the
+      // two spare normal channels and identify it without scene coordinates.
+      if (emissionEncoded(x0, y0) > 1e-5 || emissionEncoded(x1, y1) > 1e-5) return;
+      const distance = Math.hypot(
+        worldA[0] - worldB[0],
+        worldA[1] - worldB[1],
+        worldA[2] - worldB[2],
+      );
+      // Reject silhouette/disocclusion pairs. Neighboring samples on one
+      // planar surface are much closer than a fifth of a base cell.
+      if (distance > frame.baseSpacing * 0.2) return;
+      const delta = Math.abs(luminance(x0, y0) - luminance(x1, y1));
+      deltas.push(delta);
+      if (delta > 32) {
+        severeEdges++;
+        strongestEdges.push({
+          a: [x0, y0],
+          b: [x1, y1],
+          delta,
+          luminance: [luminance(x0, y0), luminance(x1, y1)],
+          worldA: worldA.slice(0, 3),
+          worldB: worldB.slice(0, 3),
+          normalA,
+          normalB,
+        });
+      }
+      samples++;
+    };
+    for (let y = 0; y < frame.height; y++) {
+      for (let x = 0; x < frame.width; x++) {
+        if (x + 1 < frame.width) compare(x, y, x + 1, y);
+        if (y + 1 < frame.height) compare(x, y, x, y + 1);
+      }
+    }
+    const planarSample = (x, y) => {
+      const world = this.worldAt(frame, x, y);
+      if (!(world[3] >= 0.5)) return null;
+      if (emissionEncoded(x, y) > 1e-5) return null;
+      return { world, normal: this.normalAt(frame, x, y), luminance: luminance(x, y) };
+    };
+    const compareTriplet = (x0, y0, x1, y1, x2, y2) => {
+      const a = planarSample(x0, y0);
+      const b = planarSample(x1, y1);
+      const c = planarSample(x2, y2);
+      if (!a || !b || !c) return;
+      if (dot3(a.normal, b.normal) < 0.995 || dot3(b.normal, c.normal) < 0.995) return;
+      const adjacentDistance = (left, right) => Math.hypot(
+        left.world[0] - right.world[0],
+        left.world[1] - right.world[1],
+        left.world[2] - right.world[2],
+      );
+      if (adjacentDistance(a, b) > frame.baseSpacing * 0.2
+        || adjacentDistance(b, c) > frame.baseSpacing * 0.2) return;
+      const leftSlope = Math.abs(b.luminance - a.luminance);
+      const rightSlope = Math.abs(c.luminance - b.luminance);
+      const contrast = Math.max(leftSlope, rightSlope);
+      const continuation = Math.min(leftSlope, rightSlope);
+      planarTriplets++;
+      maximumStepContrast = Math.max(maximumStepContrast, contrast);
+      // Angular-bin aliasing is a plateau separated by a single large jump.
+      // A true close area light can have a much larger gradient, but it
+      // changes continuously across successive samples instead of flattening
+      // immediately on one side of the edge.
+      if (contrast > 24 && continuation < contrast * 0.1) abruptSteps++;
+    };
+    for (let y = 1; y + 1 < frame.height; y++) {
+      for (let x = 1; x + 1 < frame.width; x++) {
+        compareTriplet(x - 1, y, x, y, x + 1, y);
+        compareTriplet(x, y - 1, x, y, x, y + 1);
+      }
+    }
+    deltas.sort((a, b) => a - b);
+    strongestEdges.sort((a, b) => b.delta - a.delta);
+    const percentile = (p) => deltas.length
+      ? deltas[Math.min(deltas.length - 1, Math.floor((deltas.length - 1) * p))]
+      : Infinity;
+    return {
+      samples,
+      p95ByteDelta: percentile(0.95),
+      p99ByteDelta: percentile(0.99),
+      p999ByteDelta: percentile(0.999),
+      maximumByteDelta: deltas.at(-1) ?? Infinity,
+      severeEdgeRatio: severeEdges / Math.max(1, samples),
+      planarTriplets,
+      abruptStepRatio: abruptSteps / Math.max(1, planarTriplets),
+      maximumStepContrast,
+      strongestEdges: strongestEdges.slice(0, 8),
+    };
+  }
+
+  async runCornellArtifactAudit({
+    warmup = 128,
+    referenceSamples = 512,
+    preservePose = false,
+  } = {}) {
+    const saved = {
+      sceneIndex: this.sceneIndex,
+      camera: { ...this.camera, target: [...this.camera.target] },
+      animateCamera: this.animateCamera,
+      animateLights: this.animateLights,
+      temporalStability: this.temporalStability,
+      debugMode: this.debugMode,
+      testTimeOverride: this.testTimeOverride,
+    };
+    try {
+      if (this.sceneIndex !== 10) await this.loadScene(10);
+      this.animateCamera = false;
+      this.animateLights = false;
+      this.temporalStability = true;
+      // Audit the reconstructed irradiance itself. The regular indirect-only
+      // view multiplies by albedo, so a real material boundary on one plane
+      // can otherwise be misclassified as a probe-grid discontinuity.
+      this.debugMode = 6;
+      this.testTimeOverride = 0.7;
+      const results = [];
+      for (const [name, pose] of Object.entries(CORNELL_ARTIFACT_POSES)) {
+        this.setCameraPose(pose.position, pose.target);
+        this.resetProbeHistory();
+        await this.waitFrames(warmup);
+        const baseline = await this.captureFinalFrame();
+        const continuity = this.summarizePlanarContinuity(baseline);
+
+        const trajectory = [];
+        let previous = baseline;
+        const step = [0.022, 0.006, -0.014];
+        for (const multiplier of [1, 2, 1, 0]) {
+          this.setCameraPose(
+            add3(pose.position, mul3(step, multiplier)),
+            add3(pose.target, mul3(step, multiplier)),
+          );
+          await this.waitFrames(1);
+          const current = await this.captureFinalFrame();
+          trajectory.push(this.compareReprojectedFrames(previous, current, {
+            pixelStep: 1,
+            searchRadius: 4,
+            worldToleranceScale: 0.2,
+          }));
+          previous = current;
+        }
+        this.setCameraPose(pose.position, pose.target);
+        this.resetProbeHistory();
+        await this.waitFrames(warmup);
+        const clean = await this.captureFinalFrame();
+        const loopClosure = this.compareFinalFrames(previous, clean);
+        const reference = await this.runPathTracedReferenceAudit({
+          width: 80,
+          height: 45,
+          samples: referenceSamples,
+          warmup,
+        });
+        const maximum = (field) => Math.max(
+          ...trajectory.map((sample) => sample[field] ?? Infinity),
+        );
+        const minimum = (field) => Math.min(
+          ...trajectory.map((sample) => sample[field] ?? 0),
+        );
+        const metrics = this.metricsSnapshot();
+        const result = {
+          name,
+          position: [...pose.position],
+          target: [...pose.target],
+          continuity,
+          motion: {
+            samples: trajectory.length,
+            matchedPixelRatioMin: minimum("matchedPixelRatio"),
+            p95ByteDeltaMax: maximum("p95ByteDelta"),
+            p99ByteDeltaMax: maximum("p99ByteDelta"),
+            p999ByteDeltaMax: maximum("p999ByteDelta"),
+            trimmedRmseByteDeltaMax: maximum("trimmedRmseByteDelta"),
+            largeDeltaRatioMax: maximum("largeDeltaRatio"),
+          },
+          loopClosure,
+          reference,
+          metrics,
+        };
+        result.passed = continuity.samples >= 10_000
+          && continuity.p99ByteDelta <= 4
+          && continuity.p999ByteDelta <= 32
+          && continuity.maximumByteDelta <= 96
+          && continuity.severeEdgeRatio <= 0.001
+          && result.motion.matchedPixelRatioMin >= 0.7
+          && result.motion.p95ByteDeltaMax <= 3
+          && result.motion.p99ByteDeltaMax <= 10
+          && result.motion.trimmedRmseByteDeltaMax <= 2
+          && result.motion.largeDeltaRatioMax <= 0.001
+          && loopClosure.p95ByteDelta <= 2
+          && loopClosure.p99ByteDelta <= 6
+          && reference.activePixels >= 64
+          && reference.p95Absolute <= 0.12
+          && reference.p99Absolute <= 0.30
+          && reference.severeUnderlitRatio <= 0.02
+          && reference.severeOverlitRatio <= 0.04
+          && metrics.gpuMs != null
+          && metrics.gpuMs <= 16.6
+          && metrics.overflows === 0
+          && !metrics.gpuError;
+        results.push(result);
+      }
+      return {
+        scene: 10,
+        name: "Cornell reported-artifact regressions",
+        universalGI: true,
+        warmup,
+        referenceSamples,
+        passed: results.every((result) => result.passed),
+        poses: results,
+      };
+    } finally {
+      if (!preservePose) {
+        if (this.sceneIndex !== saved.sceneIndex) await this.loadScene(saved.sceneIndex);
+        Object.assign(this, saved);
+        this.camera = saved.camera;
+        this.resetProbeHistory();
+      }
+    }
+  }
+
   async runEnclosureLeakAudit({ warmup = 128, samples = 512, preservePose = false } = {}) {
     const saved = {
       sceneIndex: this.sceneIndex,
@@ -3185,6 +3501,7 @@ class SplitRadianceCascades {
       this.device.queue.submit([encoder.finish()]);
       const fields = new Uint32Array(await this.readGpuBuffer(auditBuffer, byteLength, "reference audit readback"));
       this.renderReferenceComparison(fields, width, height);
+      const diagnosticFrame = await this.captureFinalFrame();
 
       const relative = [];
       const absolute = [];
@@ -3368,6 +3685,30 @@ class SplitRadianceCascades {
         maximumErrorPixel: maximumErrorPair
           ? [maximumErrorPair.pixel % width, Math.floor(maximumErrorPair.pixel / width)]
           : null,
+        maximumErrorReference: maximumErrorPair?.reference || null,
+        maximumErrorSplitRC: maximumErrorPair?.current || null,
+        maximumErrorWorld: maximumErrorPair
+          ? this.worldAt(
+            diagnosticFrame,
+            Math.min(diagnosticFrame.width - 1, Math.floor(
+              ((maximumErrorPair.pixel % width) * diagnosticFrame.width + width / 2) / width,
+            )),
+            Math.min(diagnosticFrame.height - 1, Math.floor(
+              (Math.floor(maximumErrorPair.pixel / width) * diagnosticFrame.height + height / 2) / height,
+            )),
+          )
+          : null,
+        maximumErrorNormal: maximumErrorPair
+          ? this.normalAt(
+            diagnosticFrame,
+            Math.min(diagnosticFrame.width - 1, Math.floor(
+              ((maximumErrorPair.pixel % width) * diagnosticFrame.width + width / 2) / width,
+            )),
+            Math.min(diagnosticFrame.height - 1, Math.floor(
+              (Math.floor(maximumErrorPair.pixel / width) * diagnosticFrame.height + height / 2) / height,
+            )),
+          )
+          : null,
         severeUnderlitRatio: severeUnderlitPixels / Math.max(1, activePixels),
         severeOverlitRatio: severeOverlitPixels / Math.max(1, activePixels),
       };
@@ -3512,6 +3853,10 @@ class SplitRadianceCascades {
         $("audit-title").textContent = "Testing closed-volume light-leak rejection";
         result.enclosureLeak = await this.runEnclosureLeakAudit();
       }
+      if (i === 10) {
+        $("audit-title").textContent = "Replaying reported Cornell artifact poses";
+        result.cornellArtifacts = await this.runCornellArtifactAudit();
+      }
       results.push(result);
       $("audit-report").textContent = results.map((r) =>
         `${String(r.scene+1).padStart(2,"0")} ${r.name.padEnd(28)} ${r.fps.toFixed(0).padStart(3)} FPS  ${r.gpuMs == null ? "CPU timing" : `${r.gpuMs.toFixed(2)} ms GPU`}  ${r.triangles.toLocaleString()} tris  world jitter p95 ${(r.motionStability.p95RelativeMax*100).toFixed(2)}%  framebuffer repeat p95 ${r.finalFrameRepeatability.p95ByteDeltaMax.toFixed(0)}/255  motion p95 ${r.continuousMotion.p95ByteDeltaMax.toFixed(0)}/255  moving-light motion p95 ${r.movingLightContinuousMotion.p95ByteDeltaMax.toFixed(0)}/255${r.cacheMotionRecovery ? `  cache recovery p95 ${r.cacheMotionRecovery.recoveryDifference.p95ByteDelta.toFixed(0)}/255` : ""}${r.shadowMapCorrectness ? `  shadow mismatch point ${(r.shadowMapCorrectness.point.classificationMismatchRatio*100).toFixed(1)}% sun ${(r.shadowMapCorrectness.sun.classificationMismatchRatio*100).toFixed(1)}%` : ""}${r.pathTracedReference ? `  reference NRMSE ${(r.pathTracedReference.nrmse*100).toFixed(1)}%` : ""}  overflow ${r.overflows}`
@@ -3531,6 +3876,7 @@ class SplitRadianceCascades {
       || (r.shadowMapCorrectness && !r.shadowMapCorrectness.passed)
       || (r.pathTracedReference && !r.pathTracedReference.passed)
       || (r.enclosureLeak && !r.enclosureLeak.passed)
+      || (r.cornellArtifacts && !r.cornellArtifacts.passed)
     );
     const report = {
       timestamp: new Date().toISOString(),
@@ -3563,7 +3909,8 @@ class SplitRadianceCascades {
     this.running = false;
     for (const fn of this.cleanup) fn();
     for (const resource of [
-      this.vertexBuffer, this.bvhNodeBuffer, this.triangleBuffer, this.frameBuffer,
+      this.vertexBuffer, this.bvhNodeBuffer, this.triangleBuffer,
+      this.emissiveBvhNodeBuffer, this.emissiveTriangleBuffer, this.frameBuffer,
       this.hashBuffer, this.stateBuffer, this.probeMetaBuffer, this.accumBuffer,
       this.coneBuffer, this.irradianceBuffer, this.queryResolveBuffer,
       this.irradianceAtlasWrite, this.irradianceAtlas, this.sunShadowDataBuffer,

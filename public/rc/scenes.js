@@ -1,4 +1,11 @@
-import { buildBVH, cross3, normalize3, sub3, TAU } from "./math.js?v=2026-07-31-universal16";
+import {
+  buildBVH,
+  buildEmissiveBVHFromPacked,
+  cross3,
+  normalize3,
+  sub3,
+  TAU,
+} from "./math.js?v=2026-07-31-near-emitter1";
 
 const C = {
   chalk: [0.72, 0.75, 0.72],
@@ -176,6 +183,7 @@ class Geometry {
       vertices: new Float32Array(this.vertices),
       vertexCount: this.vertices.length / 16,
       ...bvh,
+      emissiveGeometry: buildEmissiveBVHFromPacked(bvh.triangles),
       boundsMin: this.boundsMin,
       boundsMax: this.boundsMax,
     };
@@ -236,6 +244,7 @@ async function loadPackedSponzaGeometry() {
         vertexCount,
         nodeCount,
         triangleCount,
+        emissiveGeometry: buildEmissiveBVHFromPacked(triangles),
         boundsMin: [...bounds.slice(0, 3)],
         boundsMax: [...bounds.slice(3, 6)],
       };

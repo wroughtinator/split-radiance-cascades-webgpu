@@ -112,7 +112,12 @@ fn encodeSurfaceEmission(emission:vec3f)->vec3f{
   o.normal = vec4f(
     encodeNormalOct(select(-v.normal,v.normal,frontFacing)),emission.gb
   );
-  o.world = vec4f(v.world, 1.0);
+  // Keep two independent bits in the exact fp32 marker: 0.5 marks a raster
+  // back face and 1.0 marks any RGB emissive surface. This lets validation
+  // reject red-only mesh lights without sacrificing packed emission color.
+  let backFaceMarker=select(0.5,1.0,frontFacing);
+  let emissiveMarker=select(0.0,1.0,any(v.emissive>vec3f(0)));
+  o.world = vec4f(v.world,backFaceMarker+emissiveMarker);
   return o;
 }
 struct ShadowOut {
@@ -467,7 +472,7 @@ fn traceTriangle(origin: vec3f, direction: vec3f, tri: Triangle, maxDistance: f3
     return vec3f(maxDistance,0,0);
   }
   let distance=dot(edge2,q)*inverse;
-  if(distance>1e-5&&distance<maxDistance){
+  if(distance>1e-7&&distance<maxDistance){
     return vec3f(distance,clamp(u,0.0,1.0),clamp(v,0.0,1.0));
   }
   return vec3f(maxDistance,0,0);
@@ -629,6 +634,198 @@ fn samplePrimaryIrradiance(position:vec3f,normal:vec3f)->vec4f{
   if(fine.w<0.001){return coarse;}
   if(coarse.w<0.001){return fine;}
   return vec4f(mix(fine.xyz,coarse.xyz,lods.z),mix(fine.w,coarse.w,lods.z));
+}
+
+fn samplePrimaryConeDirectionLod(
+  position:vec3f,normal:vec3f,lod:u32,direction:u32
+)->vec4f{
+  let spacing=cascadeSpacing(0u,lod);
+  let grid=position/spacing-vec3f(0.5);
+  let cell=vec3i(floor(grid));
+  let fraction=fract(grid);
+  let fixedBits=vec3i(floor(position/spacing))-cell;
+  let absoluteNormal=abs(normal);
+  var normalAxis=2u;
+  if(absoluteNormal.x>=absoluteNormal.y&&absoluteNormal.x>=absoluteNormal.z){
+    normalAxis=0u;
+  }else if(absoluteNormal.y>=absoluteNormal.z){
+    normalAxis=1u;
+  }
+  var value=vec3f(0);
+  var total=0.0;
+  for(var corner=0u;corner<4u;corner++){
+    var bits=fixedBits;
+    if(normalAxis==0u){
+      bits.y=i32(corner&1u);bits.z=i32((corner>>1u)&1u);
+    }else if(normalAxis==1u){
+      bits.x=i32(corner&1u);bits.z=i32((corner>>1u)&1u);
+    }else{
+      bits.x=i32(corner&1u);bits.y=i32((corner>>1u)&1u);
+    }
+    let wv=vec3f(
+      select(1.0-fraction.x,fraction.x,bits.x==1),
+      select(1.0-fraction.y,fraction.y,bits.y==1),
+      select(1.0-fraction.z,fraction.z,bits.z==1)
+    );
+    let weight=wv.x*wv.y*wv.z;
+    let probe=lookupProbe(0u,keyFromCellSurface(
+      cell+bits,lod,surfaceClass(normal)
+    ));
+    if(probe!=EMPTY&&probe<PROBE_CAPS[0]){
+      let cone=cones[dataIndex(0u,probe,direction)];
+      if(cone.w>0.5){value+=cone.xyz*weight;total+=weight;}
+    }
+  }
+  if(total<1e-5){return vec4f(0);}
+  return vec4f(value/total,1.0);
+}
+
+fn samplePrimaryConeDirection(
+  position:vec3f,normal:vec3f,direction:u32
+)->vec4f{
+  let lods=lodSelection(position);
+  let fine=samplePrimaryConeDirectionLod(
+    position,normal,u32(lods.x),direction
+  );
+  if(u32(lods.y)==u32(lods.x)){return fine;}
+  let coarse=samplePrimaryConeDirectionLod(
+    position,normal,u32(lods.y),direction
+  );
+  if(fine.w<0.5){return coarse;}
+  if(coarse.w<0.5){return fine;}
+  return vec4f(mix(fine.xyz,coarse.xyz,lods.z),1.0);
+}
+
+fn primaryPointAabbDistanceSquared(
+  point:vec3f,minimum:vec3f,maximum:vec3f
+)->f32{
+  let delta=max(max(minimum-point,vec3f(0)),point-maximum);
+  return dot(delta,delta);
+}
+fn primaryPolygonEdgeIntegral(a:vec3f,b:vec3f)->vec3f{
+  let edge=cross(a,b);
+  let edgeLength=length(edge);
+  if(edgeLength<1e-7){return vec3f(0);}
+  return edge*(acos(clamp(dot(a,b),-1.0,1.0))/edgeLength);
+}
+fn primaryClippedTriangleFormFactor(
+  a:vec3f,b:vec3f,c:vec3f,normal:vec3f
+)->f32{
+  var input=array<vec3f,5>(a,b,c,vec3f(0),vec3f(0));
+  var clipped:array<vec3f,5>;
+  var clippedCount=0u;
+  var previous=input[2];
+  var previousDistance=dot(normal,previous);
+  var previousInside=previousDistance>0.0;
+  for(var index=0u;index<3u;index++){
+    let current=input[index];
+    let currentDistance=dot(normal,current);
+    let currentInside=currentDistance>0.0;
+    if(currentInside!=previousInside){
+      let t=previousDistance/(previousDistance-currentDistance);
+      clipped[clippedCount]=mix(previous,current,clamp(t,0.0,1.0));
+      clippedCount++;
+    }
+    if(currentInside){clipped[clippedCount]=current;clippedCount++;}
+    previous=current;
+    previousDistance=currentDistance;
+    previousInside=currentInside;
+  }
+  if(clippedCount<3u){return 0.0;}
+  var vectorForm=vec3f(0);
+  for(var index=0u;index<clippedCount;index++){
+    let next=(index+1u)%clippedCount;
+    vectorForm+=primaryPolygonEdgeIntegral(
+      normalize(clipped[index]),normalize(clipped[next])
+    );
+  }
+  return abs(dot(normal,vectorForm))*0.15915494309189535;
+}
+fn primaryEmissiveTriangleIrradiance(
+  origin:vec3f,normal:vec3f,triangle:Triangle,radius:f32
+)->vec3f{
+  if(max(triangle.emissive.x,max(triangle.emissive.y,triangle.emissive.z))<=0.0){
+    return vec3f(0);
+  }
+  let minimum=min(triangle.a.xyz,min(triangle.b.xyz,triangle.c.xyz));
+  let maximum=max(triangle.a.xyz,max(triangle.b.xyz,triangle.c.xyz));
+  let proximityDistance=sqrt(primaryPointAabbDistanceSquared(
+    origin,minimum,maximum
+  ));
+  if(proximityDistance>=radius){return vec3f(0);}
+  let aDelta=triangle.a.xyz-origin;
+  let bDelta=triangle.b.xyz-origin;
+  let cDelta=triangle.c.xyz-origin;
+  if(min(length(aDelta),min(length(bDelta),length(cDelta)))<1e-5){
+    return vec3f(0);
+  }
+  let formFactor=primaryClippedTriangleFormFactor(
+    aDelta,bDelta,cDelta,normal
+  );
+  if(formFactor<=1e-7){return vec3f(0);}
+  let edgeAB=triangle.b.xyz-triangle.a.xyz;
+  let edgeAC=triangle.c.xyz-triangle.a.xyz;
+  let fromA=origin-triangle.a.xyz;
+  let d00=dot(edgeAB,edgeAB);
+  let d01=dot(edgeAB,edgeAC);
+  let d11=dot(edgeAC,edgeAC);
+  let d20=dot(fromA,edgeAB);
+  let d21=dot(fromA,edgeAC);
+  let inverseDenominator=1.0/max(1e-12,d00*d11-d01*d01);
+  var barycentric=vec3f(
+    1.0-(d11*d20-d01*d21)*inverseDenominator
+      -(d00*d21-d01*d20)*inverseDenominator,
+    (d11*d20-d01*d21)*inverseDenominator,
+    (d00*d21-d01*d20)*inverseDenominator
+  );
+  barycentric=max(barycentric,vec3f(0));
+  barycentric/=max(1e-8,barycentric.x+barycentric.y+barycentric.z);
+  let closest=triangle.a.xyz*barycentric.x
+    +triangle.b.xyz*barycentric.y+triangle.c.xyz*barycentric.z;
+  let toLight=closest-origin;
+  let lightDistance=length(toLight);
+  if(lightDistance>0.012){
+    let blocker=traceScene(
+      origin,toLight/lightDistance,max(1e-5,lightDistance-0.008)
+    );
+    if(blocker.t<lightDistance-0.01){return vec3f(0);}
+  }
+  let proximity=1.0-smoothstep(radius*0.72,radius,proximityDistance);
+  return triangle.emissive.xyz*(formFactor*proximity);
+}
+fn primaryNearEmissiveIrradiance(
+  origin:vec3f,normal:vec3f,radius:f32
+)->vec3f{
+  var result=vec3f(0);
+  var stack:array<u32,64>;
+  var stackSize=1u;
+  stack[0]=0u;
+  let radiusSquared=radius*radius;
+  loop{
+    if(stackSize==0u){break;}
+    stackSize-=1u;
+    let nodeIndex=stack[stackSize];
+    let node=bvhNodes[nodeIndex];
+    if(primaryPointAabbDistanceSquared(
+      origin,node.minMeta.xyz,node.maxMeta.xyz
+    )>radiusSquared){continue;}
+    let left=bitcast<u32>(node.minMeta.w);
+    let right=bitcast<u32>(node.maxMeta.w);
+    if((left&0x80000000u)!=0u){
+      let first=left&0x7fffffffu;
+      for(var triangleOffset=0u;triangleOffset<right;triangleOffset++){
+        result+=primaryEmissiveTriangleIrradiance(
+          origin,normal,triangles[first+triangleOffset],radius
+        );
+      }
+    }else{
+      if(stackSize>61u){break;}
+      stack[stackSize]=left;
+      stack[stackSize+1u]=right;
+      stackSize+=2u;
+    }
+  }
+  return result;
 }
 
 fn directAtHit(position: vec3f, hit: Hit) -> vec3f {
@@ -1011,14 +1208,23 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
 
   let baseLength=frame.envBaseSpacing.w*exp2(f32(lod&3u))*1.6;
   let maxDistance=baseLength*64.0;
-  let origin=world+normal*max(0.008,frame.envBaseSpacing.w*0.012);
-  let hit=traceScene(origin,direction,maxDistance+0.001);
-  let didHit=hit.t<maxDistance;
+  // Section 7.1 starts c0 after the C(-1) interval.  The previous build
+  // traced c0 from the receiving surface and then tried to replace a much
+  // larger interval in the composite.  Besides double-counting near hits,
+  // that made the result switch discontinuously at an enclosure test.
+  // Keep the split point in world space and independent of camera LOD: C(-1)
+  // owns [0, delta_s0], while c0 and higher cascades own the remaining ray.
+  let cMinusOneEnd=frame.envBaseSpacing.w;
+  let surfaceOrigin=world+normal*max(0.008,frame.envBaseSpacing.w*0.012);
+  let origin=surfaceOrigin+direction*cMinusOneEnd;
+  let remainingDistance=max(0.001,maxDistance-cMinusOneEnd);
+  let hit=traceScene(origin,direction,remainingDistance+0.001);
+  let didHit=hit.t<remainingDistance;
   var targetCascade=3u;
   if(didHit){
     targetCascade=0u;
     var end=baseLength;
-    let intervalDistance=hit.t;
+    let intervalDistance=cMinusOneEnd+hit.t;
     loop {
       if(intervalDistance<=end||targetCascade>=3u){break;}
       targetCascade+=1u; end*=4.0;
@@ -1238,50 +1444,65 @@ fn decodeOctahedral(uvIn:vec2f)->vec3f{
   textureStore(irradianceAtlasStorage,atlasCoordinate,stored);
 }
 
-// The production composite resolves a deterministic ambient-form C(-1)
-// interval before displaying c0+. Mirror that result in the path-reference
-// oracle so the gate measures the shipped estimator, not its intentionally
-// leak-prone paper-baseline intermediate.
-fn resolvedPrimaryIrradiance(world:vec3f,normal:vec3f)->vec3f{
+// Mirror the production directional C(-1) interval merge in the path oracle.
+fn primaryNeedsLocalInterval(
+  pixel:vec2i,world:vec3f,normal:vec3f,backFacingSurface:bool
+)->bool{
+  if(backFacingSurface){return true;}
+  let dimensions=vec2i(textureDimensions(worldTex));
+  let offsets=array<vec2i,8>(
+    vec2i(-4,0),vec2i(4,0),vec2i(0,-4),vec2i(0,4),
+    vec2i(-4,-4),vec2i(4,-4),vec2i(-4,4),vec2i(4,4)
+  );
+  for(var index=0u;index<8u;index++){
+    let samplePixel=pixel+offsets[index];
+    if(any(samplePixel<vec2i(0))||any(samplePixel>=dimensions)){return true;}
+    let neighbor=textureLoad(worldTex,samplePixel,0);
+    if(neighbor.w<0.5){return true;}
+    let neighborNormal=gbufferNormal(samplePixel);
+    if(dot(normal,neighborNormal)<0.97){return true;}
+    if(abs(dot(neighbor.xyz-world,normal))>frame.envBaseSpacing.w*0.075){
+      return true;
+    }
+  }
+  return false;
+}
+
+fn resolvedPrimaryIrradiance(
+  pixel:vec2i,world:vec3f,normal:vec3f,backFacingSurface:bool
+)->vec3f{
   let base=samplePrimaryIrradiance(world,normal).xyz;
-  let radius=frame.envBaseSpacing.w*15.0;
-  let origin=world+normal*max(0.006,radius*0.012);
-  let axes=array<vec3f,6>(
-    vec3f(1,0,0),vec3f(-1,0,0),vec3f(0,1,0),
-    vec3f(0,-1,0),vec3f(0,0,1),vec3f(0,0,-1)
+  let intervalEnd=frame.envBaseSpacing.w;
+  let origin=world+normal*max(0.006,intervalEnd*0.012);
+  let nearEmission=primaryNearEmissiveIrradiance(
+    origin,normal,intervalEnd
   );
-  let enclosureRadius=radius*2.0;
-  for(var axis=0u;axis<6u;axis++){
-    let blocker=traceScene(origin,axes[axis],enclosureRadius+0.001);
-    if(blocker.t>=enclosureRadius){return base;}
+  if(!primaryNeedsLocalInterval(pixel,world,normal,backFacingSurface)){
+    return base+nearEmission;
   }
-  let signZ=select(-1.0,1.0,normal.z>=0.0);
-  let basisScale=-1.0/(signZ+normal.z);
-  let basisProduct=normal.x*normal.y*basisScale;
-  let tangent=vec3f(
-    1.0+signZ*normal.x*normal.x*basisScale,
-    signZ*basisProduct,-signZ*normal.x
-  );
-  let bitangent=vec3f(
-    basisProduct,signZ+normal.y*normal.y*basisScale,-normal.y
-  );
-  var exactResult=vec3f(0);
-  let totalSamples=16u;
-  for(var sampleIndex=0u;sampleIndex<totalSamples;sampleIndex++){
-    let xi=fract(0.5+f32(sampleIndex)*0.7548776662466927);
-    let radial=sqrt(xi);
-    let phi=6.283185307179586*fract(
-      0.5+f32(sampleIndex)*0.5698402909980532
-    );
-    let direction=normalize(
-      tangent*(cos(phi)*radial)+bitangent*(sin(phi)*radial)
-      +normal*sqrt(max(0.0,1.0-xi))
-    );
-    let hit=traceScene(origin,direction,10000.0);
-    if(hit.t>=9999.0){return base;}
-    exactResult+=directAtHit(origin+direction*hit.t,hit);
+  let visibilityGuardEnd=select(intervalEnd,intervalEnd*15.0,backFacingSurface);
+  var mergedResult=vec3f(0);
+  for(var directionIndexValue=0u;directionIndexValue<32u;directionIndexValue++){
+    let direction=directionFromIndex(directionIndexValue,0u);
+    let cosine=max(0.0,dot(normal,direction));
+    if(cosine<=0.0){continue;}
+    // Probe interpolation may borrow a cone from the other side of geometry.
+    // Validate the first local/c0 neighborhood in the same direction before
+    // accepting the continuation. This is a per-direction replacement, not
+    // a whole-pixel enclosure switch, so it remains continuous at box gaps.
+    let hit=traceScene(origin,direction,visibilityGuardEnd+0.001);
+    if(hit.t<visibilityGuardEnd){
+      mergedResult+=max(
+        vec3f(0),directAtHit(origin+direction*hit.t,hit)-hit.emissive
+      )*cosine;
+    }else{
+      let continuation=samplePrimaryConeDirection(
+        world,normal,directionIndexValue
+      );
+      mergedResult+=select(base,continuation.xyz,continuation.w>0.5)*cosine;
+    }
   }
-  return exactResult/f32(totalSamples);
+  return mergedResult*(4.0/32.0)+nearEmission;
 }
 
 // Deterministic one-bounce ground-truth gate. Each low-resolution validation
@@ -1301,11 +1522,16 @@ fn resolvedPrimaryIrradiance(world:vec3f,normal:vec3f)->vec3f{
   // radiance is dominated by the separately known emission term and is not a
   // meaningful irradiance-reconstruction error sample.
   let packedNormal=textureLoad(normalTex,vec2i(pixel),0);
-  if(max(packedNormal.z,packedNormal.w)>1e-5){return;}
+  if(world.w>1.25||max(packedNormal.z,packedNormal.w)>1e-5){return;}
   let normal=gbufferNormal(vec2i(pixel));
   let base=(gid.y*outputSize.x+gid.x)*8u;
   if(gid.z==0u){
-    let current=clamp(resolvedPrimaryIrradiance(world.xyz,normal),vec3f(0),vec3f(16));
+    let current=clamp(
+      resolvedPrimaryIrradiance(
+        vec2i(pixel),world.xyz,normal,fract(world.w)>0.25
+      ),
+      vec3f(0),vec3f(16)
+    );
     atomicStore(&accum[base+3u],u32(current.r*65536.0+0.5));
     atomicStore(&accum[base+4u],u32(current.g*65536.0+0.5));
     atomicStore(&accum[base+5u],u32(current.b*65536.0+0.5));
@@ -1520,6 +1746,8 @@ struct ShortHit { t:f32, normal:vec3f, albedo:vec3f, emissive:vec3f };
 @group(0) @binding(16) var<storage,read> shortTriangles:array<Triangle>;
 @group(0) @binding(17) var shortAlbedoAtlas:texture_2d_array<f32>;
 @group(0) @binding(18) var shortAlbedoSampler:sampler;
+@group(0) @binding(19) var<storage,read> emissiveBvhNodes:array<BvhNode>;
+@group(0) @binding(20) var<storage,read> emissiveTriangles:array<Triangle>;
 
 fn gbufferNormal(pixel:vec2i)->vec3f{
   let oct=textureLoad(normalTex,pixel,0).xy;
@@ -1942,7 +2170,10 @@ fn shortTriangle(
   // this below a raster pixel's possible distance to an adjacent face: the
   // old millimetre-scale cutoff opened a one-pixel crack at shared box edges.
   // This is world/scene independent and only affects exact C(-1) visibility.
-  if(distance>1e-5&&distance<maxDistance){
+  // Keep it below one f32 ulp at the Cornell box corner: 1e-5 discarded the
+  // adjacent face at a shared edge and left one bright pixel inside a sealed
+  // volume even though the watertight edge functions accepted the triangle.
+  if(distance>1e-7&&distance<maxDistance){
     return vec3f(distance,clamp(u,0.0,1.0),clamp(v,0.0,1.0));
   }
   return vec3f(maxDistance,0,0);
@@ -1977,10 +2208,10 @@ fn shortTriangleWatertight(
   let distanceScaled=edgeA*(a[kz]*shearZ)
     +edgeB*(b[kz]*shearZ)+edgeC*(c[kz]*shearZ);
   if(determinant>0.0){
-    if(distanceScaled<=1e-5*determinant||distanceScaled>=maxDistance*determinant){
+    if(distanceScaled<=1e-7*determinant||distanceScaled>=maxDistance*determinant){
       return vec3f(maxDistance,0,0);
     }
-  }else if(distanceScaled>=1e-5*determinant||distanceScaled<=maxDistance*determinant){
+  }else if(distanceScaled>=1e-7*determinant||distanceScaled<=maxDistance*determinant){
     return vec3f(maxDistance,0,0);
   }
   let inverseDeterminant=1.0/determinant;
@@ -2083,88 +2314,219 @@ fn fastSunVisibility(world:vec3f,normal:vec3f)->f32{
   return textureSampleCompareLevel(shadowTex,shadowSampler,uv,i32(cascade),ndc.z);
 }
 
-fn outgoingAtShortHit(
-  hitWorld:vec3f,hit:ShortHit,compartmentSun:f32,compartmentPoint:f32
-)->vec3f{
+fn outgoingAtShortHit(hitWorld:vec3f,hit:ShortHit)->vec3f{
   let lightDirection=normalize(-frame.sunDirTime.xyz);
   let sun=frame.sunColorIntensity.xyz*frame.sunColorIntensity.w
     *max(0.0,dot(hit.normal,lightDirection))
-    *min(compartmentSun,fastSunVisibility(hitWorld,hit.normal));
+    *fastSunVisibility(hitWorld,hit.normal);
   let toPoint=frame.pointPosRange.xyz-hitWorld;
   let distance=length(toPoint);
   let pointWindow=max(0.0,1.0-distance/frame.pointPosRange.w);
   let point=frame.pointColorIntensity.xyz*frame.pointColorIntensity.w
     *max(0.0,dot(hit.normal,toPoint/max(distance,1e-4)))
     *pointWindow*pointWindow/(1.0+0.06*distance*distance)
-    *min(compartmentPoint,pointShadowVisibility(hitWorld,hit.normal));
-  return hit.emissive+hit.albedo*(sun+point);
+    *pointShadowVisibility(hitWorld,hit.normal);
+  // Emissive geometry inside C(-1) is integrated analytically below. A
+  // center-ray hit would quantize an entire angular bin and double count it.
+  return hit.albedo*(sun+point);
+}
+
+fn pointAabbDistanceSquared(point:vec3f,minimum:vec3f,maximum:vec3f)->f32{
+  let delta=max(max(minimum-point,vec3f(0)),point-maximum);
+  return dot(delta,delta);
+}
+fn polygonEdgeIntegral(a:vec3f,b:vec3f)->vec3f{
+  let edge=cross(a,b);
+  let edgeLength=length(edge);
+  if(edgeLength<1e-7){return vec3f(0);}
+  return edge*(acos(clamp(dot(a,b),-1.0,1.0))/edgeLength);
+}
+fn clippedTriangleFormFactor(
+  a:vec3f,b:vec3f,c:vec3f,normal:vec3f
+)->f32{
+  var input=array<vec3f,5>(a,b,c,vec3f(0),vec3f(0));
+  var clipped:array<vec3f,5>;
+  var clippedCount=0u;
+  var previous=input[2];
+  var previousDistance=dot(normal,previous);
+  var previousInside=previousDistance>0.0;
+  for(var index=0u;index<3u;index++){
+    let current=input[index];
+    let currentDistance=dot(normal,current);
+    let currentInside=currentDistance>0.0;
+    if(currentInside!=previousInside){
+      let t=previousDistance/(previousDistance-currentDistance);
+      clipped[clippedCount]=mix(previous,current,clamp(t,0.0,1.0));
+      clippedCount++;
+    }
+    if(currentInside){clipped[clippedCount]=current;clippedCount++;}
+    previous=current;
+    previousDistance=currentDistance;
+    previousInside=currentInside;
+  }
+  if(clippedCount<3u){return 0.0;}
+  var vectorForm=vec3f(0);
+  for(var index=0u;index<clippedCount;index++){
+    let next=(index+1u)%clippedCount;
+    vectorForm+=polygonEdgeIntegral(
+      normalize(clipped[index]),normalize(clipped[next])
+    );
+  }
+  return abs(dot(normal,vectorForm))*0.15915494309189535;
+}
+fn emissiveTriangleIrradiance(
+  origin:vec3f,normal:vec3f,triangle:Triangle,radius:f32
+)->vec3f{
+  if(max(triangle.emissive.x,max(triangle.emissive.y,triangle.emissive.z))<=0.0){
+    return vec3f(0);
+  }
+  let minimum=min(triangle.a.xyz,min(triangle.b.xyz,triangle.c.xyz));
+  let maximum=max(triangle.a.xyz,max(triangle.b.xyz,triangle.c.xyz));
+  let proximityDistance=sqrt(pointAabbDistanceSquared(origin,minimum,maximum));
+  if(proximityDistance>=radius){return vec3f(0);}
+  let aDelta=triangle.a.xyz-origin;
+  let bDelta=triangle.b.xyz-origin;
+  let cDelta=triangle.c.xyz-origin;
+  if(min(length(aDelta),min(length(bDelta),length(cDelta)))<1e-5){return vec3f(0);}
+  // Clip against the receiver horizon before evaluating Arvo's polygon form
+  // factor. Without this, an emitter straddling the tangent plane cancels
+  // itself and produces a dark band on near-coplanar receiving geometry.
+  let formFactor=clippedTriangleFormFactor(aDelta,bDelta,cDelta,normal);
+  if(formFactor<=1e-7){return vec3f(0);}
+  let edgeAB=triangle.b.xyz-triangle.a.xyz;
+  let edgeAC=triangle.c.xyz-triangle.a.xyz;
+  let fromA=origin-triangle.a.xyz;
+  let d00=dot(edgeAB,edgeAB);
+  let d01=dot(edgeAB,edgeAC);
+  let d11=dot(edgeAC,edgeAC);
+  let d20=dot(fromA,edgeAB);
+  let d21=dot(fromA,edgeAC);
+  let inverseDenominator=1.0/max(1e-12,d00*d11-d01*d01);
+  var barycentric=vec3f(
+    1.0-(d11*d20-d01*d21)*inverseDenominator
+      -(d00*d21-d01*d20)*inverseDenominator,
+    (d11*d20-d01*d21)*inverseDenominator,
+    (d00*d21-d01*d20)*inverseDenominator
+  );
+  barycentric=max(barycentric,vec3f(0));
+  barycentric/=max(1e-8,barycentric.x+barycentric.y+barycentric.z);
+  let closest=triangle.a.xyz*barycentric.x
+    +triangle.b.xyz*barycentric.y+triangle.c.xyz*barycentric.z;
+  let toLight=closest-origin;
+  let lightDistance=length(toLight);
+  if(lightDistance>0.012){
+    let blocker=traceShortRangeWatertight(
+      origin,toLight/lightDistance,max(1e-5,lightDistance-0.008)
+    );
+    if(blocker.t<lightDistance-0.01){return vec3f(0);}
+  }
+  let proximity=1.0-smoothstep(radius*0.72,radius,proximityDistance);
+  return triangle.emissive.xyz*(formFactor*proximity);
+}
+fn nearEmissiveIrradiance(
+  origin:vec3f,normal:vec3f,radius:f32
+)->vec3f{
+  var result=vec3f(0);
+  var stack:array<u32,64>;
+  var stackSize=1u;
+  stack[0]=0u;
+  let radiusSquared=radius*radius;
+  loop{
+    if(stackSize==0u){break;}
+    stackSize-=1u;
+    let nodeIndex=stack[stackSize];
+    let node=emissiveBvhNodes[nodeIndex];
+    if(pointAabbDistanceSquared(origin,node.minMeta.xyz,node.maxMeta.xyz)>radiusSquared){
+      continue;
+    }
+    let left=bitcast<u32>(node.minMeta.w);
+    let right=bitcast<u32>(node.maxMeta.w);
+    if((left&0x80000000u)!=0u){
+      let first=left&0x7fffffffu;
+      for(var triangleOffset=0u;triangleOffset<right;triangleOffset++){
+        result+=emissiveTriangleIrradiance(
+          origin,normal,emissiveTriangles[first+triangleOffset],radius
+        );
+      }
+    }else{
+      if(stackSize>61u){break;}
+      stack[stackSize]=left;
+      stack[stackSize+1u]=right;
+      stackSize+=2u;
+    }
+  }
+  return result;
+}
+
+fn needsLocalInterval(
+  pixel:vec2i,world:vec3f,normal:vec3f,backFacingSurface:bool
+)->bool{
+  if(backFacingSurface){return true;}
+  let dimensions=vec2i(textureDimensions(worldTex));
+  let offsets=array<vec2i,8>(
+    vec2i(-4,0),vec2i(4,0),vec2i(0,-4),vec2i(0,4),
+    vec2i(-4,-4),vec2i(4,-4),vec2i(-4,4),vec2i(4,4)
+  );
+  for(var index=0u;index<8u;index++){
+    let samplePixel=pixel+offsets[index];
+    if(any(samplePixel<vec2i(0))||any(samplePixel>=dimensions)){return true;}
+    let neighbor=textureLoad(worldTex,samplePixel,0);
+    if(neighbor.w<0.5){return true;}
+    let neighborNormal=gbufferNormal(samplePixel);
+    if(dot(normal,neighborNormal)<0.97){return true;}
+    if(abs(dot(neighbor.xyz-world,normal))>frame.envBaseSpacing.w*0.075){
+      return true;
+    }
+  }
+  return false;
 }
 
 fn cMinusOneIrradiance(
-  pixel:vec2i,world:vec3f,normal:vec3f,baseIrradiance:vec3f
+  pixel:vec2i,world:vec3f,normal:vec3f,baseIrradiance:vec3f,
+  backFacingSurface:bool
 )->vec3f{
-  // Resolve fifteen base cells exactly. This spans the complete local
-  // enclosure neighborhood (including c0 and the near part of c1), where
-  // sparse spatial sharing is most likely to cross a thin wall. Longer paths
-  // remain the responsibility of the radiance cascades.
-  let radius=frame.envBaseSpacing.w*15.0;
-  // Keep the origin entirely world-space. A previous 3x3 screen-neighbor
-  // crease blend changed as pixels reprojected and caused visible enclosure
-  // shimmer; watertight triangle traversal now handles shared-edge cracks.
-  let origin=world+normal*max(0.006,radius*0.012);
-  let sunDirection=normalize(-frame.sunDirTime.xyz);
-  let sunBlocker=traceShortRange(origin,sunDirection,10000.0);
-  let compartmentSun=select(0.0,1.0,sunBlocker.t>=9999.0);
-  let toPoint=frame.pointPosRange.xyz-origin;
-  let pointDistance=length(toPoint);
-  var compartmentPoint=0.0;
-  if(pointDistance<frame.pointPosRange.w){
-    let pointBlocker=traceShortRange(
-      origin,toPoint/max(pointDistance,1e-4),max(0.001,pointDistance-0.03)
-    );
-    compartmentPoint=select(0.0,1.0,pointBlocker.t>=pointDistance-0.04);
+  // Section 7.1 defines C(-1) as the per-pixel interval from the surface to
+  // t_-1 (normally delta_s0), followed by the directional c0 interval.  Do
+  // that merge independently for every direction.  The former six-axis
+  // enclosure classifier and "any miss" fallback switched an entire pixel
+  // between unrelated estimators; box gaps therefore produced the large
+  // black/white wedges reported in Cornell, and open rooms skipped C(-1)
+  // altogether.  A miss now continues into the matching world-space c0 cone.
+  let intervalEnd=frame.envBaseSpacing.w;
+  // Thin-wall visibility guard for sparse trilinear interpolation.  It spans
+  // the local c0/c1 neighborhood but only replaces the individual cone whose
+  // direction has a verified first hit.  The fixed multiplier is universal;
+  // it is neither a Cornell parameter nor selected from scene identity.
+  let origin=world+normal*max(0.006,intervalEnd*0.012);
+  let nearEmission=nearEmissiveIrradiance(origin,normal,intervalEnd);
+  // C(-1) is only different from the already convolved c0 result near a
+  // sub-cell depth/normal discontinuity. A conservative G-buffer footprint
+  // skips expensive short BVH rays on smooth planar regions; this is the
+  // screen-space locality optimization described for the paper's extension.
+  if(!needsLocalInterval(pixel,world,normal,backFacingSurface)){
+    return baseIrradiance+nearEmission;
   }
-  let axes=array<vec3f,6>(
-    vec3f(1,0,0),vec3f(-1,0,0),vec3f(0,1,0),
-    vec3f(0,-1,0),vec3f(0,0,1),vec3f(0,0,-1)
+  let visibilityGuardEnd=select(
+    intervalEnd,intervalEnd*15.0,backFacingSurface
   );
-  let enclosureRadius=radius*2.0;
-  for(var axis=0u;axis<6u;axis++){
-    let blocker=traceShortRange(origin,axes[axis],enclosureRadius+0.001);
-    if(blocker.t>=enclosureRadius){return baseIrradiance;}
+  var mergedResult=vec3f(0);
+  for(var directionIndexValue=0u;directionIndexValue<32u;directionIndexValue++){
+    let direction=directionFromIndex(directionIndexValue,0u);
+    let cosine=max(0.0,dot(normal,direction));
+    if(cosine<=0.0){continue;}
+    let hit=traceShortRangeWatertight(
+      origin,direction,visibilityGuardEnd+0.001
+    );
+    if(hit.t<visibilityGuardEnd){
+      mergedResult+=outgoingAtShortHit(origin+direction*hit.t,hit)*cosine;
+    }else{
+      let continuation=sampleConeDirection(world,normal,directionIndexValue);
+      mergedResult+=select(
+        baseIrradiance,continuation.xyz,continuation.w>0.5
+      )*cosine;
+    }
   }
-  let signZ=select(-1.0,1.0,normal.z>=0.0);
-  let basisScale=-1.0/(signZ+normal.z);
-  let basisProduct=normal.x*normal.y*basisScale;
-  let tangent=vec3f(
-    1.0+signZ*normal.x*normal.x*basisScale,
-    signZ*basisProduct,-signZ*normal.x
-  );
-  let bitangent=vec3f(
-    basisProduct,signZ+normal.y*normal.y*basisScale,-normal.y
-  );
-  var exactResult=vec3f(0);
-  let totalSamples=16u;
-  // A world-stable R2 sequence and one universal variance test implement the
-  // paper's ambient-form C(-1) estimator. Every asset receives the same
-  // fixed 16-ray budget; neither depends on scene identity nor the camera.
-  for(var sampleIndex=0u;sampleIndex<totalSamples;sampleIndex++){
-    let xi=fract(0.5+f32(sampleIndex)*0.7548776662466927);
-    let radial=sqrt(xi);
-    let phi=6.283185307179586*fract(
-      0.5+f32(sampleIndex)*0.5698402909980532
-    );
-    let direction=normalize(
-      tangent*(cos(phi)*radial)+bitangent*(sin(phi)*radial)
-      +normal*sqrt(max(0.0,1.0-xi))
-    );
-    let hit=traceShortRangeWatertight(origin,direction,10000.0);
-    if(hit.t>=9999.0){return baseIrradiance;}
-    exactResult+=outgoingAtShortHit(
-      origin+direction*hit.t,hit,compartmentSun,compartmentPoint
-    );
-  }
-  return exactResult/f32(totalSamples);
+  return mergedResult*(4.0/32.0)+nearEmission;
 }
 
 @vertex fn fullscreenVS(@builtin(vertex_index) index:u32)->@builtin(position) vec4f{
@@ -2183,7 +2545,9 @@ fn cMinusOneIrradiance(
   let albedo=albedoData.xyz;
   let normal=gbufferNormal(pixel);
   let sample=sampleIrradiance(world.xyz,normal);
-  let resolvedIrradiance=cMinusOneIrradiance(pixel,world.xyz,normal,sample.xyz);
+  let resolvedIrradiance=cMinusOneIrradiance(
+    pixel,world.xyz,normal,sample.xyz,fract(world.w)>0.25
+  );
   let indirect=albedo*resolvedIrradiance*frame.controls.x;
   let L=normalize(-frame.sunDirTime.xyz);
   let sun=albedo*frame.sunColorIntensity.xyz*frame.sunColorIntensity.w*max(0.0,dot(normal,L))*shadowVisibility(world.xyz,normal);

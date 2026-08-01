@@ -374,6 +374,32 @@ export function buildBVH(triangles, maxLeaf = 4) {
   return {nodes:new Float32Array(nodeData),triangles:triData,nodeCount:nodes.length,triangleCount:ordered.length};
 }
 
+// Build a second, compact hierarchy containing only mesh-light triangles.
+// Primary shading can then find nearby emitters without walking hundreds of
+// thousands of unrelated Sponza triangles. The extraction is data-driven and
+// applies identically to imported and procedurally generated scenes.
+export function buildEmissiveBVHFromPacked(packedTriangles) {
+  const emissiveTriangles = [];
+  const stride = 32;
+  for (let offset = 0; offset + stride <= packedTriangles.length; offset += stride) {
+    const emissive = [
+      packedTriangles[offset + 16],
+      packedTriangles[offset + 17],
+      packedTriangles[offset + 18],
+    ];
+    if (Math.max(...emissive) <= 0) continue;
+    emissiveTriangles.push({
+      a: [...packedTriangles.slice(offset, offset + 3)],
+      b: [...packedTriangles.slice(offset + 4, offset + 7)],
+      c: [...packedTriangles.slice(offset + 8, offset + 11)],
+      albedo: [...packedTriangles.slice(offset + 12, offset + 15)],
+      emissive,
+    });
+  }
+  const hierarchy = buildBVH(emissiveTriangles);
+  return { ...hierarchy, emissiveTriangleCount: emissiveTriangles.length };
+}
+
 export function intersectTriangle(origin, direction, triangle) {
   const e1=sub3(triangle.b,triangle.a),e2=sub3(triangle.c,triangle.a);
   const p=cross3(direction,e2),det=dot3(e1,p);

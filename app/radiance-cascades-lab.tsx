@@ -6,7 +6,7 @@ export function RadianceCascadesLab() {
   useEffect(() => {
     const script = document.createElement("script");
     script.type = "module";
-    script.src = "/rc/engine.js?v=2026-07-31-universal16";
+    script.src = "/rc/engine.js?v=2026-07-31-near-emitter1";
     script.dataset.splitRcLoader = "true";
     document.head.append(script);
     return () => {
