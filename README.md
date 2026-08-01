@@ -129,7 +129,7 @@ low-camera translation measures 2/255 at p95 and 5/255 at p99. Every
 per-capture sparse diagnostic is zero. These tests cover both cache stability
 and the displayed image.
 
-## Twelve validation scenes
+## Thirteen validation scenes
 
 1. Color bleed laboratory - near-field transfer and emissive geometry.
 2. Sponza atrium - the official Crytek/Khronos geometry reconstructed with the
@@ -146,11 +146,13 @@ and the displayed image.
 7. Sun temple - layered portals and moving sunlight.
 8. Orbital sculpture field - open-sky misses and high-curvature meshes.
 9. Night market - many colored emitters and dark-region stability.
-10. Megacity stress grid - 13,496 triangles and high probe pressure.
+10. Megacity stress grid - 12,992 triangles and high probe pressure.
 11. Cornell box reference - canonical red/green enclosure, two occluders,
     ceiling area emitter, and a moving comparison light.
 12. Grand concave heightmap - a 128x128 terrain with nested bowls, crater,
     ravine, terraces, shelves, and moving sun/fill light.
+13. Universal visibility laboratory - broad and near-field area emitters,
+    partial blockers, closed volumes, and explicitly open two-sided sheets.
 
 Every scene has a deterministic camera path, moving sun, and moving colored
 point light. The controls expose final, indirect, direct, normal, coverage, and
@@ -163,8 +165,8 @@ Balanced mode bounds the internal screen to 360,000 pixels; the development
 viewport resolves to 800x450 and traces one primary R2 ray per internal-screen
 pixel:
 
-- the final all-scene audit measured Sponza at 6.82 ms GPU and 59.02 FPS; the
-  slowest callback rate across all 12 scenes was 56.26 FPS
+- the final 13-scene audit passed at a 57.13 FPS minimum callback rate and a
+  16.52 ms maximum measured GPU time on the validation GPU
 - baseline and moving-light 32-frame motion gates measure 2/255 at p95
 - the 512-spp Sponza reference gate measures 23.25% raw NRMSE, 21.37%
   99%-trimmed NRMSE, 13.14% low-frequency scale-invariant NRMSE, 0.0496

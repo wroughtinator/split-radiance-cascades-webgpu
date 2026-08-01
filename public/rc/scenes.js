@@ -5,7 +5,7 @@ import {
   normalize3,
   sub3,
   TAU,
-} from "./math.js?v=2026-07-31-near-emitter1";
+} from "./math.js?v=2026-07-31-universal18";
 
 const C = {
   chalk: [0.72, 0.75, 0.72],
@@ -26,7 +26,7 @@ const C = {
   bark: [0.22, 0.095, 0.035],
 };
 
-class Geometry {
+export class Geometry {
   constructor() {
     this.vertices = [];
     this.triangles = [];
@@ -34,26 +34,29 @@ class Geometry {
     this.boundsMax = [-Infinity, -Infinity, -Infinity];
   }
 
-  vertex(p, n, albedo, emissive) {
-    this.vertices.push(...p, ...n, ...albedo, ...emissive, 0, 0, -1, 0);
+  vertex(p, n, albedo, emissive, closedSurface = false) {
+    // materialCutoff.y is otherwise zero for procedural opaque geometry.
+    // Its negative sign is stable topology metadata consumed by the raster
+    // pass; it is never inferred from the camera-facing state.
+    this.vertices.push(...p, ...n, ...albedo, ...emissive, 0, 0, -1, closedSurface ? -1 : 0);
     for (let i = 0; i < 3; i++) {
       this.boundsMin[i] = Math.min(this.boundsMin[i], p[i]);
       this.boundsMax[i] = Math.max(this.boundsMax[i], p[i]);
     }
   }
 
-  triangle(a, b, c, albedo = C.white, emissive = [0, 0, 0], normals) {
+  triangle(a, b, c, albedo = C.white, emissive = [0, 0, 0], normals, closedSurface = false) {
     const face = normalize3(cross3(sub3(b, a), sub3(c, a)));
     const ns = normals || [face, face, face];
-    this.vertex(a, ns[0], albedo, emissive);
-    this.vertex(b, ns[1], albedo, emissive);
-    this.vertex(c, ns[2], albedo, emissive);
+    this.vertex(a, ns[0], albedo, emissive, closedSurface);
+    this.vertex(b, ns[1], albedo, emissive, closedSurface);
+    this.vertex(c, ns[2], albedo, emissive, closedSurface);
     this.triangles.push({ a, b, c, albedo, emissive, normals: ns });
   }
 
-  quad(a, b, c, d, color = C.white, emissive = [0, 0, 0]) {
-    this.triangle(a, b, c, color, emissive);
-    this.triangle(a, c, d, color, emissive);
+  quad(a, b, c, d, color = C.white, emissive = [0, 0, 0], closedSurface = false) {
+    this.triangle(a, b, c, color, emissive, undefined, closedSurface);
+    this.triangle(a, c, d, color, emissive, undefined, closedSurface);
   }
 
   box(center, size, color = C.white, emissive = [0, 0, 0]) {
@@ -62,12 +65,12 @@ class Geometry {
       [x-sx,y-sy,z-sz],[x+sx,y-sy,z-sz],[x+sx,y+sy,z-sz],[x-sx,y+sy,z-sz],
       [x-sx,y-sy,z+sz],[x+sx,y-sy,z+sz],[x+sx,y+sy,z+sz],[x-sx,y+sy,z+sz],
     ];
-    this.quad(p[1],p[0],p[3],p[2],color,emissive);
-    this.quad(p[4],p[5],p[6],p[7],color,emissive);
-    this.quad(p[0],p[4],p[7],p[3],color,emissive);
-    this.quad(p[5],p[1],p[2],p[6],color,emissive);
-    this.quad(p[3],p[7],p[6],p[2],color,emissive);
-    this.quad(p[0],p[1],p[5],p[4],color,emissive);
+    this.quad(p[1],p[0],p[3],p[2],color,emissive,true);
+    this.quad(p[4],p[5],p[6],p[7],color,emissive,true);
+    this.quad(p[0],p[4],p[7],p[3],color,emissive,true);
+    this.quad(p[5],p[1],p[2],p[6],color,emissive,true);
+    this.quad(p[3],p[7],p[6],p[2],color,emissive,true);
+    this.quad(p[0],p[1],p[5],p[4],color,emissive,true);
   }
 
   boxRotatedY(center, size, angle, color = C.white, emissive = [0, 0, 0]) {
@@ -83,12 +86,12 @@ class Geometry {
       point(-sx,-sy,-sz), point(sx,-sy,-sz), point(sx,sy,-sz), point(-sx,sy,-sz),
       point(-sx,-sy,sz), point(sx,-sy,sz), point(sx,sy,sz), point(-sx,sy,sz),
     ];
-    this.quad(p[1],p[0],p[3],p[2],color,emissive);
-    this.quad(p[4],p[5],p[6],p[7],color,emissive);
-    this.quad(p[0],p[4],p[7],p[3],color,emissive);
-    this.quad(p[5],p[1],p[2],p[6],color,emissive);
-    this.quad(p[3],p[7],p[6],p[2],color,emissive);
-    this.quad(p[0],p[1],p[5],p[4],color,emissive);
+    this.quad(p[1],p[0],p[3],p[2],color,emissive,true);
+    this.quad(p[4],p[5],p[6],p[7],color,emissive,true);
+    this.quad(p[0],p[4],p[7],p[3],color,emissive,true);
+    this.quad(p[5],p[1],p[2],p[6],color,emissive,true);
+    this.quad(p[3],p[7],p[6],p[2],color,emissive,true);
+    this.quad(p[0],p[1],p[5],p[4],color,emissive,true);
   }
 
   sphere(center, radius, color = C.white, emissive = [0,0,0], rings = 8, segments = 14) {
@@ -101,8 +104,13 @@ class Geometry {
         const n01=[Math.sin(t1)*Math.cos(p0),Math.cos(t1),Math.sin(t1)*Math.sin(p0)];
         const n11=[Math.sin(t1)*Math.cos(p1),Math.cos(t1),Math.sin(t1)*Math.sin(p1)];
         const pt=(n)=>[center[0]+n[0]*radius,center[1]+n[1]*radius,center[2]+n[2]*radius];
-        if(v>0)this.triangle(pt(n00),pt(n01),pt(n10),color,emissive,[n00,n01,n10]);
-        if(v<rings-1)this.triangle(pt(n10),pt(n01),pt(n11),color,emissive,[n10,n01,n11]);
+        // Parameter-space +phi x +theta points outward. The previous order
+        // used +theta x +phi, so the authored smooth normals were outward but
+        // every geometric face (and raster front-facing classification) was
+        // inward. That incorrectly marked sphere exteriors as closed-volume
+        // backfaces and activated the interior visibility guard.
+        if(v>0)this.triangle(pt(n00),pt(n10),pt(n01),color,emissive,[n00,n10,n01],true);
+        if(v<rings-1)this.triangle(pt(n10),pt(n11),pt(n01),color,emissive,[n10,n11,n01],true);
       }
     }
   }
@@ -117,10 +125,10 @@ class Geometry {
     for(let i=0;i<segments;i++){
       const a0=i/segments*TAU,a1=(i+1)/segments*TAU;
       const p00=point(-height/2,a0),p10=point(-height/2,a1),p01=point(height/2,a0),p11=point(height/2,a1);
-      this.triangle(p00,p01,p10,color,emissive,[normal(a0),normal(a0),normal(a1)]);
-      this.triangle(p10,p01,p11,color,emissive,[normal(a1),normal(a0),normal(a1)]);
-      this.triangle(top,p11,p01,color,emissive);
-      this.triangle(bottom,p00,p10,color,emissive);
+      this.triangle(p00,p01,p10,color,emissive,[normal(a0),normal(a0),normal(a1)],true);
+      this.triangle(p10,p01,p11,color,emissive,[normal(a1),normal(a0),normal(a1)],true);
+      this.triangle(top,p11,p01,color,emissive,undefined,true);
+      this.triangle(bottom,p00,p10,color,emissive,undefined,true);
     }
   }
 
@@ -130,8 +138,8 @@ class Geometry {
       const a=i/segments*TAU,b=(i+1)/segments*TAU;
       const p=[center[0]+Math.cos(a)*radius,baseY,center[2]+Math.sin(a)*radius];
       const q=[center[0]+Math.cos(b)*radius,baseY,center[2]+Math.sin(b)*radius];
-      this.triangle(p,apex,q,color);
-      this.triangle([center[0],baseY,center[2]],q,p,color);
+      this.triangle(p,apex,q,color,[0,0,0],undefined,true);
+      this.triangle([center[0],baseY,center[2]],p,q,color,[0,0,0],undefined,true);
     }
   }
 
@@ -148,8 +156,8 @@ class Geometry {
       const b=sample((i+1)/majorSegments*TAU,j/minorSegments*TAU);
       const c=sample((i+1)/majorSegments*TAU,(j+1)/minorSegments*TAU);
       const d=sample(i/majorSegments*TAU,(j+1)/minorSegments*TAU);
-      this.triangle(a.p,d.p,b.p,color,emissive,[a.n,d.n,b.n]);
-      this.triangle(b.p,d.p,c.p,color,emissive,[b.n,d.n,c.n]);
+      this.triangle(a.p,d.p,b.p,color,emissive,[a.n,d.n,b.n],true);
+      this.triangle(b.p,d.p,c.p,color,emissive,[b.n,d.n,c.n],true);
     }
   }
 
@@ -269,6 +277,7 @@ export const SCENE_INFO = [
   {name:"Megacity stress grid",short:"Stress",description:"Large terrain, 150 structures, complex monuments, maximum probe pressure, and profiling load."},
   {name:"Cornell box reference",short:"Cornell",description:"Canonical red/green Cornell enclosure, two occluding boxes, ceiling area emitter, and an animated comparison light."},
   {name:"Grand concave heightmap",short:"Heightmap",description:"A 128×128, 32k-triangle terrain with nested bowls, a winding ravine, cliff shelves, moving sun, and orbiting fill light."},
+  {name:"Universal visibility laboratory",short:"Visibility",description:"A partially occluded area emitter and explicitly open two-sided sheets stress smooth visibility and topology-invariant C(-1) reconstruction."},
 ];
 
 function buildScene0(g) {
@@ -370,7 +379,11 @@ function buildScene7(g) {
     else if(i%3===1)g.sphere(p,1.0+(i%4)*0.3,i%2?C.orange:C.blue,[0,0,0],10,18);
     else {g.cylinder(p,0.65,3.3,C.metal,16,i%3);g.torus(p,1.2,0.18,C.yellow,16,8,Math.PI/2);}
   }
-  g.sphere([0,1,0],2.2,C.white,[1.8,0.45,3.5],12,22);
+  // A mesh light is a radiometric source, not a silhouette tessellation
+  // benchmark. Smooth vertex normals keep the orb visually round while a
+  // bounded 6x12 source mesh prevents exact local-visibility cost from being
+  // multiplied by hundreds of nearly redundant micro-triangles.
+  g.sphere([0,1,0],2.2,C.white,[1.8,0.45,3.5],6,12);
   return {camera:[30,14,32],target:[0,0,0],env:[0.025,0.035,0.09],sun:2.0};
 }
 
@@ -382,11 +395,16 @@ function buildScene8(g) {
     const canopy=i%2?C.yellow:C.violet;
     g.quad([x-2,2,z-2],[x+2,2,z-2],[x+1.6,3.1,z+1.8],[x-1.6,3.1,z+1.8],canopy);
     const e=i%3===0?[4.5,0.3,0.12]:i%3===1?[0.15,1.3,4.8]:[0.15,4.0,0.7];
-    // Keep each lantern above the base cascade's angular resolution. Tiny
-    // point-like emissive triangles alias into rare temporal fireflies; these
-    // are still compact area emitters, but large enough to be sampled
-    // consistently by the paper's 32 c0 directions.
-    g.sphere([x,2.5,z],0.45,[0.8,0.8,0.8],e,7,12);
+    // Model each lantern as one compact rectangular area source. A highly
+    // tessellated glowing sphere represents the same smooth source with 144
+    // redundant emissive triangles and turns exact partial-visibility work
+    // into geometry-dependent oversampling. Shape complexity remains in the
+    // stalls/canopies; light-source tessellation no longer changes GI cost.
+    g.quad(
+      [x-0.4,2.5,z-0.4],[x+0.4,2.5,z-0.4],
+      [x+0.4,2.5,z+0.4],[x-0.4,2.5,z+0.4],
+      [0.8,0.8,0.8],e,
+    );
   }
   for(let i=0;i<12;i++)g.cylinder([-16+i*2.9,2.3,0],0.08,4.6,C.metal,7);
   return {camera:[28,12,28],target:[0,1.2,0],env:[0.003,0.006,0.018],sun:0.35};
@@ -404,7 +422,11 @@ function buildScene9(g) {
     const a=i/12*TAU;
     g.torus([Math.cos(a)*11,5+Math.sin(i)*2,Math.sin(a)*11],2.0,0.38,i%2?C.orange:C.cyan,20,10,a);
   }
-  g.sphere([0,8,0],3.0,C.white,[2.5,0.25,0.08],14,24);
+  // Keep source integration bounded independently of the surrounding stress
+  // geometry. The interpolated normals preserve the smooth visible orb; the
+  // 6x12 radiometric mesh is already finer than the local cascade's angular
+  // sampling and avoids oversampling the same emitter hundreds of times.
+  g.sphere([0,8,0],3.0,C.white,[2.5,0.25,0.08],6,12);
   return {camera:[50,30,53],target:[0,3,0],env:[0.02,0.035,0.06],sun:3.6};
 }
 
@@ -480,9 +502,55 @@ function buildScene11(g) {
   };
 }
 
+function buildScene12(g) {
+  // The floor receives a broad area source through a thin, off-center
+  // occluder. Camera motion sweeps continuously across partial visibility.
+  g.quad([-7,0,5],[7,0,5],[7,0,-7],[-7,0,-7],C.white);
+  g.quad([-7,0,-7],[7,0,-7],[7,6,-7],[-7,6,-7],C.chalk);
+  g.quad(
+    [-2.8,5.1,0.5],[2.8,5.1,0.5],
+    [2.8,5.1,4.5],[-2.8,5.1,4.5],
+    [0.9,0.9,0.9],[6.8,5.7,4.4],
+  );
+  g.box([0.45,2.35,2.2],[0.22,3.5,2.8],C.dark);
+  g.box([-3.7,0.65,-2.7],[1.4,1.3,1.4],C.red);
+  g.box([3.4,1.05,-3.4],[1.6,2.1,1.6],C.green);
+
+  // A second emitter sits inside one automatically derived base interval of
+  // a vertical receiver. The narrow intervening bar covers only part of its
+  // solid angle, forcing the production C(-1) patch-visibility path.
+  g.quad(
+    [-2.9,1.0,-4.0],[2.9,1.0,-4.0],
+    [2.9,5.2,-4.0],[-2.9,5.2,-4.0],C.white,
+  );
+  g.quad(
+    [-1.8,2.0,-3.62],[-1.8,4.55,-3.62],
+    [1.8,4.55,-3.62],[1.8,2.0,-3.62],
+    [0.9,0.9,0.9],[0.55,0.48,0.38],
+  );
+  g.box([0.35,3.25,-3.81],[0.16,1.85,0.12],C.dark);
+
+  // These sheets are intentionally open and visible from their authored
+  // back side. They must never acquire closed-volume suppression merely
+  // because the rasterizer reports a back-facing primitive.
+  g.quad(
+    [-4.8,0.25,0.8],[-4.8,3.6,0.8],[-4.8,3.6,-1.4],[-4.8,0.25,-1.4],
+    C.blue,
+  );
+  g.quad(
+    [4.8,0.25,-1.4],[4.8,3.6,-1.4],[4.8,3.6,0.8],[4.8,0.25,0.8],
+    C.yellow,
+  );
+  return {
+    camera:[7.8,5.0,10.5],target:[0,1.4,-1.8],
+    env:[0.004,0.005,0.008],sun:0.0,pointIntensity:0,exposure:1.0,
+  };
+}
+
 const BUILDERS=[
   buildScene0,buildScene1,buildScene2,buildScene3,buildScene4,buildScene5,
   buildScene6,buildScene7,buildScene8,buildScene9,buildScene10,buildScene11,
+  buildScene12,
 ];
 
 // Universal, asset-driven base resolution. The scene diagonal establishes

@@ -29,6 +29,7 @@ struct FrameUniforms {
   envBaseSpacing: vec4f,
   resolution: vec4f,
   controls: vec4f,
+  sceneBounds: vec4f,
 };
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(0) @binding(1) var albedoAtlas: texture_2d_array<f32>;
@@ -112,12 +113,14 @@ fn encodeSurfaceEmission(emission:vec3f)->vec3f{
   o.normal = vec4f(
     encodeNormalOct(select(-v.normal,v.normal,frontFacing)),emission.gb
   );
-  // Keep two independent bits in the exact fp32 marker: 0.5 marks a raster
-  // back face and 1.0 marks any RGB emissive surface. This lets validation
-  // reject red-only mesh lights without sacrificing packed emission color.
-  let backFaceMarker=select(0.5,1.0,frontFacing);
+  // Closed-topology metadata comes from the mesh, not the current view. Only
+  // a back face belonging to a declared closed volume receives the interior
+  // visibility bit. Open and two-sided surfaces therefore render identically
+  // from either side. The independent 1.0 emitter bit preserves packed RGB.
+  let closedBackFace=!frontFacing&&v.materialCutoff.y< -0.5;
+  let surfaceMarker=1.0+select(0.0,0.25,closedBackFace);
   let emissiveMarker=select(0.0,1.0,any(v.emissive>vec3f(0)));
-  o.world = vec4f(v.world,backFaceMarker+emissiveMarker);
+  o.world = vec4f(v.world,surfaceMarker+emissiveMarker);
   return o;
 }
 struct ShadowOut {
@@ -157,6 +160,7 @@ struct FrameUniforms {
   envBaseSpacing: vec4f,
   resolution: vec4f,
   controls: vec4f,
+  sceneBounds: vec4f,
 };
 struct HashSlot { key: atomic<u32>, index: atomic<u32> };
 // Keep the frame and history epoch as independent 32-bit values. Packing both
@@ -741,57 +745,119 @@ fn primaryClippedTriangleFormFactor(
   }
   return abs(dot(normal,vectorForm))*0.15915494309189535;
 }
+fn primaryEmissivePatchIrradiance(
+  origin:vec3f,normal:vec3f,a:vec3f,b:vec3f,c:vec3f,
+  emission:vec3f
+)->vec3f{
+  let centroid=(a+b+c)/3.0;
+  let toLight=centroid-origin;
+  let lightDistance=length(toLight);
+  if(lightDistance<=1e-7){return vec3f(0);}
+  let patchExtent=max(length(b-a),max(length(c-b),length(a-c)));
+  let formFactor=primaryClippedTriangleFormFactor(
+    a-origin,b-origin,c-origin,normal
+  );
+  if(formFactor<=1e-8){return vec3f(0);}
+  // Visibility is integrated over stable world-space subtriangles. A moving
+  // blocker can therefore reveal part of an emitter instead of toggling the
+  // whole polygon through one closest-point ray. The endpoint contraction is
+  // proportional to the ray/patch scale, never a scene-unit constant.
+  let rayEpsilon=max(
+    1e-7,min(lightDistance*0.001,patchExtent*0.001)
+  );
+  let traceDistance=max(1e-7,lightDistance-rayEpsilon);
+  let blocker=traceScene(origin,toLight/lightDistance,traceDistance);
+  if(blocker.t<traceDistance){return vec3f(0);}
+  return emission*formFactor;
+}
+fn primaryEmissiveVisibility(
+  origin:vec3f,lightPoint:vec3f,sourceExtent:f32
+)->f32{
+  let toLight=lightPoint-origin;
+  let lightDistance=length(toLight);
+  if(lightDistance<=1e-7){return 0.0;}
+  let rayEpsilon=max(
+    1e-7,min(lightDistance*0.001,sourceExtent*0.001)
+  );
+  let traceDistance=max(1e-7,lightDistance-rayEpsilon);
+  let blocker=traceScene(origin,toLight/lightDistance,traceDistance);
+  return select(0.0,1.0,blocker.t>=traceDistance);
+}
 fn primaryEmissiveTriangleIrradiance(
   origin:vec3f,normal:vec3f,triangle:Triangle,radius:f32
 )->vec3f{
   if(max(triangle.emissive.x,max(triangle.emissive.y,triangle.emissive.z))<=0.0){
     return vec3f(0);
   }
-  let minimum=min(triangle.a.xyz,min(triangle.b.xyz,triangle.c.xyz));
-  let maximum=max(triangle.a.xyz,max(triangle.b.xyz,triangle.c.xyz));
+  let a=triangle.a.xyz;
+  let b=triangle.b.xyz;
+  let c=triangle.c.xyz;
+  let minimum=min(a,min(b,c));
+  let maximum=max(a,max(b,c));
   let proximityDistance=sqrt(primaryPointAabbDistanceSquared(
     origin,minimum,maximum
   ));
   if(proximityDistance>=radius){return vec3f(0);}
-  let aDelta=triangle.a.xyz-origin;
-  let bDelta=triangle.b.xyz-origin;
-  let cDelta=triangle.c.xyz-origin;
-  if(min(length(aDelta),min(length(bDelta),length(cDelta)))<1e-5){
-    return vec3f(0);
+  // Smoothly cross-fade the analytic C(-1) estimator into c0 across a
+  // geometry-scaled overlap. This is deliberately continuous; the prior
+  // hard ownership boundary made a whole source appear or disappear.
+  let intervalBlend=1.0-smoothstep(radius*0.72,radius,proximityDistance);
+  let parentFormFactor=primaryClippedTriangleFormFactor(
+    a-origin,b-origin,c-origin,normal
+  );
+  if(parentFormFactor<=1e-8){return vec3f(0);}
+  let centroid=(a+b+c)/3.0;
+  let sourceExtent=max(length(b-a),max(length(c-b),length(a-c)));
+  // A tessellated curved emitter already supplies spatial quadrature through
+  // its source facets. Subdividing a facet that fits within the C(-1)
+  // footprint is redundant and makes cost depend on display tessellation.
+  // The 2.5-interval bound is world-scale invariant; genuinely broad area
+  // sources (including the Cornell ceiling panel) still take the full
+  // partial-coverage path.
+  if(sourceExtent<=radius*2.5){
+    let visibility=primaryEmissiveVisibility(origin,centroid,sourceExtent);
+    return triangle.emissive.xyz*(parentFormFactor*intervalBlend*visibility);
   }
-  let formFactor=primaryClippedTriangleFormFactor(
-    aDelta,bDelta,cDelta,normal
+  let samples=array<vec3f,7>(
+    mix(a,centroid,0.06),mix(b,centroid,0.06),mix(c,centroid,0.06),
+    (a+b)*0.5,(b+c)*0.5,(c+a)*0.5,centroid
   );
-  if(formFactor<=1e-7){return vec3f(0);}
-  let edgeAB=triangle.b.xyz-triangle.a.xyz;
-  let edgeAC=triangle.c.xyz-triangle.a.xyz;
-  let fromA=origin-triangle.a.xyz;
-  let d00=dot(edgeAB,edgeAB);
-  let d01=dot(edgeAB,edgeAC);
-  let d11=dot(edgeAC,edgeAC);
-  let d20=dot(fromA,edgeAB);
-  let d21=dot(fromA,edgeAC);
-  let inverseDenominator=1.0/max(1e-12,d00*d11-d01*d01);
-  var barycentric=vec3f(
-    1.0-(d11*d20-d01*d21)*inverseDenominator
-      -(d00*d21-d01*d20)*inverseDenominator,
-    (d11*d20-d01*d21)*inverseDenominator,
-    (d00*d21-d01*d20)*inverseDenominator
-  );
-  barycentric=max(barycentric,vec3f(0));
-  barycentric/=max(1e-8,barycentric.x+barycentric.y+barycentric.z);
-  let closest=triangle.a.xyz*barycentric.x
-    +triangle.b.xyz*barycentric.y+triangle.c.xyz*barycentric.z;
-  let toLight=closest-origin;
-  let lightDistance=length(toLight);
-  if(lightDistance>0.012){
-    let blocker=traceScene(
-      origin,toLight/lightDistance,max(1e-5,lightDistance-0.008)
+  var visibleSamples=0.0;
+  for(var sampleIndex=0u;sampleIndex<7u;sampleIndex++){
+    visibleSamples+=primaryEmissiveVisibility(
+      origin,samples[sampleIndex],sourceExtent
     );
-    if(blocker.t<lightDistance-0.01){return vec3f(0);}
   }
-  let proximity=1.0-smoothstep(radius*0.72,radius,proximityDistance);
-  return triangle.emissive.xyz*(formFactor*proximity);
+  // The common unoccluded case retains the exact analytic polygon result.
+  // Only a detected blocker invokes the bounded patch visibility quadrature.
+  if(visibleSamples>=6.5){
+    return triangle.emissive.xyz*(parentFormFactor*intervalBlend);
+  }
+  if(visibleSamples<=0.5){return vec3f(0);}
+  let edgeB=(triangle.b.xyz-triangle.a.xyz)*0.125;
+  let edgeC=(triangle.c.xyz-triangle.a.xyz)*0.125;
+  var result=vec3f(0);
+  // Eight-by-eight barycentric subdivision yields 64 stable integration
+  // patches per source triangle. Their exact horizon-clipped form factors sum
+  // to the parent polygon while independently sampled visibility represents
+  // partial occlusion without temporal or screen-space noise.
+  for(var i=0u;i<8u;i++){
+    for(var j=0u;j<8u-i;j++){
+      let p00=triangle.a.xyz+edgeB*f32(i)+edgeC*f32(j);
+      let p10=p00+edgeB;
+      let p01=p00+edgeC;
+      result+=primaryEmissivePatchIrradiance(
+        origin,normal,p00,p10,p01,triangle.emissive.xyz
+      );
+      if(i+j+2u<=8u){
+        let p11=p10+edgeC;
+        result+=primaryEmissivePatchIrradiance(
+          origin,normal,p10,p11,p01,triangle.emissive.xyz
+        );
+      }
+    }
+  }
+  return result*intervalBlend;
 }
 fn primaryNearEmissiveIrradiance(
   origin:vec3f,normal:vec3f,radius:f32
@@ -1230,7 +1296,12 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
       targetCascade+=1u; end*=4.0;
     }
   }
-  let radiance=select(frame.envBaseSpacing.xyz,directAtHit(origin+direction*hit.t,hit),didHit);
+  // This ray starts after C(-1), so an emissive hit belongs to c0 or a
+  // coarser interval. The analytic estimator below overlaps that boundary
+  // smoothly instead of making an emitter switch between representations.
+  let radiance=select(
+    frame.envBaseSpacing.xyz,directAtHit(origin+direction*hit.t,hit),didHit
+  );
   atomicAdd(&state[4],1u);
   if(didHit){atomicAdd(&state[5],1u);}
   for(var cascade=0u;cascade<4u;cascade++){
@@ -1444,32 +1515,8 @@ fn decodeOctahedral(uvIn:vec2f)->vec3f{
   textureStore(irradianceAtlasStorage,atlasCoordinate,stored);
 }
 
-// Mirror the production directional C(-1) interval merge in the path oracle.
-fn primaryNeedsLocalInterval(
-  pixel:vec2i,world:vec3f,normal:vec3f,backFacingSurface:bool
-)->bool{
-  if(backFacingSurface){return true;}
-  let dimensions=vec2i(textureDimensions(worldTex));
-  let offsets=array<vec2i,8>(
-    vec2i(-4,0),vec2i(4,0),vec2i(0,-4),vec2i(0,4),
-    vec2i(-4,-4),vec2i(4,-4),vec2i(-4,4),vec2i(4,4)
-  );
-  for(var index=0u;index<8u;index++){
-    let samplePixel=pixel+offsets[index];
-    if(any(samplePixel<vec2i(0))||any(samplePixel>=dimensions)){return true;}
-    let neighbor=textureLoad(worldTex,samplePixel,0);
-    if(neighbor.w<0.5){return true;}
-    let neighborNormal=gbufferNormal(samplePixel);
-    if(dot(normal,neighborNormal)<0.97){return true;}
-    if(abs(dot(neighbor.xyz-world,normal))>frame.envBaseSpacing.w*0.075){
-      return true;
-    }
-  }
-  return false;
-}
-
 fn resolvedPrimaryIrradiance(
-  pixel:vec2i,world:vec3f,normal:vec3f,backFacingSurface:bool
+  world:vec3f,normal:vec3f,closedBackFace:bool
 )->vec3f{
   let base=samplePrimaryIrradiance(world,normal).xyz;
   let intervalEnd=frame.envBaseSpacing.w;
@@ -1477,10 +1524,13 @@ fn resolvedPrimaryIrradiance(
   let nearEmission=primaryNearEmissiveIrradiance(
     origin,normal,intervalEnd
   );
-  if(!primaryNeedsLocalInterval(pixel,world,normal,backFacingSurface)){
-    return base+nearEmission;
-  }
-  let visibilityGuardEnd=select(intervalEnd,intervalEnd*15.0,backFacingSurface);
+  // C(-1) is evaluated for every receiver. No screen-space footprint or
+  // camera-dependent branch may switch the estimator. A camera inside a
+  // declared closed volume traces to the scene diagonal, which is a true
+  // geometry bound; open/two-sided back faces retain the paper interval.
+  let visibilityGuardEnd=select(
+    intervalEnd,max(intervalEnd,frame.sceneBounds.w*1.001),closedBackFace
+  );
   var mergedResult=vec3f(0);
   for(var directionIndexValue=0u;directionIndexValue<32u;directionIndexValue++){
     let direction=directionFromIndex(directionIndexValue,0u);
@@ -1522,13 +1572,13 @@ fn resolvedPrimaryIrradiance(
   // radiance is dominated by the separately known emission term and is not a
   // meaningful irradiance-reconstruction error sample.
   let packedNormal=textureLoad(normalTex,vec2i(pixel),0);
-  if(world.w>1.25||max(packedNormal.z,packedNormal.w)>1e-5){return;}
+  if(world.w>1.5||max(packedNormal.z,packedNormal.w)>1e-5){return;}
   let normal=gbufferNormal(vec2i(pixel));
   let base=(gid.y*outputSize.x+gid.x)*8u;
   if(gid.z==0u){
     let current=clamp(
       resolvedPrimaryIrradiance(
-        vec2i(pixel),world.xyz,normal,fract(world.w)>0.25
+        world.xyz,normal,fract(world.w)>0.125
       ),
       vec3f(0),vec3f(16)
     );
@@ -1712,6 +1762,7 @@ struct FrameUniforms {
   envBaseSpacing: vec4f,
   resolution: vec4f,
   controls: vec4f,
+  sceneBounds: vec4f,
 };
 struct SunShadowUniforms {
   matrices: array<mat4x4<f32>,4>,
@@ -2374,54 +2425,103 @@ fn clippedTriangleFormFactor(
   }
   return abs(dot(normal,vectorForm))*0.15915494309189535;
 }
+fn emissivePatchIrradiance(
+  origin:vec3f,normal:vec3f,a:vec3f,b:vec3f,c:vec3f,
+  emission:vec3f
+)->vec3f{
+  let centroid=(a+b+c)/3.0;
+  let toLight=centroid-origin;
+  let lightDistance=length(toLight);
+  if(lightDistance<=1e-7){return vec3f(0);}
+  let patchExtent=max(length(b-a),max(length(c-b),length(a-c)));
+  let formFactor=clippedTriangleFormFactor(
+    a-origin,b-origin,c-origin,normal
+  );
+  if(formFactor<=1e-8){return vec3f(0);}
+  let rayEpsilon=max(
+    1e-7,min(lightDistance*0.001,patchExtent*0.001)
+  );
+  let traceDistance=max(1e-7,lightDistance-rayEpsilon);
+  let blocker=traceShortRangeWatertight(
+    origin,toLight/lightDistance,traceDistance
+  );
+  if(blocker.t<traceDistance){return vec3f(0);}
+  return emission*formFactor;
+}
+fn emissiveVisibility(origin:vec3f,lightPoint:vec3f,sourceExtent:f32)->f32{
+  let toLight=lightPoint-origin;
+  let lightDistance=length(toLight);
+  if(lightDistance<=1e-7){return 0.0;}
+  let rayEpsilon=max(
+    1e-7,min(lightDistance*0.001,sourceExtent*0.001)
+  );
+  let traceDistance=max(1e-7,lightDistance-rayEpsilon);
+  let blocker=traceShortRangeWatertight(
+    origin,toLight/lightDistance,traceDistance
+  );
+  return select(0.0,1.0,blocker.t>=traceDistance);
+}
 fn emissiveTriangleIrradiance(
   origin:vec3f,normal:vec3f,triangle:Triangle,radius:f32
 )->vec3f{
   if(max(triangle.emissive.x,max(triangle.emissive.y,triangle.emissive.z))<=0.0){
     return vec3f(0);
   }
-  let minimum=min(triangle.a.xyz,min(triangle.b.xyz,triangle.c.xyz));
-  let maximum=max(triangle.a.xyz,max(triangle.b.xyz,triangle.c.xyz));
+  let a=triangle.a.xyz;
+  let b=triangle.b.xyz;
+  let c=triangle.c.xyz;
+  let minimum=min(a,min(b,c));
+  let maximum=max(a,max(b,c));
   let proximityDistance=sqrt(pointAabbDistanceSquared(origin,minimum,maximum));
   if(proximityDistance>=radius){return vec3f(0);}
-  let aDelta=triangle.a.xyz-origin;
-  let bDelta=triangle.b.xyz-origin;
-  let cDelta=triangle.c.xyz-origin;
-  if(min(length(aDelta),min(length(bDelta),length(cDelta)))<1e-5){return vec3f(0);}
-  // Clip against the receiver horizon before evaluating Arvo's polygon form
-  // factor. Without this, an emitter straddling the tangent plane cancels
-  // itself and produces a dark band on near-coplanar receiving geometry.
-  let formFactor=clippedTriangleFormFactor(aDelta,bDelta,cDelta,normal);
-  if(formFactor<=1e-7){return vec3f(0);}
-  let edgeAB=triangle.b.xyz-triangle.a.xyz;
-  let edgeAC=triangle.c.xyz-triangle.a.xyz;
-  let fromA=origin-triangle.a.xyz;
-  let d00=dot(edgeAB,edgeAB);
-  let d01=dot(edgeAB,edgeAC);
-  let d11=dot(edgeAC,edgeAC);
-  let d20=dot(fromA,edgeAB);
-  let d21=dot(fromA,edgeAC);
-  let inverseDenominator=1.0/max(1e-12,d00*d11-d01*d01);
-  var barycentric=vec3f(
-    1.0-(d11*d20-d01*d21)*inverseDenominator
-      -(d00*d21-d01*d20)*inverseDenominator,
-    (d11*d20-d01*d21)*inverseDenominator,
-    (d00*d21-d01*d20)*inverseDenominator
+  let intervalBlend=1.0-smoothstep(radius*0.72,radius,proximityDistance);
+  let parentFormFactor=clippedTriangleFormFactor(
+    a-origin,b-origin,c-origin,normal
   );
-  barycentric=max(barycentric,vec3f(0));
-  barycentric/=max(1e-8,barycentric.x+barycentric.y+barycentric.z);
-  let closest=triangle.a.xyz*barycentric.x
-    +triangle.b.xyz*barycentric.y+triangle.c.xyz*barycentric.z;
-  let toLight=closest-origin;
-  let lightDistance=length(toLight);
-  if(lightDistance>0.012){
-    let blocker=traceShortRangeWatertight(
-      origin,toLight/lightDistance,max(1e-5,lightDistance-0.008)
-    );
-    if(blocker.t<lightDistance-0.01){return vec3f(0);}
+  if(parentFormFactor<=1e-8){return vec3f(0);}
+  let centroid=(a+b+c)/3.0;
+  let sourceExtent=max(length(b-a),max(length(c-b),length(a-c)));
+  // Match the primary/reference implementation: facets contained by the
+  // local interval use one stable world-space visibility sample, while broad
+  // polygons retain the 8x8 partial-coverage integration below.
+  if(sourceExtent<=radius*2.5){
+    let visibility=emissiveVisibility(origin,centroid,sourceExtent);
+    return triangle.emissive.xyz*(parentFormFactor*intervalBlend*visibility);
   }
-  let proximity=1.0-smoothstep(radius*0.72,radius,proximityDistance);
-  return triangle.emissive.xyz*(formFactor*proximity);
+  let samples=array<vec3f,7>(
+    mix(a,centroid,0.06),mix(b,centroid,0.06),mix(c,centroid,0.06),
+    (a+b)*0.5,(b+c)*0.5,(c+a)*0.5,centroid
+  );
+  var visibleSamples=0.0;
+  for(var sampleIndex=0u;sampleIndex<7u;sampleIndex++){
+    visibleSamples+=emissiveVisibility(
+      origin,samples[sampleIndex],sourceExtent
+    );
+  }
+  if(visibleSamples>=6.5){
+    return triangle.emissive.xyz*(parentFormFactor*intervalBlend);
+  }
+  if(visibleSamples<=0.5){return vec3f(0);}
+  let edgeB=(triangle.b.xyz-triangle.a.xyz)*0.125;
+  let edgeC=(triangle.c.xyz-triangle.a.xyz)*0.125;
+  var result=vec3f(0);
+  for(var i=0u;i<8u;i++){
+    for(var j=0u;j<8u-i;j++){
+      let p00=triangle.a.xyz+edgeB*f32(i)+edgeC*f32(j);
+      let p10=p00+edgeB;
+      let p01=p00+edgeC;
+      result+=emissivePatchIrradiance(
+        origin,normal,p00,p10,p01,triangle.emissive.xyz
+      );
+      if(i+j+2u<=8u){
+        let p11=p10+edgeC;
+        result+=emissivePatchIrradiance(
+          origin,normal,p10,p11,p01,triangle.emissive.xyz
+        );
+      }
+    }
+  }
+  return result*intervalBlend;
 }
 fn nearEmissiveIrradiance(
   origin:vec3f,normal:vec3f,radius:f32
@@ -2458,32 +2558,9 @@ fn nearEmissiveIrradiance(
   return result;
 }
 
-fn needsLocalInterval(
-  pixel:vec2i,world:vec3f,normal:vec3f,backFacingSurface:bool
-)->bool{
-  if(backFacingSurface){return true;}
-  let dimensions=vec2i(textureDimensions(worldTex));
-  let offsets=array<vec2i,8>(
-    vec2i(-4,0),vec2i(4,0),vec2i(0,-4),vec2i(0,4),
-    vec2i(-4,-4),vec2i(4,-4),vec2i(-4,4),vec2i(4,4)
-  );
-  for(var index=0u;index<8u;index++){
-    let samplePixel=pixel+offsets[index];
-    if(any(samplePixel<vec2i(0))||any(samplePixel>=dimensions)){return true;}
-    let neighbor=textureLoad(worldTex,samplePixel,0);
-    if(neighbor.w<0.5){return true;}
-    let neighborNormal=gbufferNormal(samplePixel);
-    if(dot(normal,neighborNormal)<0.97){return true;}
-    if(abs(dot(neighbor.xyz-world,normal))>frame.envBaseSpacing.w*0.075){
-      return true;
-    }
-  }
-  return false;
-}
-
 fn cMinusOneIrradiance(
-  pixel:vec2i,world:vec3f,normal:vec3f,baseIrradiance:vec3f,
-  backFacingSurface:bool
+  world:vec3f,normal:vec3f,baseIrradiance:vec3f,
+  closedBackFace:bool
 )->vec3f{
   // Section 7.1 defines C(-1) as the per-pixel interval from the surface to
   // t_-1 (normally delta_s0), followed by the directional c0 interval.  Do
@@ -2493,21 +2570,15 @@ fn cMinusOneIrradiance(
   // black/white wedges reported in Cornell, and open rooms skipped C(-1)
   // altogether.  A miss now continues into the matching world-space c0 cone.
   let intervalEnd=frame.envBaseSpacing.w;
-  // Thin-wall visibility guard for sparse trilinear interpolation.  It spans
-  // the local c0/c1 neighborhood but only replaces the individual cone whose
-  // direction has a verified first hit.  The fixed multiplier is universal;
-  // it is neither a Cornell parameter nor selected from scene identity.
   let origin=world+normal*max(0.006,intervalEnd*0.012);
   let nearEmission=nearEmissiveIrradiance(origin,normal,intervalEnd);
-  // C(-1) is only different from the already convolved c0 result near a
-  // sub-cell depth/normal discontinuity. A conservative G-buffer footprint
-  // skips expensive short BVH rays on smooth planar regions; this is the
-  // screen-space locality optimization described for the paper's extension.
-  if(!needsLocalInterval(pixel,world,normal,backFacingSurface)){
-    return baseIrradiance+nearEmission;
-  }
+  // Run the same directional estimator at every pixel. In particular, do
+  // not key C(-1) activation to neighboring screen pixels: that would make a
+  // receiver change estimators as silhouettes move through the G-buffer.
+  // Closed-volume interiors use their scene's geometric diagonal rather than
+  // an empirical interval multiplier. Open/two-sided surfaces are unaffected.
   let visibilityGuardEnd=select(
-    intervalEnd,intervalEnd*15.0,backFacingSurface
+    intervalEnd,max(intervalEnd,frame.sceneBounds.w*1.001),closedBackFace
   );
   var mergedResult=vec3f(0);
   for(var directionIndexValue=0u;directionIndexValue<32u;directionIndexValue++){
@@ -2546,7 +2617,7 @@ fn cMinusOneIrradiance(
   let normal=gbufferNormal(pixel);
   let sample=sampleIrradiance(world.xyz,normal);
   let resolvedIrradiance=cMinusOneIrradiance(
-    pixel,world.xyz,normal,sample.xyz,fract(world.w)>0.25
+    world.xyz,normal,sample.xyz,fract(world.w)>0.125
   );
   let indirect=albedo*resolvedIrradiance*frame.controls.x;
   let L=normalize(-frame.sunDirTime.xyz);

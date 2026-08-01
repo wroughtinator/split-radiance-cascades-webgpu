@@ -13,6 +13,9 @@ const output = resolve(options.get("--output") || "tmp/webgpu-audit.png");
 const timeout = Number(options.get("--timeout") || 120_000);
 const chromePath = options.get("--chrome") || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const port = Number(options.get("--port") || (9400 + Math.floor(Math.random() * 400)));
+const width = Math.max(640, Number(options.get("--width") || 1280));
+const height = Math.max(480, Number(options.get("--height") || 720));
+const debugView = options.has("--debug-view") ? Number(options.get("--debug-view")) : null;
 const profile = resolve(options.get("--profile") || `tmp/chrome-webgpu-${port}`);
 await mkdir(profile, { recursive: true });
 await mkdir(dirname(output), { recursive: true });
@@ -25,7 +28,7 @@ const chrome = spawn(chromePath, [
   "--use-angle=d3d11",
   `--remote-debugging-port=${port}`,
   `--user-data-dir=${profile}`,
-  "--window-size=1280,720",
+  `--window-size=${width},${height}`,
   "--hide-scrollbars",
   "about:blank",
 ], { windowsHide: true, stdio: "ignore" });
@@ -98,6 +101,8 @@ await command("Page.setLifecycleEventsEnabled", { enabled: true });
 
 const wantsReport = new URL(url).searchParams.has("autotest");
 let state;
+let debugViewApplied = debugView === null;
+let debugViewAppliedFrame = 0;
 while (Date.now() - started < timeout) {
   state = await evaluate(`(() => ({
     webgpu: document.documentElement.dataset.webgpu || null,
@@ -108,7 +113,20 @@ while (Date.now() - started < timeout) {
     status: document.getElementById('status-detail')?.textContent || null
   }))()`);
   if (state.webgpu === "failed") throw new Error(state.status || "WebGPU initialization failed");
-  if ((wantsReport && state.reportReady) || (!wantsReport && state.running && state.frameIndex >= 240)) break;
+  // Pose/test query handlers run on a short startup timer and may select their
+  // own diagnostic mode. Apply an explicit harness override only after that
+  // initialization window, then render enough frames before capture.
+  if (!debugViewApplied && state.running && state.frameIndex >= 120) {
+    await evaluate(`(() => {
+      globalThis.__splitRC.debugMode = ${JSON.stringify(debugView)};
+      const select = document.getElementById('debug-view');
+      if (select) select.value = ${JSON.stringify(String(debugView))};
+    })()`);
+    debugViewApplied = true;
+    debugViewAppliedFrame = state.frameIndex;
+  }
+  const staticFrameReady = state.frameIndex >= Math.max(240, debugViewAppliedFrame + 60);
+  if ((wantsReport && state.reportReady) || (!wantsReport && state.running && debugViewApplied && staticFrameReady)) break;
   await wait(250);
 }
 if (!state || (wantsReport ? !state.reportReady : state.frameIndex < 240)) {
@@ -124,6 +142,8 @@ const audit = await evaluate(`(() => ({
   } : null,
   pose: globalThis.__splitRC?.cameraPose?.(globalThis.__splitRC?.testTimeOverride || 0) || null,
   metrics: globalThis.__splitRC?.metricsSnapshot?.() || null,
+  debugMode: globalThis.__splitRC?.debugMode ?? null,
+  emissiveTriangles: globalThis.__splitRC?.scene?.geometry?.emissiveGeometry?.emissiveTriangleCount ?? null,
   report: globalThis.__RC_TEST_REPORT__ || null,
   webgpu: document.documentElement.dataset.webgpu || null,
   auditState: document.documentElement.dataset.audit || null

@@ -1,11 +1,11 @@
 import {
   adaptiveBudgetScale, add3, clamp, cross3, dot3, mat4LookAt, mat4Multiply, mat4Ortho,
   mat4Perspective, mul3, normalize3, sub3,
-} from "./math.js?v=2026-07-31-near-emitter1";
-import { createScene, SCENE_INFO } from "./scenes.js?v=2026-07-31-near-emitter1";
+} from "./math.js?v=2026-07-31-universal18";
+import { createScene, SCENE_INFO } from "./scenes.js?v=2026-07-31-universal18";
 import {
   computeShader, finalShader, presentShader, rasterShader, shaderConstants as K,
-} from "./shaders.js?v=2026-07-31-near-emitter1";
+} from "./shaders.js?v=2026-07-31-universal18";
 
 const SUN_CASCADE_COUNT = 4;
 
@@ -506,7 +506,7 @@ class SplitRadianceCascades {
             captureInterval: 6,
           });
         }
-        if ([0, 1, 10, 11].includes(index)) {
+        if ([0, 1, 10, 11, 12].includes(index)) {
           result.pathTracedReference = await this.runPathTracedReferenceAudit({
             warmup: 192,
           });
@@ -534,6 +534,16 @@ class SplitRadianceCascades {
       // Sixty scene frames guarantee at least one 45-frame timestamp-query
       // cycle after each scene resets its metric history.
       setTimeout(() => this.runValidation({ framesPerScene: 60 }), 200);
+    } else if (new URLSearchParams(location.search).has("scene")) {
+      setTimeout(async () => {
+        const requested = Number(new URLSearchParams(location.search).get("scene"));
+        const index = clamp(
+          Number.isFinite(requested) ? Math.floor(requested) : 1,
+          0,
+          SCENE_INFO.length - 1,
+        );
+        await this.loadScene(index);
+      }, 200);
     } else if (new URLSearchParams(location.search).get("pose") === "inside-box") {
       setTimeout(async () => {
         await this.loadScene(0);
@@ -541,6 +551,20 @@ class SplitRadianceCascades {
         this.animateLights = false;
         this.setCameraPose([-2.2, 1.25, 0.5], [-1.3, 1.72, -0.42]);
         this.resetProbeHistory();
+      }, 200);
+    } else if (new URLSearchParams(location.search).get("pose") === "visibility-lab") {
+      setTimeout(async () => {
+        await this.loadScene(12);
+        this.animateCamera = false;
+        this.animateLights = false;
+        this.temporalStability = true;
+        this.debugMode = 1;
+        this.testTimeOverride = 0.7;
+        this.setCameraPose([7.8, 5.0, 10.5], [0, 1.4, -1.8]);
+        this.resetProbeHistory();
+        if ($("view-mode")) $("view-mode").value = "1";
+        if ($("animate-camera")) $("animate-camera").checked = false;
+        if ($("animate-lights")) $("animate-lights").checked = false;
       }, 200);
     } else if (CORNELL_ARTIFACT_POSES[new URLSearchParams(location.search).get("pose")]) {
       setTimeout(async () => {
@@ -910,7 +934,7 @@ class SplitRadianceCascades {
 
   createPersistentResources() {
     const d = this.device;
-    this.frameBuffer = createBuffer(d, "frame uniforms", 256, GPU.UNIFORM | GPU.COPY_DST);
+    this.frameBuffer = createBuffer(d, "frame uniforms", 272, GPU.UNIFORM | GPU.COPY_DST);
     this.hashBuffer = createBuffer(d, "double-buffered sparse probe hash", K.totalHashSlots * K.hashFrames * 8, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
     this.stateBuffer = createBuffer(d, "probe counters, ray prefixes, and diagnostics", K.stateWords * 4, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
     this.probeMetaBuffer = createBuffer(d, "sparse probe metadata", K.totalProbeMeta * 16, GPU.STORAGE | GPU.COPY_DST);
@@ -1377,7 +1401,7 @@ class SplitRadianceCascades {
       }
     }
 
-    const u = new Float32Array(64);
+    const u = new Float32Array(68);
     u.set(viewProjection, 0);
     u.set(sunVP, 16);
     const featureFlags = (this.temporalStability ? 8 : 0)
@@ -1404,6 +1428,14 @@ class SplitRadianceCascades {
       : 0;
     const exposure = this.scene.exposure ?? 1.0;
     u.set([this.indirectStrength, exposure, this.debugMode, frameParity + historyBlend], 60);
+    const boundsMin = this.scene.geometry.boundsMin;
+    const boundsMax = this.scene.geometry.boundsMax;
+    const sceneDiagonal = Math.hypot(
+      boundsMax[0] - boundsMin[0],
+      boundsMax[1] - boundsMin[1],
+      boundsMax[2] - boundsMin[2],
+    );
+    u.set([...boundsMin, Math.max(this.scene.baseSpacing, sceneDiagonal)], 64);
     this.device.queue.writeBuffer(this.frameBuffer, 0, u);
   }
 
@@ -3788,7 +3820,7 @@ class SplitRadianceCascades {
   async runValidation({ framesPerScene = 72 } = {}) {
     const card = $("audit-card");
     card.hidden = false;
-    $("audit-report").textContent = "Beginning deterministic 12-scene audit…";
+    $("audit-report").textContent = `Beginning deterministic ${SCENE_INFO.length}-scene audit…`;
     const previousCamera = this.animateCamera;
     const previousLights = this.animateLights;
     this.animateCamera = true;
@@ -3840,7 +3872,7 @@ class SplitRadianceCascades {
           captureInterval: 6,
         });
       }
-      if ([0, 1, 10, 11].includes(i)) {
+      if ([0, 1, 10, 11, 12].includes(i)) {
         $("audit-title").textContent = `Comparing ${SCENE_INFO[i].short} with a path-traced reference`;
         result.pathTracedReference = await this.runPathTracedReferenceAudit({
           width: 64,

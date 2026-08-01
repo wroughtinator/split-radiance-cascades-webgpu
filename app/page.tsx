@@ -4,7 +4,7 @@ import { RadianceCascadesLab } from "./radiance-cascades-lab";
 export const metadata: Metadata = {
   title: "Split Radiance Cascades — WebGPU GI Lab",
   description:
-    "A production WebGPU implementation of Split Radiance Cascades with twelve real-time validation scenes.",
+    "A production WebGPU implementation of Split Radiance Cascades with thirteen real-time validation scenes.",
 };
 
 export default function Home() {
