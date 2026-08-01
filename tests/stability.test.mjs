@@ -109,6 +109,7 @@ test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
   assert.doesNotMatch(computeShader, /primaryNeedsLocalInterval|intervalEnd\*15\.0/);
   assert.doesNotMatch(finalShader, /let continuation=sampleConeDirection\(world,normal,parentDirection\)/);
   assert.match(finalShader, /ambientVisible\/ambientWeight/);
+  assert.match(finalShader, /if\(!enclosureGuard&&!closedBackFace\)/);
   assert.match(finalShader, /return baseIrradiance\*visibilityCorrection\+nearEmission/);
   assert.match(finalShader, /fn clippedTriangleFormFactor/);
   assert.match(finalShader, /var<storage,read> emissiveBvhNodes/);

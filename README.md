@@ -38,9 +38,9 @@ The equation-by-equation audit is in
 The shipped renderer has one diffuse Split RC configuration. The paper's
 optional multibounce and rough-specular experiments are not compiled into the
 production shader. The ambient-form `C(-1)` proposed in Section 7.1 is included
-as an always-on production extension. It uses deterministic world-space short
-visibility for open surfaces and a full scene-bounds watertight guard for
-enclosed volumes; it has no quality-changing UI toggle.
+as an always-on production extension for topology-classified enclosed volumes
+and closed-mesh back faces. Open receivers retain the smooth paper cascade plus
+exact analytic near-emitter energy; it has no quality-changing UI toggle.
 
 Stable mode advances a deterministic global low-discrepancy temporal rotation,
 uses exact canonical screen-sample ranks, orders every allocation decision by
@@ -75,8 +75,8 @@ These two invariants prevent a long camera translation from accumulating stale
 block-shaped light and ensure that rebuilding history at a fixed pose produces
 the same sparse population.
 
-For geometry below c0 spacing, an exact BVH `C(-1)` resolve evaluates a
-rotation-balanced 14-point ambient quadrature. Blocker distance is filtered
+For enclosed geometry below c0 spacing, an exact BVH `C(-1)` resolve evaluates
+a rotation-balanced 14-point ambient quadrature. Blocker distance is filtered
 across the finite c0 cone footprint, preserving a smooth scalar correction
 without sparse directional color fans. Enclosed surfaces extend those
 watertight rays through the complete scene bounds, with fixed world-space and

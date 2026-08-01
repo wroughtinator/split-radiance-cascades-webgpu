@@ -1721,6 +1721,7 @@ fn resolvedPrimaryIrradiance(
   var ambientVisible=0.0;
   let enclosureGuard=frame.pointColorIntensity.w<=0.0001
     &&!featureEnabled(64u)&&atomicLoad(&state[8])==0u;
+  if(!enclosureGuard&&!closedBackFace){return base+nearEmission;}
   // The ambient-form optimization avoids Section 7.1's expensive directional
   // gather. One deterministic visibility sample per already-filtered c0 cone
   // is sufficient because the result is a single hemispherical ratio, not 32
@@ -2860,6 +2861,13 @@ fn cMinusOneIrradiance(
   var ambientVisible=0.0;
   let enclosureGuard=frame.pointColorIntensity.w<=0.0001
     &&!finalFeatureEnabled(64u)&&atomicLoad(&frameState[8])==0u;
+  // Open receivers retain the smooth paper cascade field. The exact ambient
+  // visibility resolve is reserved for topology-classified enclosures and
+  // explicitly closed-mesh back faces, where it prevents real environment
+  // leakage rather than adding a sparse high-frequency AO term.
+  if(!enclosureGuard&&!closedBackFace){
+    return baseIrradiance+nearEmission;
+  }
   let visibilityGuardEnd=select(
     intervalEnd,max(intervalEnd,frame.sceneBounds.w*1.001),
     enclosureGuard||closedBackFace
