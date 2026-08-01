@@ -29,10 +29,42 @@ test("the packed paper-scene Sponza payload has a valid production BVH", async (
     packed.byteOffset + triangleOffset,
     header[4],
   );
+  const triangleWords = new Uint32Array(
+    packed.buffer,
+    packed.byteOffset + triangleOffset,
+    header[4],
+  );
+  const decodeOct = (word) => {
+    const x0 = (word & 0xffff) / 65535 * 2 - 1;
+    const y0 = (word >>> 16) / 65535 * 2 - 1;
+    let x = x0;
+    let y = y0;
+    let z = 1 - Math.abs(x) - Math.abs(y);
+    if (z < 0) {
+      x = (1 - Math.abs(y0)) * Math.sign(x0 || 1);
+      y = (1 - Math.abs(x0)) * Math.sign(y0 || 1);
+    }
+    const length = Math.hypot(x, y, z);
+    return [x / length, y / length, z / length];
+  };
   let emissiveTriangles = 0;
   for (let triangle = 0; triangle < header[7]; triangle++) {
     const base = triangle * 32;
-    if (triangles[base + 16] > 2) emissiveTriangles++;
+    if (triangles[base + 16] <= 2) continue;
+    emissiveTriangles++;
+    const a = triangles.slice(base, base + 3);
+    const b = triangles.slice(base + 4, base + 7);
+    const c = triangles.slice(base + 8, base + 11);
+    const ab = b.map((value, axis) => value - a[axis]);
+    const ac = c.map((value, axis) => value - a[axis]);
+    const face = [
+      ab[1] * ac[2] - ab[2] * ac[1],
+      ab[2] * ac[0] - ab[0] * ac[2],
+      ab[0] * ac[1] - ab[1] * ac[0],
+    ];
+    const authored = decodeOct(triangleWords[base + 28]);
+    const agreement = face.reduce((sum, value, axis) => sum + value * authored[axis], 0);
+    assert.ok(agreement > 0, "emissive BVH winding must agree with its authored radiometric normal");
   }
   assert.equal(emissiveTriangles, 2, "paper Sponza should contain the red area-emitter quad");
 });

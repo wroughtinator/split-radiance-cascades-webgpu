@@ -173,6 +173,13 @@ const audit = await evaluate(`(() => ({
   } : null,
   pose: globalThis.__splitRC?.cameraPose?.(globalThis.__splitRC?.testTimeOverride || 0) || null,
   metrics: globalThis.__splitRC?.metricsSnapshot?.() || null,
+  ui: {
+    sceneOptions: document.querySelectorAll('#scene-select option').length,
+    shortcutButtons: document.querySelectorAll('#scene-strip button').length,
+    engineScripts: document.querySelectorAll('script[src*="/rc/engine.js"]').length,
+    loaderGeneration: globalThis.__splitRCLoaderGeneration ?? null,
+    rendererGeneration: globalThis.__splitRC?.loaderGeneration ?? null
+  },
   passTimes: globalThis.__splitRC?.passTimes
     ? { ...globalThis.__splitRC.passTimes }
     : null,

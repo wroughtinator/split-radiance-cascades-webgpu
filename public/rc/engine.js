@@ -1,13 +1,13 @@
 import {
   adaptiveBudgetScale, add3, clamp, cross3, dot3, mat4LookAt, mat4Multiply, mat4Ortho,
   mat4Perspective, mul3, normalize3, sub3,
-} from "./math.js?v=2026-07-31-daylight-door8";
+} from "./math.js?v=2026-07-31-daylight-door10";
 import {
   createDynamicSceneGeometry, createScene, dynamicSceneKey, SCENE_INFO,
-} from "./scenes.js?v=2026-07-31-daylight-door8";
+} from "./scenes.js?v=2026-07-31-daylight-door10";
 import {
   computeShader, finalShader, presentShader, rasterShader, shaderConstants as K,
-} from "./shaders.js?v=2026-07-31-daylight-door8";
+} from "./shaders.js?v=2026-07-31-daylight-door10";
 
 const SUN_CASCADE_COUNT = 4;
 
@@ -267,10 +267,15 @@ class SplitRadianceCascades {
       throw new Error("WebGPU is not available in this browser. Use current Chrome or Edge with hardware acceleration enabled.");
     }
     this.adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+    if (this.destroyed) return false;
     if (!this.adapter) throw new Error("No WebGPU adapter was returned by the browser.");
     const requiredFeatures = [];
     if (this.adapter.features.has("timestamp-query")) requiredFeatures.push("timestamp-query");
     this.device = await this.adapter.requestDevice({ requiredFeatures });
+    if (this.destroyed) {
+      this.device.destroy();
+      return false;
+    }
     this.device.addEventListener("uncapturederror", (event) => {
       const message = String(event.error?.message || event.error);
       console.error(`[Split RC] WebGPU validation error: ${message}`);
@@ -288,10 +293,14 @@ class SplitRadianceCascades {
     this.context.configure({ device: this.device, format: this.format, alphaMode: "opaque" });
     this.timestampSupported = this.device.features.has("timestamp-query");
     await this.createPipelines();
+    if (this.destroyed) return false;
     await this.createMaterialAtlas();
+    if (this.destroyed) return false;
     this.createPersistentResources();
+    if (this.destroyed) return false;
     this.installUI();
     await this.loadScene(1);
+    if (this.destroyed) return false;
     this.running = true;
     this.lastTime = performance.now();
     requestAnimationFrame((t) => this.frame(t));
@@ -547,6 +556,12 @@ class SplitRadianceCascades {
         await this.loadScene(index);
         const requestedTime = Number(new URLSearchParams(location.search).get("time"));
         if (Number.isFinite(requestedTime)) this.testTimeOverride = requestedTime;
+        const requestedMode = Number(new URLSearchParams(location.search).get("mode"));
+        if (Number.isFinite(requestedMode)) {
+          this.debugMode = clamp(Math.floor(requestedMode), 0, 6);
+          const debugView = document.getElementById("debug-view");
+          if (debugView) debugView.value = String(this.debugMode);
+        }
       }, 200);
     } else if (new URLSearchParams(location.search).get("pose") === "inside-box") {
       setTimeout(async () => {
@@ -586,6 +601,7 @@ class SplitRadianceCascades {
         if ($("animate-lights")) $("animate-lights").checked = false;
       }, 200);
     }
+    return true;
   }
 
   adapterInfo() {
@@ -819,7 +835,7 @@ class SplitRadianceCascades {
   }
 
   async createMaterialAtlas() {
-    const response = await fetch("/models/sponza-atlas.webp");
+    const response = await fetch("/models/sponza-atlas.webp?v=2026-07-31-daylight-door10");
     if (!response.ok) throw new Error(`Sponza material atlas request failed (${response.status}).`);
     const bitmap = await createImageBitmap(await response.blob(), { colorSpaceConversion: "default" });
     const layerSize = 811;
@@ -1991,6 +2007,10 @@ class SplitRadianceCascades {
   installUI() {
     const select = $("scene-select");
     const strip = $("scene-strip");
+    // Startup is generation-safe, but keep DOM installation idempotent too so
+    // HMR/manual restarts can never duplicate options or shortcut buttons.
+    select.replaceChildren();
+    strip.replaceChildren();
     $("quality").value = this.qualityName;
     SCENE_INFO.forEach((scene, index) => {
       const option = document.createElement("option");
@@ -4011,6 +4031,7 @@ class SplitRadianceCascades {
   }
 
   destroy() {
+    if (this.destroyed) return;
     this.destroyed = true;
     this.running = false;
     for (const fn of this.cleanup) fn();
@@ -4025,19 +4046,37 @@ class SplitRadianceCascades {
       this.pointShadowTexture,
       this.materialAtlas,
     ]) resource?.destroy?.();
+    this.cleanup.length = 0;
+    if (globalThis.__splitRC === this) globalThis.__splitRC = undefined;
   }
 }
 
-let started = false;
-export async function startRadianceCascades() {
-  if (started) return globalThis.__splitRC;
-  started = true;
+export async function startRadianceCascades(loaderGeneration = null) {
+  if (
+    loaderGeneration != null
+    && globalThis.__splitRCLoaderGeneration !== loaderGeneration
+  ) return null;
+  const existing = globalThis.__splitRC;
+  if (existing && !existing.destroyed) {
+    if (loaderGeneration == null || existing.loaderGeneration === loaderGeneration) {
+      return existing;
+    }
+    existing.destroy();
+  }
   const canvas = $("viewport");
   const renderer = new SplitRadianceCascades(canvas);
+  renderer.loaderGeneration = loaderGeneration;
   globalThis.__splitRC = renderer;
   try {
-    await renderer.initialize();
+    const initialized = await renderer.initialize();
+    const stale = loaderGeneration != null
+      && globalThis.__splitRCLoaderGeneration !== loaderGeneration;
+    if (!initialized || stale || globalThis.__splitRC !== renderer) {
+      renderer.destroy();
+      return globalThis.__splitRC || null;
+    }
   } catch (error) {
+    if (renderer.destroyed) return globalThis.__splitRC || null;
     setStatus("WebGPU initialization failed", error.message || String(error), true);
     document.documentElement.dataset.webgpu = "failed";
     console.error("[Split RC]", error);
@@ -4046,5 +4085,6 @@ export async function startRadianceCascades() {
 }
 
 if (typeof document !== "undefined") {
-  startRadianceCascades();
+  globalThis.__startSplitRC = startRadianceCascades;
+  if (globalThis.__splitRCAutoStart !== false) startRadianceCascades();
 }

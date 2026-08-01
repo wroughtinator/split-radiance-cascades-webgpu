@@ -192,7 +192,10 @@ struct Triangle {
   a: vec4f, b: vec4f, c: vec4f, albedo: vec4f, emissive: vec4f,
   uvAB: vec4f, uvCMaterial: vec4f, normalOct: vec4u,
 };
-struct Hit { t: f32, normal: vec3f, albedo: vec3f, emissive: vec3f };
+struct Hit {
+  t: f32, normal: vec3f, albedo: vec3f, emissive: vec3f,
+  triangleIndex: u32,
+};
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(0) @binding(1) var worldTex: texture_2d<f32>;
@@ -496,7 +499,9 @@ fn traceScene(origin: vec3f, directionIn: vec3f, maxDistance: f32) -> Hit {
   let direction=normalize(directionIn);
   let inverseDirection=select(vec3f(-1e20),vec3f(1e20),direction>=vec3f(0))
     /max(vec3f(1),abs(direction)*1e20);
-  var result=Hit(maxDistance,vec3f(0,1,0),vec3f(0),vec3f(0));
+  var result=Hit(
+    maxDistance,vec3f(0,1,0),vec3f(0),vec3f(0),0xffffffffu
+  );
   var stack: array<u32,64>;
   var stackSize=1u;
   stack[0]=0u;
@@ -530,7 +535,7 @@ fn traceScene(origin: vec3f, directionIn: vec3f, maxDistance: f32) -> Hit {
           )<0.0;
           result=Hit(
             intersection.x,n,tri.albedo.xyz*surface.rgb,
-            select(vec3f(0),tri.emissive.xyz,sourceFrontFace)
+            select(vec3f(0),tri.emissive.xyz,sourceFrontFace),first+j
           );
         }
       }
@@ -1373,12 +1378,34 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
   var radiance=select(
     frame.envBaseSpacing.xyz,directAtHit(origin+direction*hit.t,hit),didHit
   );
-  // Emission inside the first probe spacing is evaluated by the stable exact
-  // polygon estimator at the receiver. Remove only that emission term from
-  // the stochastic c0 sample so tessellated area lights are not counted twice;
-  // reflected sun/point radiance at the same hit remains in Split RC.
-  if(didHit&&hit.t<frame.envBaseSpacing.w){
-    radiance=max(vec3f(0),radiance-hit.emissive.xyz);
+  // The analytic C(-1) source estimator owns a smooth, receiver-to-triangle
+  // fraction of every nearby emitter -- not merely ray hits whose travel
+  // distance is shorter than the probe spacing. A receiver can be close to a
+  // large polygon while a sampled direction reaches its far edge much later.
+  // Testing hit.t therefore double-counted most of that polygon and produced
+  // the bright red fringe beside Sponza's floor emitter. Probe deposits need
+  // a source footprint dilated by the four-sample tangent-plane interpolation
+  // support: the maximum receiver-to-contributor span is sqrt(2) cells. A 1.5
+  // cell bound keeps the receiver's exact term out of every probe it samples,
+  // independent of scene scale or emitter dimensions. Reflected sun/point
+  // light remains in the stochastic transport field.
+  if(didHit&&hit.triangleIndex!=0xffffffffu
+    &&max(hit.emissive.x,max(hit.emissive.y,hit.emissive.z))>0.0){
+    let sourceTriangle=triangles[hit.triangleIndex];
+    let sourceMinimum=min(
+      sourceTriangle.a.xyz,min(sourceTriangle.b.xyz,sourceTriangle.c.xyz)
+    );
+    let sourceMaximum=max(
+      sourceTriangle.a.xyz,max(sourceTriangle.b.xyz,sourceTriangle.c.xyz)
+    );
+    let sourceProximity=sqrt(primaryPointAabbDistanceSquared(
+      surfaceOrigin,sourceMinimum,sourceMaximum
+    ));
+    let nearSourceRadius=frame.envBaseSpacing.w*1.5;
+    let sourceOwnership=1.0-smoothstep(
+      nearSourceRadius*0.72,nearSourceRadius,sourceProximity
+    );
+    radiance=max(vec3f(0),radiance-hit.emissive.xyz*sourceOwnership);
   }
   atomicAdd(&state[4],1u);
   if(didHit){atomicAdd(&state[5],1u);}

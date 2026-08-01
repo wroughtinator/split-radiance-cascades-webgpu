@@ -4,14 +4,33 @@ import { useEffect } from "react";
 
 export function RadianceCascadesLab() {
   useEffect(() => {
+    const generation = (window.__splitRCLoaderGeneration ?? 0) + 1;
+    window.__splitRCLoaderGeneration = generation;
+    // Module scripts are evaluated once per URL. React development remounts
+    // can therefore remove the first tag after evaluation and append a second
+    // tag that does not re-run the module body. Let every tag's load event call
+    // the exported global starter for its own still-current generation.
+    window.__splitRCAutoStart = false;
+    let active = true;
     const script = document.createElement("script");
     script.type = "module";
-      script.src = "/rc/engine.js?v=2026-07-31-daylight-door8";
+    script.src = "/rc/engine.js?v=2026-07-31-daylight-door10";
     script.dataset.splitRcLoader = "true";
+    script.addEventListener("load", () => {
+      if (active && window.__splitRCLoaderGeneration === generation) {
+        void window.__startSplitRC?.(generation);
+      }
+    }, { once: true });
     document.head.append(script);
     return () => {
+      active = false;
       script.remove();
-      window.__splitRC?.destroy?.();
+      if (window.__splitRCLoaderGeneration === generation) {
+        window.__splitRCLoaderGeneration = generation + 1;
+        if (window.__splitRC?.loaderGeneration === generation) {
+          window.__splitRC.destroy?.();
+        }
+      }
     };
   }, []);
 
@@ -137,6 +156,9 @@ export function RadianceCascadesLab() {
 
 declare global {
   interface Window {
-    __splitRC?: { destroy?: () => void };
+    __splitRC?: { destroy?: () => void; loaderGeneration?: number | null };
+    __splitRCAutoStart?: boolean;
+    __splitRCLoaderGeneration?: number;
+    __startSplitRC?: (generation?: number | null) => Promise<unknown>;
   }
 }

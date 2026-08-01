@@ -57,6 +57,9 @@ test("production audit gates camera motion, moving lights, floor loops, and sun 
   assert.match(engine, /diagnosticOverflows === 0/);
   assert.match(engine, /per-capture sparse diagnostics/);
   assert.match(engine, /const fixedLightHistory = 0\.92/);
+  assert.match(engine, /select\.replaceChildren\(\)/);
+  assert.match(engine, /globalThis\.__splitRCLoaderGeneration !== loaderGeneration/);
+  assert.match(engine, /if \(this\.destroyed\) return false/);
   assert.match(engine, /this\.animateLights[\s\S]*\? 0\.965/);
   assert.doesNotMatch(engine, /multibounce|roughSpecular|cMinusOne/);
   assert.match(engine, /animate-lights[\s\S]*this\.resetProbeHistory\(\)/);
@@ -93,6 +96,14 @@ test("path-reference gate classifies dark spots and bright leaks", () => {
   assert.match(engine, /width = 64, height = 36, samples = 512/);
   assert.match(engine, /warmup: 192/);
   assert.match(engine, /renderReferenceComparison/);
+  // Analytic C(-1) and stochastic c0 must partition the same receiver-to-
+  // source interval. A ray-distance cutoff double-counts broad nearby area
+  // lights even though it appears to work for tiny emitters.
+  assert.match(shaders, /triangleIndex: u32/);
+  assert.match(shaders, /let sourceProximity=sqrt\(primaryPointAabbDistanceSquared/);
+  assert.match(shaders, /let nearSourceRadius=frame\.envBaseSpacing\.w\*1\.5/);
+  assert.match(shaders, /radiance-hit\.emissive\.xyz\*sourceOwnership/);
+  assert.doesNotMatch(shaders, /hit\.t<frame\.envBaseSpacing\.w\)\{\s*radiance=max/);
 });
 
 test("sampling epochs replay deterministically without stale ray-map tags", () => {
@@ -115,7 +126,7 @@ test("presentation preserves shadow detail and height fields use smooth normals"
 });
 
 test("production module graph uses a release cache key", () => {
-  const releaseKey = "v=2026-07-31-daylight-door8";
+  const releaseKey = "v=2026-07-31-daylight-door10";
   assert.ok(app.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(standalone.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(engine.includes(`./math.js?${releaseKey}`));

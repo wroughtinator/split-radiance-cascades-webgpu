@@ -197,7 +197,11 @@ const emitterCorners = [
   [11.65, 0.12, 1.75],
   [7.10, 0.12, 1.75],
 ];
-const emitterTriangles = [[0, 1, 2], [0, 2, 3]];
+// Counter-clockwise from above: the geometric normal must agree with the
+// authored +Y normal. The previous winding produced -Y BVH normals, so the
+// raster pass displayed a bright panel while all GI/reference rays above it
+// treated the emitter as back-facing and left the lion head nearly black.
+const emitterTriangles = [[0, 2, 1], [0, 3, 2]];
 for (const indices of emitterTriangles) {
   const points = indices.map((index) => emitterCorners[index]);
   for (let corner = 0; corner < 3; corner++) {
