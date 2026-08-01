@@ -43,7 +43,7 @@ export function RadianceCascadesLab() {
               <h2 id="scene-name">Color bleed laboratory</h2>
               <p id="scene-description">Loading production renderer…</p>
             </div>
-            <span id="scene-index">01 / 12</span>
+            <span id="scene-index">01 / 13</span>
           </div>
           <div className="scene-nav">
             <button id="prev-scene" aria-label="Previous test scene">←</button>
