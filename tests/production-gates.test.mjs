@@ -13,7 +13,8 @@ test("production audit gates camera motion, moving lights, floor loops, and sun 
   assert.match(engine, /matchedPixelRatio >= 0\.35/);
   assert.match(engine, /trimmedRmseByteDelta/);
   assert.match(engine, /maximum\("p95Absolute"\) <= 0\.006/);
-  assert.match(engine, /warmup: i === 6 \? 384 : \(\[5, 11\]\.includes\(i\) \? 96 : 48\)/);
+  assert.match(engine, /warmup: 384/);
+  assert.doesNotMatch(engine, /warmup: i ===|warmup: index ===/);
   assert.match(engine, /p95ByteDeltaMax/);
   assert.match(engine, /movingLightContinuousMotion/);
   assert.match(engine, /runLongTranslationCacheAudit/);
@@ -45,6 +46,11 @@ test("production audit gates camera motion, moving lights, floor loops, and sun 
   assert.match(engine, /runSunShadowSweepAudit/);
   assert.match(engine, /classificationMismatchRatioMax/);
   assert.match(engine, /r\.shadowMapCorrectness && !r\.shadowMapCorrectness\.passed/);
+  assert.match(engine, /runEnclosureLeakAudit/);
+  assert.match(engine, /displayLeak\.maximumLuminanceByte <= 1/);
+  assert.match(engine, /displayLeak\.severePixelRatio === 0/);
+  assert.match(engine, /report\.trajectory\.p95ByteDeltaMax <= 4/);
+  assert.match(engine, /r\.enclosureLeak && !r\.enclosureLeak\.passed/);
   assert.match(engine, /classificationMismatchRatio <= 0\.06/);
   assert.match(engine, /pointFaceCoverageRequired = this\.sceneIndex === 10/);
   assert.match(engine, /point\.perFace\.every\(\(face\) => face\.samples >= 4\)/);
@@ -82,8 +88,10 @@ test("path-reference gate classifies dark spots and bright leaks", () => {
   assert.match(engine, /report\.frozenBaselinePassed/);
   assert.match(engine, /const REFERENCE_BASELINES/);
   assert.match(engine, /report\.paperSceneStrictPassed/);
-  assert.match(engine, /report\.nrmse <= 0\.40/);
+  assert.match(engine, /report\.nrmse <= 0\.25/);
+  assert.match(engine, /report\.p99Absolute <= 0\.10/);
   assert.match(engine, /width = 64, height = 36, samples = 512/);
+  assert.match(engine, /warmup: 192/);
   assert.match(engine, /renderReferenceComparison/);
 });
 
@@ -107,11 +115,19 @@ test("presentation preserves shadow detail and height fields use smooth normals"
 });
 
 test("production module graph uses a release cache key", () => {
-  const releaseKey = "v=2026-07-31-cache2";
+  const releaseKey = "v=2026-07-31-universal16";
   assert.ok(app.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(standalone.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(engine.includes(`./math.js?${releaseKey}`));
   assert.ok(engine.includes(`./scenes.js?${releaseKey}`));
   assert.ok(engine.includes(`./shaders.js?${releaseKey}`));
   assert.ok(scenes.includes(`./math.js?${releaseKey}`));
+});
+
+test("world-space GI inputs retain full precision within the WebGPU MRT budget", () => {
+  assert.match(engine, /"G-buffer full-precision world position",\s*"rgba32float"/);
+  assert.doesNotMatch(engine, /this\.emissiveTexture\s*=/);
+  assert.match(engine, /worldPixels: new Float32Array/);
+  assert.match(shaders, /fn encodeNormalOct/);
+  assert.match(shaders, /fn encodeSurfaceEmission/);
 });

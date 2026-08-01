@@ -48,10 +48,10 @@ test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
   assert.match(presentShader, /textureSampleLevel\(currentComposite,currentCompositeSampler/);
   assert.doesNotMatch(presentShader, /previousComposite|previousViewProj|temporalFS/);
   assert.equal(shaderConstants.irradianceTexels, 64);
-  assert.equal(shaderConstants.probeCaps[0], 6144);
-  assert.equal(shaderConstants.irradianceAtlasFrameHeight, 768);
-  assert.deepEqual(shaderConstants.probeOffsets, [0, 6144, 7680, 8192]);
-  assert.deepEqual(shaderConstants.dataOffsets, [0, 196608, 393216, 655360]);
+  assert.equal(shaderConstants.probeCaps[0], 16384);
+  assert.equal(shaderConstants.irradianceAtlasFrameHeight, 2048);
+  assert.deepEqual(shaderConstants.probeOffsets, [0, 16384, 20480, 21504]);
+  assert.deepEqual(shaderConstants.dataOffsets, [0, 524288, 1048576, 1572864]);
   assert.equal(
     shaderConstants.totalDirectionData,
     shaderConstants.probeCaps.reduce(
@@ -79,6 +79,29 @@ test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
   assert.match(computeShader, /for\(var corner=0u;corner<4u;corner\+\+\)/);
   assert.match(computeShader, /insertTangentSupport\(world\.xyz,normal,fine\)/);
   assert.match(computeShader, /insertTangentSupport\(world\.xyz,normal,coarse\)/);
+  assert.match(computeShader, /fn surfaceClass\(normalIn:vec3f\)->u32/);
+  assert.match(computeShader, /fn keyFromCellSurface/);
+  assert.match(computeShader, /surfaceClass\(normal\)/);
+  assert.match(computeShader, /probeCell\(info\.xyz,cascade,lod\),lod,probeSurfaceClass\(info\)/);
+  assert.match(computeShader, /let sheet=probeSurfaceClass\(info\)/);
+  assert.match(computeShader, /sampleParentDirection\(cascade,position,lod,sheet,parentDirection\)/);
+  assert.match(finalShader, /fn surfaceClass\(normalIn:vec3f\)->u32/);
+  assert.match(finalShader, /keyFromCellSurface\(cell\+bits,lod,surfaceClass\(normal\)\)/);
+  assert.match(finalShader, /fn cMinusOneIrradiance/);
+  assert.match(finalShader, /fn traceShortRange/);
+  assert.match(finalShader, /fn traceShortRangeWatertight/);
+  assert.match(finalShader, /fn shortTriangleWatertight/);
+  assert.match(finalShader, /var<storage,read> shortBvhNodes/);
+  assert.match(finalShader, /let totalSamples=16u/);
+  assert.doesNotMatch(finalShader, /&64u|featureEnabled\(64u\)/);
+  assert.doesNotMatch(computeShader, /featureEnabled\(64u\)/);
+  assert.match(finalShader, /for\(var sampleIndex=0u;sampleIndex<totalSamples;sampleIndex\+\+\)/);
+  assert.match(finalShader, /outgoingAtShortHit\([\s\S]*compartmentSun,compartmentPoint/);
+  assert.match(finalShader, /let radius=frame\.envBaseSpacing\.w\*15\.0/);
+  assert.match(finalShader, /let enclosureRadius=radius\*2\.0/);
+  assert.match(finalShader, /let origin=world\+normal\*max\(0\.006,radius\*0\.012\)/);
+  assert.doesNotMatch(finalShader, /creaseSafeOrigin/);
+  assert.doesNotMatch(finalShader, /radius=frame\.envBaseSpacing\.w\*exp2/);
   assert.match(finalShader, /total\/max\(normalWeight,1e-5\)/);
   assert.match(rasterShader, /texture_2d_array<f32>/);
   assert.match(rasterShader, /textureSampleGrad/);
@@ -103,5 +126,7 @@ test("stabilized directional shadows use four blended array cascades", () => {
 test("reference and final-frame quality gates are compiled into production", () => {
   assert.match(computeShader, /fn validateReference/);
   assert.match(computeShader, /samplePrimaryIrradiance/);
+  assert.match(computeShader, /fn resolvedPrimaryIrradiance/);
+  assert.match(computeShader, /clamp\(resolvedPrimaryIrradiance\(world\.xyz,normal\)/);
   assert.match(finalShader, /octCoordinate/);
 });

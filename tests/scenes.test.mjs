@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createScene, SCENE_INFO } from "../public/rc/scenes.js";
+import { automaticBaseSpacing, createScene, SCENE_INFO } from "../public/rc/scenes.js";
 
 test("twelve production validation scenes build valid geometry and BVHs", () => {
   assert.equal(SCENE_INFO.length, 12);
@@ -15,13 +15,23 @@ test("twelve production validation scenes build valid geometry and BVHs", () => 
     const minimumTriangles = scene.short === "Cornell" ? 30 : 800;
     assert.ok(g.triangleCount >= minimumTriangles, `${scene.name} is not a meaningful validation case`);
     assert.ok(Number.isFinite(scene.radius) && scene.radius > 0);
-    assert.ok(scene.baseSpacing > 0);
+    assert.equal(
+      scene.baseSpacing,
+      automaticBaseSpacing(scene.radius, g.triangleCount),
+      `${scene.name} bypasses universal automatic probe spacing`,
+    );
     for (const value of [...g.boundsMin, ...g.boundsMax, ...g.vertices.subarray(0, Math.min(2048, g.vertices.length))]) {
       assert.ok(Number.isFinite(value), `${scene.name} contains non-finite geometry`);
     }
     totalTriangles += g.triangleCount;
   }
   assert.ok(totalTriangles > 50_000, `expected broad geometry coverage, received ${totalTriangles} triangles`);
+});
+
+test("automatic GI scale is scene-identity independent", () => {
+  assert.equal(automaticBaseSpacing(20, 10_000), automaticBaseSpacing(20, 10_000));
+  assert.ok(automaticBaseSpacing(40, 10_000) > automaticBaseSpacing(20, 10_000));
+  assert.ok(automaticBaseSpacing(20, 100_000) < automaticBaseSpacing(20, 1_000));
 });
 
 test("scene suite contains requested terrain and complexity stressors", () => {

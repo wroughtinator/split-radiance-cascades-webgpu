@@ -1,6 +1,6 @@
 {
-  "schema": "split-rc-webgpu-validation-summary-v5",
-  "timestamp": "2026-07-31T20:50:49.044Z",
+  "schema": "split-rc-webgpu-validation-summary-v6",
+  "timestamp": "2026-08-01T00:14:33.429Z",
   "adapter": {
     "vendor": "nvidia",
     "architecture": "blackwell",
@@ -8,14 +8,23 @@
   },
   "quality": "balanced",
   "resolution": [800, 450],
+  "giResolution": [800, 450],
   "algorithm3OwnerStride": 1,
   "referenceSamples": 512,
-  "minFps": 55.40166204986149,
-  "maxGpuMs": 6.488064,
+  "minFps": 56.25879043600563,
+  "maxGpuMs": 6.815744,
   "passed": true,
+  "universalGi": {
+    "sceneSpecificGiParameters": false,
+    "automaticSpacingInputs": ["sceneBoundingRadius", "triangleCount"],
+    "cMinusOneSamples": 16,
+    "cMinusOneSequence": "world-stable R2 cosine",
+    "cMinusOneRadiusInBaseCells": 15,
+    "worldPositionFormat": "rgba32float"
+  },
   "gates": {
     "exactKeyWorldProbes": true,
-    "exactProbeCoverageRoundTrip": true,
+    "fullPrecisionWorldPositions": true,
     "independentTrajectoryReplay": true,
     "continuousCameraMotion": true,
     "continuousMovingLightMotion": true,
@@ -24,61 +33,75 @@
     "shadowBvhOracle": true,
     "allPointShadowFaces": true,
     "pathTracedReferences": true,
+    "sealedVolumeEveryPixel": true,
     "frozenReferenceBaselines": true,
     "overflowsAndGpuErrors": true
   },
   "sponza": {
     "triangles": 262269,
-    "gpuMs": 6.488064,
-    "fps": 59.982,
-    "coverageForwardBackward": {
-      "adjacentP95ByteDelta": 0,
-      "adjacentP99ByteDelta": 0,
-      "adjacentMaxByteDelta": 0,
-      "loopClosureMaxByteDelta": 0
+    "gpuMs": 6.815744,
+    "fps": 59.020263623843846,
+    "probeMotion": {
+      "matchedProbesMin": 7532,
+      "p95RelativeMax": 0.0029252893091353646,
+      "p99RelativeMax": 0.022413032506668318,
+      "p95AbsoluteMax": 0.00021525242300411696
     },
-    "indirectForwardBackward": {
-      "p95ByteDelta": 1,
-      "p99ByteDelta": 3,
-      "trimmedRmseByteDelta": 0.6523604212388813
+    "samePoseRepeatability": {
+      "p95ByteDelta": 0,
+      "p99ByteDelta": 0,
+      "maxByteDelta": 1
     },
-    "movingLightIndirectForwardBackward": {
-      "p95ByteDelta": 1,
+    "continuousMotion": {
+      "p95ByteDelta": 2,
+      "p99ByteDelta": 6,
+      "trimmedRmseByteDelta": 1.1562456508933452
+    },
+    "movingLightMotion": {
+      "p95ByteDelta": 2,
       "p99ByteDelta": 4,
-      "trimmedRmseByteDelta": 0.6648938352434486
+      "trimmedRmseByteDelta": 0.8499279670593514
+    },
+    "historyRecovery": {
+      "sparsePopulationMatched": true,
+      "p95ByteDelta": 2,
+      "p99ByteDelta": 5,
+      "overflow": 0
     },
     "reference": {
-      "nrmse": 0.24199242421767397,
-      "trimmedNrmse": 0.20927412220535607,
-      "lowFrequencyScaleInvariantNrmse": 0.14183638795798148,
-      "trimmedLowFrequencyNrmse": 0.1337113635980947,
-      "p95SceneLinearError": 0.04671875923275945,
-      "p99SceneLinearError": 0.09840716935396193,
-      "severeUnderlitRatio": 0,
-      "severeOverlitRatio": 0.006510416666666667,
-      "signedBias": -0.0016663512778675414
+      "activePixels": 2292,
+      "nrmse": 0.23245330793101587,
+      "trimmedNrmse": 0.2137407241970042,
+      "lowFrequencyScaleInvariantNrmse": 0.13135643755821283,
+      "trimmedLowFrequencyNrmse": 0.12693612369597812,
+      "p95SceneLinearError": 0.049561393219232565,
+      "p99SceneLinearError": 0.08309602368474006,
+      "severeUnderlitRatio": 0.0008726003490401396,
+      "severeOverlitRatio": 0.0034904013961605585,
+      "signedBias": -0.0039962373883988475
     },
     "probeOverflow": [0, 0, 0, 0]
   },
-  "sunShadowBvhSweep": {
-    "classificationMismatchMax": 0.018744551002615517,
-    "severeMismatchMax": 0.003051438535309503,
-    "falseShadowMax": 0.004405286343612335,
-    "lightLeakMax": 0.015693112467306015,
-    "meanAbsoluteMax": 0.042455421406093076
+  "sealedBox": {
+    "referenceNrmse": 0,
+    "displayMaximumLuminanceByte": 0,
+    "trajectoryP95ByteDelta": 0,
+    "loopClosureMaximumByteDelta": 0,
+    "overflow": 0,
+    "passed": true
   },
   "scenes": [
-    { "scene": 0, "name": "Color bleed laboratory", "fps": 59.994, "gpuMs": 2.62144, "overflow": 0, "passed": true },
-    { "scene": 1, "name": "Sponza atrium", "fps": 59.982, "gpuMs": 6.488064, "overflow": 0, "passed": true },
-    { "scene": 2, "name": "Concave canyon heightfield", "fps": 59.032, "gpuMs": 1.441792, "overflow": 0, "passed": true },
-    { "scene": 3, "name": "Dense lantern forest", "fps": 58.991, "gpuMs": 1.96608, "overflow": 0, "passed": true },
-    { "scene": 4, "name": "Multi-level atrium", "fps": 59.003, "gpuMs": 1.376256, "overflow": 0, "passed": true },
-    { "scene": 5, "name": "Industrial pipe maze", "fps": 59.032, "gpuMs": 1.441792, "overflow": 0, "passed": true },
-    { "scene": 6, "name": "Sun temple", "fps": 59.976, "gpuMs": 1.14688, "overflow": 0, "passed": true },
-    { "scene": 7, "name": "Orbital sculpture field", "fps": 58.055, "gpuMs": 1.114112, "overflow": 0, "passed": true },
-    { "scene": 8, "name": "Night market", "fps": 59.020, "gpuMs": 6.160384, "overflow": 0, "passed": true },
-    { "scene": 9, "name": "Megacity stress grid", "fps": 57.159, "gpuMs": 2.490368, "overflow": 0, "passed": true },
-    { "scene": 10, "name": "Cornell box reference", "fps": 59.988, "gpuMs": 1.31072, "overflow": 0, "passed": true },
-    { "scene": 11, "name": "Grand concave heightmap", "fps": 55.40166204986149, "gpuMs": 1.835008, "overflow": 0, "passed": true }
+    { "scene": 0, "name": "Color bleed laboratory", "fps": 60.006001, "gpuMs": 3.407872, "overflow": 0, "passed": true },
+    { "scene": 1, "name": "Sponza atrium", "fps": 59.020264, "gpuMs": 6.815744, "overflow": 0, "passed": true },
+    { "scene": 2, "name": "Concave canyon heightfield", "fps": 57.153744, "gpuMs": 2.555904, "overflow": 0, "passed": true },
+    { "scene": 3, "name": "Dense lantern forest", "fps": 59.031877, "gpuMs": 3.60448, "overflow": 0, "passed": true },
+    { "scene": 4, "name": "Multi-level atrium", "fps": 59.02607, "gpuMs": 2.29376, "overflow": 0, "passed": true },
+    { "scene": 5, "name": "Industrial pipe maze", "fps": 59.008655, "gpuMs": 3.080192, "overflow": 0, "passed": true },
+    { "scene": 6, "name": "Sun temple", "fps": 59.02607, "gpuMs": 2.29376, "overflow": 0, "passed": true },
+    { "scene": 7, "name": "Orbital sculpture field", "fps": 58.06077, "gpuMs": 2.94912, "overflow": 0, "passed": true },
+    { "scene": 8, "name": "Night market", "fps": 59.002852, "gpuMs": 2.752512, "overflow": 0, "passed": true },
+    { "scene": 9, "name": "Megacity stress grid", "fps": 56.25879, "gpuMs": 3.93216, "overflow": 0, "passed": true },
+    { "scene": 10, "name": "Cornell box reference", "fps": 60.006001, "gpuMs": 2.424832, "overflow": 0, "passed": true },
+    { "scene": 11, "name": "Grand concave heightmap", "fps": 60.006001, "gpuMs": 3.44064, "overflow": 0, "passed": true }
   ]
 }

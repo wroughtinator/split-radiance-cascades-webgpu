@@ -1,4 +1,4 @@
-import { buildBVH, cross3, normalize3, sub3, TAU } from "./math.js?v=2026-07-31-cache2";
+import { buildBVH, cross3, normalize3, sub3, TAU } from "./math.js?v=2026-07-31-universal16";
 
 const C = {
   chalk: [0.72, 0.75, 0.72],
@@ -269,7 +269,7 @@ function buildScene0(g) {
   g.sphere([0,1.05,2.4],1.05,C.yellow,[0,0,0],10,18);
   g.torus([0,3.2,-2.6],1.25,0.25,C.cyan,20,10,Math.PI/2);
   g.box([0,4.75,0],[3.3,0.08,3.3],[0.8,0.8,0.8],[5.2,4.6,3.5]);
-  return {camera:[6.5,3.7,13],target:[0,1.8,0],baseSpacing:0.5,env:[0.02,0.025,0.04],sun:2.2};
+  return {camera:[6.5,3.7,13],target:[0,1.8,0],env:[0.02,0.025,0.04],sun:2.2};
 }
 
 function buildScene1(g) {
@@ -282,7 +282,11 @@ function buildScene1(g) {
   g.box([0,6.3,7.3],[30,0.45,2.0],C.sand);
   for(let i=0;i<9;i++)g.sphere([-12+i*3,1.15,0],0.65,i%3===0?C.red:C.chalk,[0,0,0],7,12);
   g.torus([0,2.8,0],2.3,0.42,C.yellow,24,10,Math.PI/2);
-  return {camera:[20,8.5,18],target:[0,2.2,0],baseSpacing:1.15,env:[0.055,0.08,0.12],sun:3.3};
+  return {
+    camera:[20,8.5,18],target:[0,2.2,0],env:[0.055,0.08,0.12],sun:3.3,
+    paperPalette:true,sunHorizontal:0.28,sunHeight:-0.96,
+    pointColor:[1.0,0.12,0.06],sunColor:[1.0,0.98,0.92],pointIntensity:0,
+  };
 }
 
 function buildScene2(g) {
@@ -294,7 +298,7 @@ function buildScene2(g) {
   g.box([-4,-0.7,2],[7,0.65,3.2],C.dark);
   for(let i=0;i<7;i++)g.torus([-10+i*3.2,2.0+h(-10+i*3.2,-8),-8],1.0,0.22,i%2?C.orange:C.stone,16,8,Math.PI/2);
   g.box([9,3.2,-4],[8,0.45,4],C.stone);
-  return {camera:[31,18,30],target:[0,0,0],baseSpacing:1.55,env:[0.08,0.11,0.16],sun:4.2};
+  return {camera:[31,18,30],target:[0,0,0],env:[0.08,0.11,0.16],sun:4.2};
 }
 
 function buildScene3(g) {
@@ -306,7 +310,7 @@ function buildScene3(g) {
     g.cone([x,h+0.4,z],1.0+deterministic(i+7)*0.7,2.9+deterministic(i+12)*1.8,i%8===0?C.yellow:C.leaf,10);
   }
   for(let i=0;i<8;i++)g.sphere([-12+i*3.4,2.0+Math.sin(i),-2+Math.cos(i)*4],0.28,[0.8,0.45,0.08],[5,1.6,0.15],6,10);
-  return {camera:[25,11,26],target:[0,3,0],baseSpacing:1.0,env:[0.035,0.05,0.075],sun:1.65,exposure:1.12};
+  return {camera:[25,11,26],target:[0,3,0],env:[0.035,0.05,0.075],sun:1.65,exposure:1.12};
 }
 
 function buildScene4(g) {
@@ -320,7 +324,7 @@ function buildScene4(g) {
   g.torus([3.5,2.7,2],2.1,0.48,C.violet,24,12,Math.PI/2);
   g.sphere([-3.8,1.6,2.3],1.55,C.cyan,[0,0,0],12,20);
   g.box([0,8.4,0],[8,0.12,6],[0.7,0.75,0.8],[3.6,4.1,5.3]);
-  return {camera:[25,12,25],target:[0,3,0],baseSpacing:1.05,env:[0.025,0.04,0.065],sun:2.8};
+  return {camera:[25,12,25],target:[0,3,0],env:[0.025,0.04,0.065],sun:2.8};
 }
 
 function buildScene5(g) {
@@ -332,7 +336,7 @@ function buildScene5(g) {
     g.torus([x,y+1.4,z],1.0+(i%3)*0.2,0.24,i%4===0?C.orange:C.metal,18,8,i%2?Math.PI/2:0);
   }
   for(let i=0;i<7;i++)g.box([-13+i*4.3,1.2,-10.7],[2.8,2.4,0.5],C.dark,[4.5,0.35+0.15*i,0.05]);
-  return {camera:[29,13,30],target:[0,2.2,0],baseSpacing:1.2,env:[0.012,0.018,0.022],sun:1.7};
+  return {camera:[29,13,30],target:[0,2.2,0],env:[0.012,0.018,0.022],sun:1.7};
 }
 
 function buildScene6(g) {
@@ -345,7 +349,7 @@ function buildScene6(g) {
   g.box([0,0.7,-13],[9,1.4,5],C.red);
   g.sphere([0,2.7,-13],1.75,C.yellow,[0,0,0],12,20);
   g.box([0,8.2,0],[6,0.1,10],[0.8,0.75,0.55],[4.2,3.6,2.0]);
-  return {camera:[31,16,33],target:[0,3,0],baseSpacing:1.25,env:[0.07,0.08,0.12],sun:4.8};
+  return {camera:[31,16,33],target:[0,3,0],env:[0.07,0.08,0.12],sun:4.8};
 }
 
 function buildScene7(g) {
@@ -358,7 +362,7 @@ function buildScene7(g) {
     else {g.cylinder(p,0.65,3.3,C.metal,16,i%3);g.torus(p,1.2,0.18,C.yellow,16,8,Math.PI/2);}
   }
   g.sphere([0,1,0],2.2,C.white,[1.8,0.45,3.5],12,22);
-  return {camera:[30,14,32],target:[0,0,0],baseSpacing:1.35,env:[0.025,0.035,0.09],sun:2.0};
+  return {camera:[30,14,32],target:[0,0,0],env:[0.025,0.035,0.09],sun:2.0};
 }
 
 function buildScene8(g) {
@@ -376,7 +380,7 @@ function buildScene8(g) {
     g.sphere([x,2.5,z],0.45,[0.8,0.8,0.8],e,7,12);
   }
   for(let i=0;i<12;i++)g.cylinder([-16+i*2.9,2.3,0],0.08,4.6,C.metal,7);
-  return {camera:[28,12,28],target:[0,1.2,0],baseSpacing:1.1,env:[0.003,0.006,0.018],sun:0.35};
+  return {camera:[28,12,28],target:[0,1.2,0],env:[0.003,0.006,0.018],sun:0.35};
 }
 
 function buildScene9(g) {
@@ -392,7 +396,7 @@ function buildScene9(g) {
     g.torus([Math.cos(a)*11,5+Math.sin(i)*2,Math.sin(a)*11],2.0,0.38,i%2?C.orange:C.cyan,20,10,a);
   }
   g.sphere([0,8,0],3.0,C.white,[2.5,0.25,0.08],14,24);
-  return {camera:[50,30,53],target:[0,3,0],baseSpacing:2.05,env:[0.02,0.035,0.06],sun:3.6};
+  return {camera:[50,30,53],target:[0,3,0],env:[0.02,0.035,0.06],sun:3.6};
 }
 
 function buildScene10(g) {
@@ -415,7 +419,7 @@ function buildScene10(g) {
     [0.9,0.88,0.72],[8.5,7.4,5.8],
   );
   return {
-    camera:[0,2.65,8.6],target:[0,2.5,-2.75],baseSpacing:0.32,
+    camera:[0,2.65,8.6],target:[0,2.5,-2.75],
     env:[0.0015,0.0015,0.0015],sun:0.05,pointIntensity:3.5,
     pointOrbit:1.45,pointBaseHeight:0.0,pointHeight:0.75,
     pointColor:[1.0,0.82,0.62],exposure:1.15,
@@ -460,7 +464,7 @@ function buildScene11(g) {
     g.sphere([x,y,z],0.65+(i%3)*0.18,i%2?C.orange:C.cyan,[0,0,0],8,14);
   }
   return {
-    camera:[67,38,72],target:[0,-1,0],baseSpacing:2.2,
+    camera:[67,38,72],target:[0,-1,0],
     env:[0.065,0.085,0.13],sun:2.15,pointIntensity:9.0,exposure:0.88,
     pointOrbit:28,pointBaseHeight:9,pointHeight:6,
     pointColor:[0.12,0.45,1.0],sunHeight:-0.52,sunHorizontal:0.86,
@@ -472,29 +476,51 @@ const BUILDERS=[
   buildScene6,buildScene7,buildScene8,buildScene9,buildScene10,buildScene11,
 ];
 
+// Universal, asset-driven base resolution. The scene diagonal establishes
+// world scale while a very shallow triangle-density term preserves small
+// modeled features without turning dense assets into a probe-capacity spike.
+// No scene identity or hand-authored GI spacing participates in this choice.
+export function automaticBaseSpacing(radius, triangleCount) {
+  const density = Math.pow(Math.max(1, triangleCount), 0.12);
+  return Math.max(0.22, radius * 0.077 / density);
+}
+
 export function createScene(index) {
   if (index === 1 && typeof window !== "undefined") {
-    return loadPackedSponzaGeometry().then((geometry) => ({
-      id: index,
-      ...SCENE_INFO[index],
-      camera: [-8.0, 8.0, -0.5],
-      target: [5.0, 2.0, -0.5],
-      baseSpacing: 0.32,
-      env: [0.55, 0.65, 0.82],
-      sun: 1.25,
-      exposure: 1.0,
-      geometry,
-      radius: Math.hypot(...geometry.boundsMax.map((value, axis) => (value - geometry.boundsMin[axis]) * 0.5)),
-    }));
+    return loadPackedSponzaGeometry().then((geometry) => {
+      const radius = Math.hypot(...geometry.boundsMax.map(
+        (value, axis) => (value - geometry.boundsMin[axis]) * 0.5,
+      ));
+      return {
+        id: index,
+        ...SCENE_INFO[index],
+        camera: [-8.0, 8.0, -0.5],
+        target: [5.0, 2.0, -0.5],
+        env: [0.55, 0.65, 0.82],
+        sun: 1.25,
+        exposure: 1.0,
+        paperPalette: true,
+        sunHorizontal: 0.28,
+        sunHeight: -0.96,
+        pointColor: [1.0, 0.12, 0.06],
+        sunColor: [1.0, 0.98, 0.92],
+        pointIntensity: 0,
+        geometry,
+        radius,
+        baseSpacing: automaticBaseSpacing(radius, geometry.triangleCount),
+      };
+    });
   }
   const g=new Geometry();
   const settings=BUILDERS[index](g);
   const geometry=g.finish();
+  const radius=Math.hypot(...geometry.boundsMax.map((v,i)=>(v-geometry.boundsMin[i])*0.5));
   return {
     id:index,
     ...SCENE_INFO[index],
     ...settings,
     geometry,
-    radius:Math.hypot(...geometry.boundsMax.map((v,i)=>(v-geometry.boundsMin[i])*0.5)),
+    radius,
+    baseSpacing:automaticBaseSpacing(radius,geometry.triangleCount),
   };
 }

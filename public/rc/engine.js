@@ -1,11 +1,11 @@
 import {
   adaptiveBudgetScale, add3, clamp, cross3, dot3, mat4LookAt, mat4Multiply, mat4Ortho,
   mat4Perspective, mul3, normalize3, sub3,
-} from "./math.js?v=2026-07-31-cache2";
-import { createScene, SCENE_INFO } from "./scenes.js?v=2026-07-31-cache2";
+} from "./math.js?v=2026-07-31-universal16";
+import { createScene, SCENE_INFO } from "./scenes.js?v=2026-07-31-universal16";
 import {
   computeShader, finalShader, presentShader, rasterShader, shaderConstants as K,
-} from "./shaders.js?v=2026-07-31-cache2";
+} from "./shaders.js?v=2026-07-31-universal16";
 
 const SUN_CASCADE_COUNT = 4;
 
@@ -36,19 +36,21 @@ const QUALITY = {
 // masking regressions across the rest of the irradiance field.
 const REFERENCE_BASELINES = Object.freeze({
   0: Object.freeze({
-    nrmse: 0.56, trimmedNrmse99: 0.21,
-    lowFrequencyScaleInvariantNrmse: 0.36,
-    trimmedLowFrequencyScaleInvariantNrmse99: 0.33,
-    p95Absolute: 0.04, p99Absolute: 0.14,
+    // The open room uses the smooth paper cascade field while the exact C(-1)
+    // path is reserved for locally closed volumes. Freeze the resulting
+    // 512-spp comparison with roughly 10-20% deterministic headroom.
+    nrmse: 0.22, trimmedNrmse99: 0.10,
+    lowFrequencyScaleInvariantNrmse: 0.18,
+    trimmedLowFrequencyScaleInvariantNrmse99: 0.14,
+    p95Absolute: 0.05, p99Absolute: 0.15,
   }),
   1: Object.freeze({
-    nrmse: 0.40, trimmedNrmse99: 0.33,
-    lowFrequencyScaleInvariantNrmse: 0.24,
-    trimmedLowFrequencyScaleInvariantNrmse99: 0.22,
-    // Tangent-complete c0 support removes camera-dependent coverage holes and
-    // improves every aggregate Sponza error metric. Its deterministic 99th
-    // percentile is 0.386, so keep the general 0.40 safety ceiling here too.
-    p95Absolute: 0.15, p99Absolute: 0.40,
+    // Surface-sheet keys and tangent-complete c0 support remove the coverage
+    // holes while keeping the paper-scene comparison tightly bounded.
+    nrmse: 0.25, trimmedNrmse99: 0.22,
+    lowFrequencyScaleInvariantNrmse: 0.15,
+    trimmedLowFrequencyScaleInvariantNrmse99: 0.14,
+    p95Absolute: 0.06, p99Absolute: 0.10,
   }),
   10: Object.freeze({
     nrmse: 0.83, trimmedNrmse99: 0.26,
@@ -283,7 +285,12 @@ class SplitRadianceCascades {
     console.info("[Split RC] renderer-ready", this.adapterInfo());
 
     const automaticTest = new URLSearchParams(location.search).get("autotest");
-    if (automaticTest === "reference") {
+    if (automaticTest === "enclosure-leak") {
+      setTimeout(async () => {
+        await this.loadScene(0);
+        this.exposeTestReport(await this.runEnclosureLeakAudit({ preservePose: true }));
+      }, 200);
+    } else if (automaticTest === "reference") {
       setTimeout(async () => {
         await this.loadScene(1);
         const report = {
@@ -380,13 +387,17 @@ class SplitRadianceCascades {
       setTimeout(async () => {
         const requested = Number(automaticTest.slice(7));
         const index = clamp(Number.isFinite(requested) ? Math.floor(requested) : 0, 0, SCENE_INFO.length - 1);
+        const requestedWarmup = Number(new URLSearchParams(location.search).get("warmup"));
+        const motionWarmup = Number.isFinite(requestedWarmup) && requestedWarmup > 0
+          ? Math.floor(requestedWarmup)
+          : 64;
         await this.loadScene(index);
         const report = {
           scene: index,
-          baseline: await this.runContinuousMotionAudit({ frames: 32, warmup: 64 }),
+          baseline: await this.runContinuousMotionAudit({ frames: 32, warmup: motionWarmup }),
           movingLights: await this.runContinuousMotionAudit({
             frames: 32,
-            warmup: 64,
+            warmup: motionWarmup,
             movingLights: true,
             timeStep: 1 / 60,
           }),
@@ -401,10 +412,14 @@ class SplitRadianceCascades {
       setTimeout(async () => {
         const requested = Number(automaticTest.slice(5));
         const index = clamp(Number.isFinite(requested) ? Math.floor(requested) : 0, 0, SCENE_INFO.length - 1);
+        const requestedWarmup = Number(new URLSearchParams(location.search).get("warmup"));
+        const pathWarmup = Number.isFinite(requestedWarmup) && requestedWarmup > 0
+          ? Math.floor(requestedWarmup)
+          : 96;
         await this.loadScene(index);
         const report = {
           scene: index,
-          reference: await this.runPathTracedReferenceAudit(),
+          reference: await this.runPathTracedReferenceAudit({ warmup: pathWarmup }),
           metrics: this.metricsSnapshot(),
         };
         report.passed = report.reference.passed
@@ -445,16 +460,16 @@ class SplitRadianceCascades {
         result.motionStability = await this.runMotionStabilityAudit({
           samples: 5,
           interval: 3,
-          warmup: index === 6 ? 384 : ([5, 11].includes(index) ? 96 : 48),
+          warmup: 384,
         });
         result.finalFrameRepeatability = await this.runFinalFrameRepeatabilityAudit({ poses: 5, warmup: 64 });
         result.continuousMotion = await this.runContinuousMotionAudit({
-          frames: index === 1 ? 32 : 24,
-          warmup: 64,
+          frames: 32,
+          warmup: 192,
         });
         result.movingLightContinuousMotion = await this.runContinuousMotionAudit({
-          frames: index === 1 ? 32 : 24,
-          warmup: 64,
+          frames: 32,
+          warmup: 192,
           movingLights: true,
           timeStep: 1 / 60,
         });
@@ -468,7 +483,12 @@ class SplitRadianceCascades {
           });
         }
         if ([0, 1, 10, 11].includes(index)) {
-          result.pathTracedReference = await this.runPathTracedReferenceAudit();
+          result.pathTracedReference = await this.runPathTracedReferenceAudit({
+            warmup: 192,
+          });
+        }
+        if (index === 0) {
+          result.enclosureLeak = await this.runEnclosureLeakAudit();
         }
         result.passed = !result.overflows
           && !result.gpuError
@@ -478,13 +498,22 @@ class SplitRadianceCascades {
           && result.movingLightContinuousMotion.passed
           && (!result.movingLightResponse || result.movingLightResponse.passed)
           && (!result.cacheMotionRecovery || result.cacheMotionRecovery.passed)
-          && (!result.pathTracedReference || result.pathTracedReference.passed);
+          && (!result.pathTracedReference || result.pathTracedReference.passed)
+          && (!result.enclosureLeak || result.enclosureLeak.passed);
         this.exposeTestReport(result);
       }, 200);
     } else if (automaticTest != null) {
       // Sixty scene frames guarantee at least one 45-frame timestamp-query
       // cycle after each scene resets its metric history.
       setTimeout(() => this.runValidation({ framesPerScene: 60 }), 200);
+    } else if (new URLSearchParams(location.search).get("pose") === "inside-box") {
+      setTimeout(async () => {
+        await this.loadScene(0);
+        this.animateCamera = false;
+        this.animateLights = false;
+        this.setCameraPose([-2.2, 1.25, 0.5], [-1.3, 1.72, -0.42]);
+        this.resetProbeHistory();
+      }, 200);
     }
   }
 
@@ -554,8 +583,10 @@ class SplitRadianceCascades {
         targets: [
           { format: "rgba8unorm" },
           { format: "rgba16float" },
-          { format: "rgba16float" },
-          { format: "rgba16float" },
+          // Probe keys and C(-1) visibility are world-space algorithms. Half
+          // precision here can move a raster sample across a thin wall or a
+          // probe-cell boundary as the camera moves, so positions stay f32.
+          { format: "rgba32float" },
         ],
       },
       primitive: { topology: "triangle-list", cullMode: "none" },
@@ -676,6 +707,14 @@ class SplitRadianceCascades {
         },
         { binding: 13, visibility: SHADER.FRAGMENT, sampler: { type: "comparison" } },
         { binding: 14, visibility: SHADER.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 15, visibility: SHADER.FRAGMENT, buffer: { type: "read-only-storage" } },
+        { binding: 16, visibility: SHADER.FRAGMENT, buffer: { type: "read-only-storage" } },
+        {
+          binding: 17,
+          visibility: SHADER.FRAGMENT,
+          texture: { sampleType: "float", viewDimension: "2d-array" },
+        },
+        { binding: 18, visibility: SHADER.FRAGMENT, sampler: { type: "filtering" } },
       ],
     });
     this.finalPipeline = device.createRenderPipeline({
@@ -1000,11 +1039,10 @@ class SplitRadianceCascades {
       TEX.RENDER_ATTACHMENT | TEX.TEXTURE_BINDING | TEX.COPY_SRC,
     );
     this.worldTexture = texture(
-      "G-buffer world position",
-      "rgba16float",
+      "G-buffer full-precision world position",
+      "rgba32float",
       TEX.RENDER_ATTACHMENT | TEX.TEXTURE_BINDING | TEX.COPY_SRC,
     );
-    this.emissiveTexture = texture("G-buffer emissive radiance", "rgba16float");
     this.depthTexture = texture("G-buffer depth", "depth24plus", TEX.RENDER_ATTACHMENT);
     const compositeUsage = TEX.RENDER_ATTACHMENT | TEX.TEXTURE_BINDING | TEX.COPY_SRC;
     this.compositeTexture = texture("current Split RC composite", this.format, compositeUsage);
@@ -1012,7 +1050,6 @@ class SplitRadianceCascades {
       this.albedoTexture,
       this.normalTexture,
       this.worldTexture,
-      this.emissiveTexture,
       this.depthTexture,
       this.compositeTexture,
     ];
@@ -1091,10 +1128,17 @@ class SplitRadianceCascades {
         { binding: 8, resource: { buffer: this.coneBuffer } },
         { binding: 9, resource: { buffer: this.accumBuffer } },
         { binding: 10, resource: this.irradianceSampler },
-        { binding: 11, resource: this.emissiveTexture.createView() },
+        // Binding 11 aliases the normal/emission packed target. Keeping the
+        // binding separate makes the fragment interface explicit while the
+        // G-buffer itself remains three attachments and 32 bytes/sample.
+        { binding: 11, resource: this.normalTexture.createView() },
         { binding: 12, resource: this.pointShadowArrayView },
         { binding: 13, resource: this.pointShadowSampler },
         { binding: 14, resource: { buffer: this.sunShadowDataBuffer } },
+        { binding: 15, resource: { buffer: this.bvhNodeBuffer } },
+        { binding: 16, resource: { buffer: this.triangleBuffer } },
+        { binding: 17, resource: this.materialAtlasView },
+        { binding: 18, resource: this.materialSampler },
       ],
     });
     this.presentBindGroup = this.device.createBindGroup({
@@ -1137,10 +1181,14 @@ class SplitRadianceCascades {
   }
 
   setCameraFromScene(scene) {
-    const offset = sub3(scene.camera, scene.target);
+    this.setCameraPose(scene.camera, scene.target);
+  }
+
+  setCameraPose(position, target) {
+    const offset = sub3(position, target);
     const horizontal = Math.hypot(offset[0], offset[2]);
     this.camera = {
-      target: [...scene.target],
+      target: [...target],
       distance: Math.hypot(...offset),
       azimuth: Math.atan2(offset[2], offset[0]),
       elevation: Math.atan2(offset[1], horizontal),
@@ -1187,8 +1235,8 @@ class SplitRadianceCascades {
     this.currentViewProjection = viewProjection;
     const sunTime = this.animateLights ? seconds * this.sunSpeed : 0.7;
     const sunAngle = sunTime * 0.12 + this.sceneIndex * 0.61;
-    const sunHorizontal = this.scene.sunHorizontal ?? (this.sceneIndex === 1 ? 0.28 : 0.7);
-    const sunHeight = this.scene.sunHeight ?? (this.sceneIndex === 1 ? -0.96 : -0.74);
+    const sunHorizontal = this.scene.sunHorizontal ?? 0.7;
+    const sunHeight = this.scene.sunHeight ?? -0.74;
     const sunDirection = normalize3([
       Math.cos(sunAngle) * sunHorizontal,
       sunHeight,
@@ -1231,12 +1279,9 @@ class SplitRadianceCascades {
       pointBaseHeight + Math.sin(pointAngle * 1.7) * pointHeight,
       Math.sin(pointAngle) * pointOrbit,
     ]);
-    const hue = this.sceneIndex % 3;
-    const pointColor = this.scene.pointColor ?? (this.sceneIndex === 1
-      ? [1.0, 1.0, 1.0]
-      : hue === 0 ? [1.0, 0.18, 0.045] : hue === 1 ? [0.08, 0.5, 1.0] : [0.18, 1.0, 0.35]);
-    const sunColor = this.scene.sunColor ?? (this.sceneIndex === 1 ? [1.0, 0.98, 0.92] : [1.0, 0.84, 0.63]);
-    const pointIntensity = this.scene.pointIntensity ?? (this.sceneIndex === 1 ? 0.0 : 10.0 + this.sceneIndex * 0.7);
+    const pointColor = this.scene.pointColor ?? [0.08, 0.5, 1.0];
+    const sunColor = this.scene.sunColor ?? [1.0, 0.84, 0.63];
+    const pointIntensity = this.scene.pointIntensity ?? 10.0;
     const pointRange = this.scene.radius * 0.72;
     this.pointShadowsEnabled = pointIntensity > 0.0001;
     this.currentPointIntensity = pointIntensity;
@@ -1267,7 +1312,7 @@ class SplitRadianceCascades {
     u.set(viewProjection, 0);
     u.set(sunVP, 16);
     const featureFlags = (this.temporalStability ? 8 : 0)
-      | (this.sceneIndex === 1 ? 16 : 0)
+      | (this.scene.paperPalette ? 16 : 0)
       | (this.animateLights ? 32 : 0);
     u.set([...cameraPosition, featureFlags], 32);
     u.set([...sunDirection, seconds], 36);
@@ -1288,7 +1333,7 @@ class SplitRadianceCascades {
         ? 0.965
         : fixedLightHistory)
       : 0;
-    const exposure = this.scene.exposure ?? (this.sceneIndex === 1 ? 1.55 : 1.0);
+    const exposure = this.scene.exposure ?? 1.0;
     u.set([this.indirectStrength, exposure, this.debugMode, frameParity + historyBlend], 60);
     this.device.queue.writeBuffer(this.frameBuffer, 0, u);
   }
@@ -1370,7 +1415,6 @@ class SplitRadianceCascades {
         { view: this.albedoTexture.createView(), clearValue: [0,0,0,0], loadOp: "clear", storeOp: "store" },
         { view: this.normalTexture.createView(), clearValue: [0,0,0,0], loadOp: "clear", storeOp: "store" },
         { view: this.worldTexture.createView(), clearValue: [0,0,0,0], loadOp: "clear", storeOp: "store" },
-        { view: this.emissiveTexture.createView(), clearValue: [0,0,0,0], loadOp: "clear", storeOp: "store" },
       ],
       depthStencilAttachment: { view: this.depthTexture.createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
       timestampWrites: profile ? { querySet: this.querySet, beginningOfPassWriteIndex: 2, endOfPassWriteIndex: 3 } : undefined,
@@ -1501,7 +1545,8 @@ class SplitRadianceCascades {
     let captureResources;
     if (captureJob) {
       const bytesPerRow = Math.ceil(this.width * 4 / 256) * 256;
-      const worldBytesPerRow = Math.ceil(this.width * 8 / 256) * 256;
+      const worldBytesPerRow = Math.ceil(this.width * 16 / 256) * 256;
+      const normalBytesPerRow = Math.ceil(this.width * 8 / 256) * 256;
       const buffer = createBuffer(
         d,
         "final-frame audit readback",
@@ -1517,7 +1562,7 @@ class SplitRadianceCascades {
       const normalBuffer = createBuffer(
         d,
         "surface-normal audit readback",
-        worldBytesPerRow * this.height,
+        normalBytesPerRow * this.height,
         GPU.COPY_DST | GPU.MAP_READ,
       );
       const diagnosticBuffer = createBuffer(
@@ -1538,7 +1583,7 @@ class SplitRadianceCascades {
       );
       encoder.copyTextureToBuffer(
         { texture: this.normalTexture },
-        { buffer: normalBuffer, bytesPerRow: worldBytesPerRow, rowsPerImage: this.height },
+        { buffer: normalBuffer, bytesPerRow: normalBytesPerRow, rowsPerImage: this.height },
         [this.width, this.height],
       );
       encoder.copyBufferToBuffer(this.stateBuffer, 0, diagnosticBuffer, 0, 32);
@@ -1550,6 +1595,7 @@ class SplitRadianceCascades {
         diagnosticBuffer,
         bytesPerRow,
         worldBytesPerRow,
+        normalBytesPerRow,
         width: this.width,
         height: this.height,
         viewProjection: new Float32Array(this.currentViewProjection),
@@ -1599,7 +1645,8 @@ class SplitRadianceCascades {
         bytesPerRow: job.bytesPerRow,
         pixels: new Uint8Array(job.buffer.getMappedRange().slice(0)),
         worldBytesPerRow: job.worldBytesPerRow,
-        worldPixels: new Uint16Array(job.worldBuffer.getMappedRange().slice(0)),
+        worldPixels: new Float32Array(job.worldBuffer.getMappedRange().slice(0)),
+        normalBytesPerRow: job.normalBytesPerRow,
         normalPixels: new Uint16Array(job.normalBuffer.getMappedRange().slice(0)),
         diagnostics,
         diagnosticOverflows: diagnostics[6] + diagnostics[7],
@@ -2049,24 +2096,28 @@ class SplitRadianceCascades {
   }
 
   worldAt(frame, x, y) {
-    const byteOffset = y * frame.worldBytesPerRow + x * 8;
-    const index = byteOffset >> 1;
+    const byteOffset = y * frame.worldBytesPerRow + x * 16;
+    const index = byteOffset >> 2;
     return [
-      halfToFloat(frame.worldPixels[index]),
-      halfToFloat(frame.worldPixels[index + 1]),
-      halfToFloat(frame.worldPixels[index + 2]),
-      halfToFloat(frame.worldPixels[index + 3]),
+      frame.worldPixels[index],
+      frame.worldPixels[index + 1],
+      frame.worldPixels[index + 2],
+      frame.worldPixels[index + 3],
     ];
   }
 
   normalAt(frame, x, y) {
-    const byteOffset = y * frame.worldBytesPerRow + x * 8;
+    const byteOffset = y * frame.normalBytesPerRow + x * 8;
     const index = byteOffset >> 1;
-    const normal = [
-      halfToFloat(frame.normalPixels[index]),
-      halfToFloat(frame.normalPixels[index + 1]),
-      halfToFloat(frame.normalPixels[index + 2]),
-    ];
+    const octX = halfToFloat(frame.normalPixels[index]);
+    const octY = halfToFloat(frame.normalPixels[index + 1]);
+    const normal = [octX, octY, 1 - Math.abs(octX) - Math.abs(octY)];
+    if (normal[2] < 0) {
+      const oldX = normal[0];
+      const oldY = normal[1];
+      normal[0] = (1 - Math.abs(oldY)) * (oldX >= 0 ? 1 : -1);
+      normal[1] = (1 - Math.abs(oldX)) * (oldY >= 0 ? 1 : -1);
+    }
     const length = Math.hypot(...normal);
     return length > 1e-6 ? normal.map((component) => component / length) : [0, 0, 0];
   }
@@ -2882,6 +2933,144 @@ class SplitRadianceCascades {
     };
   }
 
+  async runEnclosureLeakAudit({ warmup = 128, samples = 512, preservePose = false } = {}) {
+    const saved = {
+      sceneIndex: this.sceneIndex,
+      camera: { ...this.camera, target: [...this.camera.target] },
+      animateCamera: this.animateCamera,
+      animateLights: this.animateLights,
+      temporalStability: this.temporalStability,
+      debugMode: this.debugMode,
+      testTimeOverride: this.testTimeOverride,
+    };
+    const insidePosition = [-2.2, 1.25, 0.5];
+    const insideTarget = [-1.3, 1.72, -0.42];
+    try {
+      if (this.sceneIndex !== 0) await this.loadScene(0);
+      this.animateCamera = false;
+      this.animateLights = false;
+      this.temporalStability = true;
+      this.debugMode = 1;
+      this.testTimeOverride = 0.7;
+      this.setCameraPose(insidePosition, insideTarget);
+      this.resetProbeHistory();
+      const reference = await this.runPathTracedReferenceAudit({
+        width: 80,
+        height: 45,
+        samples,
+        warmup,
+      });
+
+      // Move the camera and target together inside the closed box, then close
+      // the loop. World-space probe identities must remain stable and the
+      // returned image must match a clean reconstruction at the same pose.
+      this.setCameraPose(insidePosition, insideTarget);
+      this.resetProbeHistory();
+      await this.waitFrames(warmup);
+      const origin = await this.captureFinalFrame();
+      const luminanceBytes = [];
+      let brightPixels = 0;
+      let severePixels = 0;
+      let maximumLuminance = 0;
+      let maximumPixel = [0, 0];
+      const severeSamples = [];
+      for (let y = 0; y < origin.height; y++) {
+        const row = y * origin.bytesPerRow;
+        for (let x = 0; x < origin.width; x++) {
+          const pixel = row + x * 4;
+          const luminance = origin.pixels[pixel] * 0.2126
+            + origin.pixels[pixel + 1] * 0.7152
+            + origin.pixels[pixel + 2] * 0.0722;
+          luminanceBytes.push(luminance);
+          if (luminance > 12) brightPixels++;
+          if (luminance > 32) {
+            severePixels++;
+            if (severeSamples.length < 16) severeSamples.push([x, y, luminance]);
+          }
+          if (luminance > maximumLuminance) {
+            maximumLuminance = luminance;
+            maximumPixel = [x, y];
+          }
+        }
+      }
+      luminanceBytes.sort((a, b) => a - b);
+      const displayPercentile = (p) => luminanceBytes[
+        Math.min(luminanceBytes.length - 1, Math.floor((luminanceBytes.length - 1) * p))
+      ] || 0;
+      const displayLeak = {
+        p95LuminanceByte: displayPercentile(0.95),
+        p99LuminanceByte: displayPercentile(0.99),
+        p999LuminanceByte: displayPercentile(0.999),
+        maximumLuminanceByte: maximumLuminance,
+        maximumPixel,
+        maximumWorld: this.worldAt(origin, ...maximumPixel),
+        maximumNormal: this.normalAt(origin, ...maximumPixel),
+        severeSamples,
+        brightPixelRatio: brightPixels / Math.max(1, origin.width * origin.height),
+        severePixelRatio: severePixels / Math.max(1, origin.width * origin.height),
+      };
+      const trajectory = [];
+      const step = [0.045, 0.018, -0.035];
+      let previous = origin;
+      for (const multiplier of [1, 2, 3, 2, 1, 0]) {
+        const position = add3(insidePosition, mul3(step, multiplier));
+        const target = add3(insideTarget, mul3(step, multiplier));
+        this.setCameraPose(position, target);
+        await this.waitFrames(1);
+        const current = await this.captureFinalFrame();
+        trajectory.push(this.compareReprojectedFrames(previous, current, {
+          pixelStep: 1,
+          searchRadius: 4,
+          worldToleranceScale: 0.2,
+        }));
+        previous = current;
+      }
+      this.setCameraPose(insidePosition, insideTarget);
+      this.resetProbeHistory();
+      await this.waitFrames(warmup);
+      const clean = await this.captureFinalFrame();
+      const loopClosure = this.compareFinalFrames(previous, clean);
+      const maximum = (field) => Math.max(...trajectory.map((sample) => sample[field] ?? Infinity));
+      const minimum = (field) => Math.min(...trajectory.map((sample) => sample[field] ?? 0));
+      const metrics = this.metricsSnapshot();
+      const report = {
+        scene: 0,
+        pose: "inside closed white box",
+        reference,
+        trajectory: {
+          samples: trajectory.length,
+          matchedPixelRatioMin: minimum("matchedPixelRatio"),
+          p95ByteDeltaMax: maximum("p95ByteDelta"),
+          p99ByteDeltaMax: maximum("p99ByteDelta"),
+          largeDeltaRatioMax: maximum("largeDeltaRatio"),
+        },
+        loopClosure,
+        displayLeak,
+        metrics,
+      };
+      report.passed = reference.activePixels >= 64
+        && report.trajectory.matchedPixelRatioMin >= 0.68
+        && report.trajectory.p95ByteDeltaMax <= 4
+        && report.trajectory.p99ByteDeltaMax <= 16
+        && report.trajectory.largeDeltaRatioMax <= 0.005
+        && loopClosure.p95ByteDelta <= 2
+        && loopClosure.p99ByteDelta <= 6
+        && displayLeak.p99LuminanceByte <= 6
+        && displayLeak.maximumLuminanceByte <= 1
+        && displayLeak.severePixelRatio === 0
+        && metrics.overflows === 0
+        && !metrics.gpuError;
+      return report;
+    } finally {
+      if (!preservePose) {
+        if (this.sceneIndex !== saved.sceneIndex) await this.loadScene(saved.sceneIndex);
+        Object.assign(this, saved);
+        this.camera = saved.camera;
+        this.resetProbeHistory();
+      }
+    }
+  }
+
   renderReferenceComparison(fields, width, height) {
     const canvas = $("reference-comparison");
     const container = $("reference-visual");
@@ -3188,11 +3377,12 @@ class SplitRadianceCascades {
         .every(([metric, ceiling]) => report[metric] <= ceiling);
       report.paperSceneStrictPassed = this.sceneIndex !== 1
         || (
-          report.nrmse <= 0.40
-          && report.trimmedNrmse99 <= 0.33
-          && report.lowFrequencyScaleInvariantNrmse <= 0.24
-          && report.p95Absolute <= 0.15
-          && report.severeOverlitRatio <= 0.04
+          report.nrmse <= 0.25
+          && report.trimmedNrmse99 <= 0.22
+          && report.lowFrequencyScaleInvariantNrmse <= 0.15
+          && report.p95Absolute <= 0.06
+          && report.p99Absolute <= 0.10
+          && report.severeOverlitRatio <= 0.01
         );
       report.passed = activePixels >= 64
         && report.frozenBaselinePassed
@@ -3276,10 +3466,7 @@ class SplitRadianceCascades {
       result.motionStability = await this.runMotionStabilityAudit({
         samples: 4,
         interval: 3,
-        // The sun temple's dark portal geometry needs a longer deterministic
-        // convergence window before its raw probe-field gate. Pixel-space
-        // motion below still covers the startup path independently.
-        warmup: i === 6 ? 384 : ([5, 11].includes(i) ? 96 : 48),
+        warmup: 384,
       });
       result.finalFrameRepeatability = await this.runFinalFrameRepeatabilityAudit({
         poses: 4,
@@ -3287,12 +3474,12 @@ class SplitRadianceCascades {
         holdFrames: 2,
       });
       result.continuousMotion = await this.runContinuousMotionAudit({
-        frames: i === 1 ? 32 : 12,
-        warmup: 48,
+        frames: 32,
+        warmup: 192,
       });
       result.movingLightContinuousMotion = await this.runContinuousMotionAudit({
-        frames: i === 1 ? 32 : 12,
-        warmup: 48,
+        frames: 32,
+        warmup: 192,
         movingLights: true,
         timeStep: 1 / 60,
       });
@@ -3318,8 +3505,12 @@ class SplitRadianceCascades {
           width: 64,
           height: 36,
           samples: 512,
-          warmup: 96,
+          warmup: 192,
         });
+      }
+      if (i === 0) {
+        $("audit-title").textContent = "Testing closed-volume light-leak rejection";
+        result.enclosureLeak = await this.runEnclosureLeakAudit();
       }
       results.push(result);
       $("audit-report").textContent = results.map((r) =>
@@ -3339,6 +3530,7 @@ class SplitRadianceCascades {
       || (r.movingLightResponse && !r.movingLightResponse.passed)
       || (r.shadowMapCorrectness && !r.shadowMapCorrectness.passed)
       || (r.pathTracedReference && !r.pathTracedReference.passed)
+      || (r.enclosureLeak && !r.enclosureLeak.passed)
     );
     const report = {
       timestamp: new Date().toISOString(),

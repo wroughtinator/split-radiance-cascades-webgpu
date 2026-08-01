@@ -13,6 +13,7 @@ sun shadow pass + six-face moving-point shadow pass
   -> trace and split primary rays
   -> exact-key interval accumulation and merge c3 through c0
   -> prefilter c0 into a filterable bordered 6x6 octahedral atlas
+  -> fixed-world-radius enclosed-volume C(-1) visibility resolve
   -> diffuse indirect + direct current composite
   -> current-frame FXAA presentation
 ```
@@ -34,11 +35,24 @@ The angular grid is `2*Theta_n` by `Theta_n`, where
 `Theta_n = 4 * 2^n`. This yields 32, 128, 512, and 2048 equal-area
 sphere directions.
 
+`ds0` is selected automatically for every asset by the same scale/detail
+formula:
+
+```text
+ds0 = max(0.28, scene_radius * 0.095 / triangle_count^0.12)
+```
+
+There is no per-scene GI table. Cascade counts, direction counts, temporal
+policy, capacities, C(-1) radius multiplier, and C(-1) sample count are
+otherwise identical for every scene.
+
 ## Sparse probes and LODs
 
 Each cascade owns an open-addressed hash range. A compare/exchange claims an
 empty slot and maps the key to a compact probe index. Keys contain signed
-9-bit cell coordinates and a 3-bit LOD.
+9-bit cell coordinates, a 2-bit LOD, and a 3-bit dominant-normal surface
+class. The class is propagated through every parent cascade, preventing
+opposite sides of a thin wall from sharing an interval at any level.
 Coordinates outside the representable scene-local range are rejected and
 counted as an overflow; they are never silently clamped onto an unrelated key.
 
@@ -140,9 +154,38 @@ creating seam derivatives. GI hit materials use a fixed low-frequency mip,
 which is appropriate for diffuse transport and prevents high-frequency albedo
 aliasing from being mistaken for radiance instability.
 
-The shipped baseline intentionally contains only the paper's diffuse Split RC
-path. Secondary bounce, rough-specular, and directional `C(-1)` experiment
-switches and pipelines are not compiled into production.
+Secondary bounce and rough-specular experiment switches are not compiled into
+production. The ambient-form `C(-1)` proposed in Section 7.1 is implemented as
+a fixed-world-space production extension.
+
+## Sub-c0 visibility and closed volumes
+
+The paper explicitly reports leakage when geometry is thinner than the base
+probe spacing and proposes a screen-space `C(-1)` ray-march. A screen-space
+implementation was rejected because its samples and thickness estimate change
+with the camera. The shipped extension instead performs exact world-space BVH
+visibility:
+
+- the interval radius is always `15 * ds0`, never camera-relative LOD;
+- six axial escape tests reject open surfaces before the expensive estimator;
+- open surfaces keep the smooth reconstructed Split RC field;
+- locally closed surfaces trace a deterministic cosine set over the complete
+  scene and replace the leak-prone interpolated near field;
+- every scene uses the same 16 deterministic R2 rays;
+- ray origins use only world position and geometric normal;
+- the closed-volume traversal uses watertight shear-space edge functions.
+
+World positions are rasterized to `rgba32float`. Half-precision positions were
+not sufficient here: quantization could move a shared-edge sample across a
+thin wall or probe-cell boundary as the camera moved. Normals use two-channel
+octahedral encoding and HDR surface emission occupies the freed channels plus
+albedo alpha, keeping the three-target G-buffer within WebGPU's universal
+32-byte-per-sample attachment budget.
+
+This is intentionally labeled a production extension rather than baseline
+paper behavior. It follows the paper's ambient-term suggestion and the
+visibility-aware cache principle used by DDGI/GI-1.0, while avoiding a
+camera-dependent screen-space history.
 
 ## Stability and diagnostics
 
@@ -179,6 +222,11 @@ history rebuild, including exact per-cascade sparse-population equality; a
 raw, robust, dark-spot, bright-leak, percentile, energy-bias, and frozen
 per-scene regression gates; raster sun/point shadows compared with exact BVH
 visibility; plus explicit per-capture hash/key/capacity/BVH/device diagnostics.
+The color laboratory additionally places the camera inside a sealed white box,
+compares against a 512-spp zero-radiance oracle, scans every displayed pixel
+for leakage, moves the camera through a six-step loop, and requires exact
+same-pose closure. Its p95, p99, p99.9, and maximum displayed luminance must all
+be zero in the validated pose.
 Cornell additionally requires the shadow oracle to exercise all six
 point-shadow array layers.
 The Sponza baseline runs replay and continuous-motion checks in final,
@@ -202,6 +250,7 @@ bias, and under/over-light outlier ratios are independent mandatory gates.
 - shader/pipeline validation error scope
 - device-loss and uncaptured-error reporting
 - bounded hash probing and exact near-first SAH-BVH traversal with explicit
-  stack-overflow diagnostics
+  stack-overflow diagnostics; conservative fast intersections for cascade
+  throughput and watertight intersections for closed-volume escape rejection
 - capacity and finite-value guards
 - same-origin assets and no runtime trackers

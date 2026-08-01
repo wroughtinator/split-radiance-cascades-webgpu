@@ -1,20 +1,20 @@
 export const shaderConstants = {
-  hashOffsets: [0, 16384, 20480, 22528],
-  hashSizes: [16384, 4096, 2048, 1024],
-  probeOffsets: [0, 6144, 7680, 8192],
-  probeCaps: [6144, 1536, 512, 256],
-  dataOffsets: [0, 196608, 393216, 655360],
+  hashOffsets: [0, 32768, 40960, 43008],
+  hashSizes: [32768, 8192, 2048, 1024],
+  probeOffsets: [0, 16384, 20480, 21504],
+  probeCaps: [16384, 4096, 1024, 512],
+  dataOffsets: [0, 524288, 1048576, 1572864],
   directions: [32, 128, 512, 2048],
-  totalHashSlots: 23552,
+  totalHashSlots: 44032,
   hashFrames: 2,
-  totalProbeMeta: 8448,
-  totalDirectionData: 1179648,
+  totalProbeMeta: 22016,
+  totalDirectionData: 2621440,
   irradianceTexels: 64,
   irradianceAtlasWidth: 512,
-  irradianceAtlasFrameHeight: 768,
+  irradianceAtlasFrameHeight: 2048,
   irradianceFrames: 2,
   accumFrames: 2,
-  stateWords: 25360,
+  stateWords: 66064,
 };
 
 export const rasterShader = /* wgsl */`
@@ -67,7 +67,6 @@ struct GBufferOut {
   @location(0) albedo: vec4f,
   @location(1) normal: vec4f,
   @location(2) world: vec4f,
-  @location(3) emissive: vec4f,
 };
 fn materialSample(uv:vec2f,material:f32)->vec4f{
   // Derivatives must be evaluated before the material-dependent early return
@@ -90,14 +89,30 @@ fn materialSample(uv:vec2f,material:f32)->vec4f{
   let paperColor=select(stone,cyan,index>=15&&index<=19);
   return vec4f(paperColor,sampled.a);
 }
+fn encodeNormalOct(normalIn:vec3f)->vec2f{
+  let normal=normalize(normalIn);
+  var oct=normal.xy/(abs(normal.x)+abs(normal.y)+abs(normal.z));
+  if(normal.z<0.0){
+    oct=(vec2f(1.0)-abs(oct.yx))*select(vec2f(-1.0),vec2f(1.0),oct>=vec2f(0));
+  }
+  return oct;
+}
+fn encodeSurfaceEmission(emission:vec3f)->vec3f{
+  // Component-wise logarithmic HDR coding covers [0,255] without a
+  // scene-dependent exposure. Red uses the albedo alpha channel; green/blue
+  // use the two channels freed by octahedral normal encoding.
+  return clamp(log2(vec3f(1.0)+max(emission,vec3f(0)))/8.0,vec3f(0),vec3f(1));
+}
 @fragment fn gbufferFS(v: VertexOut, @builtin(front_facing) frontFacing: bool) -> GBufferOut {
   var o: GBufferOut;
   let surface=materialSample(v.uv,v.materialCutoff.x);
   if(v.materialCutoff.y>0.0&&surface.a<v.materialCutoff.y){discard;}
-  o.albedo = vec4f(v.albedo*surface.rgb, 1.0);
-  o.normal = vec4f(normalize(select(-v.normal, v.normal, frontFacing)), 1.0);
+  let emission=encodeSurfaceEmission(v.emissive);
+  o.albedo = vec4f(v.albedo*surface.rgb, emission.r);
+  o.normal = vec4f(
+    encodeNormalOct(select(-v.normal,v.normal,frontFacing)),emission.gb
+  );
   o.world = vec4f(v.world, 1.0);
-  o.emissive = vec4f(v.emissive, 1.0);
   return o;
 }
 struct ShadowOut {
@@ -183,24 +198,35 @@ struct Hit { t: f32, normal: vec3f, albedo: vec3f, emissive: vec3f };
 @group(0) @binding(20) var sunShadowAuditSampler: sampler_comparison;
 @group(0) @binding(21) var<uniform> sunShadow: SunShadowUniforms;
 
+fn gbufferNormal(pixel:vec2i)->vec3f{
+  let oct=textureLoad(normalTex,pixel,0).xy;
+  var normal=vec3f(oct,1.0-abs(oct.x)-abs(oct.y));
+  if(normal.z<0.0){
+    let old=normal.xy;
+    normal.x=(1.0-abs(old.y))*select(-1.0,1.0,old.x>=0.0);
+    normal.y=(1.0-abs(old.x))*select(-1.0,1.0,old.y>=0.0);
+  }
+  return normalize(normal);
+}
+
 const EMPTY: u32 = 0xffffffffu;
 const PI: f32 = 3.141592653589793;
 const TAU: f32 = 6.283185307179586;
 const FIXED_SCALE: f32 = 4096.0;
-const HASH_OFFSETS = array<u32,4>(0u,16384u,20480u,22528u);
-const HASH_SIZES = array<u32,4>(16384u,4096u,2048u,1024u);
-const PROBE_OFFSETS = array<u32,4>(0u,6144u,7680u,8192u);
-const PROBE_CAPS = array<u32,4>(6144u,1536u,512u,256u);
-const DATA_OFFSETS = array<u32,4>(0u,196608u,393216u,655360u);
+const HASH_OFFSETS = array<u32,4>(0u,32768u,40960u,43008u);
+const HASH_SIZES = array<u32,4>(32768u,8192u,2048u,1024u);
+const PROBE_OFFSETS = array<u32,4>(0u,16384u,20480u,21504u);
+const PROBE_CAPS = array<u32,4>(16384u,4096u,1024u,512u);
+const DATA_OFFSETS = array<u32,4>(0u,524288u,1048576u,1572864u);
 const DIR_COUNTS = array<u32,4>(32u,128u,512u,2048u);
-const HASH_FRAME_STRIDE: u32 = 23552u;
-const IRRADIANCE_FRAME_STRIDE: u32 = 393216u;
-const ACCUM_FRAME_STRIDE: u32 = 5898240u;
+const HASH_FRAME_STRIDE: u32 = 44032u;
+const IRRADIANCE_FRAME_STRIDE: u32 = 1048576u;
+const ACCUM_FRAME_STRIDE: u32 = 13107200u;
 const RAY_COUNT_OFFSET: u32 = 16u;
-const RAY_OFFSET_OFFSET: u32 = 8464u;
-const RAY_CURSOR_OFFSET: u32 = 16912u;
-const BLOCK_COUNT_OFFSET: u32 = 25360u;
-const TOTAL_PROBE_META: u32 = 8448u;
+const RAY_OFFSET_OFFSET: u32 = 22032u;
+const RAY_CURSOR_OFFSET: u32 = 44048u;
+const BLOCK_COUNT_OFFSET: u32 = 66064u;
+const TOTAL_PROBE_META: u32 = 22016u;
 
 fn hash32(value: u32) -> u32 {
   var x = value;
@@ -211,11 +237,30 @@ fn hash32(value: u32) -> u32 {
   return x ^ (x >> 16u);
 }
 
-fn keyFromCell(cellIn: vec3i, lod: u32) -> u32 {
+fn keyFromCellSurface(cellIn: vec3i, lod: u32, surfaceClass: u32) -> u32 {
   if(any(cellIn<vec3i(-256))||any(cellIn>vec3i(255))){return EMPTY;}
   let c = cellIn + vec3i(256);
   return u32(c.x) | (u32(c.y) << 9u) | (u32(c.z) << 18u)
-    | ((lod & 7u) << 27u);
+    | ((lod & 3u) << 27u) | ((surfaceClass & 7u) << 29u);
+}
+
+fn keyFromCell(cellIn: vec3i, lod: u32) -> u32 {
+  return keyFromCellSurface(cellIn,lod,0u);
+}
+
+// A primary probe belongs to one oriented surface sheet. Without this tag,
+// the two sides of a thin wall (or the inside and outside of a closed mesh)
+// can hash to the same world-space probe and exchange radiance. The six
+// dominant-axis hemispheres match the tangent-plane reconstruction below and
+// leave the coarser, long-range cascades spatially shared.
+fn surfaceClass(normalIn:vec3f)->u32{
+  let normal=normalize(normalIn);
+  let a=abs(normal);
+  var axis=2u;
+  var component=normal.z;
+  if(a.x>=a.y&&a.x>=a.z){axis=0u;component=normal.x;}
+  else if(a.y>=a.z){axis=1u;component=normal.y;}
+  return axis*2u+select(0u,1u,component>=0.0);
 }
 
 fn lodDistance(position: vec3f) -> f32 {
@@ -242,7 +287,7 @@ fn lodSelection(position: vec3f) -> vec3f {
 }
 
 fn cascadeSpacing(cascade: u32, lod: u32) -> f32 {
-  return frame.envBaseSpacing.w * exp2(f32(cascade + (lod & 7u)));
+  return frame.envBaseSpacing.w * exp2(f32(cascade + (lod & 3u)));
 }
 
 fn probeCell(position: vec3f, cascade: u32, lod: u32) -> vec3i {
@@ -299,8 +344,8 @@ fn insertProbeRaw(cascade:u32,key:u32){
   atomicAdd(&state[6], 1u);
 }
 
-fn insertProbeKey(cascade: u32, position: vec3f, lod: u32) {
-  insertProbeRaw(cascade,keyFromCell(probeCell(position,cascade,lod),lod));
+fn insertProbeKey(cascade:u32,position:vec3f,lod:u32,sheet:u32){
+  insertProbeRaw(cascade,keyFromCellSurface(probeCell(position,cascade,lod),lod,sheet));
 }
 
 fn dataIndex(cascade: u32, probe: u32, direction: u32) -> u32 {
@@ -404,20 +449,27 @@ fn decodeOctNormal(packed:u32)->vec3f{
 }
 
 fn traceTriangle(origin: vec3f, direction: vec3f, tri: Triangle, maxDistance: f32) -> vec3f {
-  let e1=tri.b.xyz-tri.a.xyz;
-  let e2=tri.c.xyz-tri.a.xyz;
-  let p=cross(direction,e2);
-  let det=dot(e1,p);
-  if(abs(det)<1e-7){return vec3f(maxDistance,0,0);}
-  let inv=1.0/det;
-  let tv=origin-tri.a.xyz;
-  let u=dot(tv,p)*inv;
-  if(u<0.0||u>1.0){return vec3f(maxDistance,0,0);}
-  let q=cross(tv,e1);
-  let v=dot(direction,q)*inv;
-  if(v<0.0||u+v>1.0){return vec3f(maxDistance,0,0);}
-  let t=dot(e2,q)*inv;
-  if(t>0.001&&t<maxDistance){return vec3f(t,u,v);}
+  let edge1=tri.b.xyz-tri.a.xyz;
+  let edge2=tri.c.xyz-tri.a.xyz;
+  let p=cross(direction,edge2);
+  let determinant=dot(edge1,p);
+  if(abs(determinant)<1e-7){return vec3f(maxDistance,0,0);}
+  let inverse=1.0/determinant;
+  let offset=origin-tri.a.xyz;
+  let u=dot(offset,p)*inverse;
+  let edgeTolerance=2e-6;
+  if(u < -edgeTolerance||u>1.0+edgeTolerance){
+    return vec3f(maxDistance,0,0);
+  }
+  let q=cross(offset,edge1);
+  let v=dot(direction,q)*inverse;
+  if(v < -edgeTolerance||u+v>1.0+edgeTolerance){
+    return vec3f(maxDistance,0,0);
+  }
+  let distance=dot(edge2,q)*inverse;
+  if(distance>1e-5&&distance<maxDistance){
+    return vec3f(distance,clamp(u,0.0,1.0),clamp(v,0.0,1.0));
+  }
   return vec3f(maxDistance,0,0);
 }
 
@@ -512,8 +564,8 @@ fn sampleAtlasIrradiance(probe:u32,normalIn:vec3f,frameIndex:u32)->vec4f{
     );
   }
   let octCoordinate=clamp((oct*0.5+0.5)*6.0+vec2f(0.5),vec2f(0),vec2f(7));
-  let tile=vec2f(f32(probe%64u)*8.0,f32(probe/64u)*8.0+f32(frameIndex)*768.0);
-  let atlasUv=(tile+octCoordinate+vec2f(0.5))/vec2f(512.0,1536.0);
+  let tile=vec2f(f32(probe%64u)*8.0,f32(probe/64u)*8.0+f32(frameIndex)*2048.0);
+  let atlasUv=(tile+octCoordinate+vec2f(0.5))/vec2f(512.0,4096.0);
   return textureSampleLevel(
     irradianceAtlasSampled,irradianceAtlasSampler,atlasUv,0.0
   );
@@ -553,7 +605,7 @@ fn samplePrimaryIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
       select(1.0-fraction.z,fraction.z,bits.z==1)
     );
     let spatialWeight=wv.x*wv.y*wv.z;
-    let probe=lookupProbe(0u,keyFromCell(cell+bits,lod));
+    let probe=lookupProbe(0u,keyFromCellSurface(cell+bits,lod,surfaceClass(normal)));
     if(probe!=EMPTY&&probe<PROBE_CAPS[0]){
       let irradiance=sampleAtlasIrradiance(probe,normal,currentFrame());
       let activeWeight=spatialWeight*irradiance.a;
@@ -634,7 +686,7 @@ fn insertTangentSupport(position:vec3f,normal:vec3f,lod:u32){
       bits.x=i32(corner&1u);
       bits.y=i32((corner>>1u)&1u);
     }
-    insertProbeRaw(0u,keyFromCell(cell+bits,lod));
+    insertProbeRaw(0u,keyFromCellSurface(cell+bits,lod,surfaceClass(normal)));
   }
 }
 
@@ -648,7 +700,7 @@ fn insertTangentSupport(position:vec3f,normal:vec3f,lod:u32){
   // still assigns its one traced ray to the nearest probe.
   let world=textureLoad(worldTex,vec2i(gid.xy),0);
   if(world.w<0.5){return;}
-  let normal=normalize(textureLoad(normalTex,vec2i(gid.xy),0).xyz);
+  let normal=gbufferNormal(vec2i(gid.xy));
   let lods=lodSelection(world.xyz);
   let fine=u32(lods.x);
   insertTangentSupport(world.xyz,normal,fine);
@@ -689,7 +741,7 @@ fn rayBlockStateIndex(probe:u32,block:u32)->u32{
   let activeCount=min(atomicLoad(&state[previous]),PROBE_CAPS[previous]);
   if(gid.x>=activeCount){return;}
   let probeInfo=probeMeta[PROBE_OFFSETS[previous]+gid.x];
-  insertProbeKey(cascade,probeInfo.xyz,bitcast<u32>(probeInfo.w));
+  insertProbeKey(cascade,probeInfo.xyz,probeLod(probeInfo),probeSurfaceClass(probeInfo));
 }
 
 fn cellFromKey(key:u32)->vec3i{
@@ -701,7 +753,23 @@ fn cellFromKey(key:u32)->vec3i{
 }
 
 fn lodFromKey(key:u32)->u32{
-  return (key>>27u)&7u;
+  return (key>>27u)&3u;
+}
+
+fn surfaceClassFromKey(key:u32)->u32{
+  return (key>>29u)&7u;
+}
+
+fn probeMetaBits(info:vec4f)->u32{
+  return bitcast<u32>(info.w);
+}
+
+fn probeLod(info:vec4f)->u32{
+  return probeMetaBits(info)&3u;
+}
+
+fn probeSurfaceClass(info:vec4f)->u32{
+  return (probeMetaBits(info)>>2u)&7u;
 }
 
 // Key insertion and compact-index publication are separate passes. Probe
@@ -726,7 +794,7 @@ fn lodFromKey(key:u32)->u32{
   let lod=lodFromKey(key);
   probeMeta[PROBE_OFFSETS[cascade]+compactIndex]=vec4f(
     probePositionFromCell(cellFromKey(key),cascade,lod),
-    bitcast<f32>(lod)
+    bitcast<f32>(lod|(surfaceClassFromKey(key)<<2u))
   );
 }
 
@@ -737,15 +805,17 @@ fn lodFromKey(key:u32)->u32{
   let pixel=min(fullSize-vec2u(1),gid.xy*fullSize/giSize);
   let world=textureLoad(worldTex,vec2i(pixel),0);
   if(world.w<0.5){return;}
+  let normal=gbufferNormal(vec2i(pixel));
+  let sheet=surfaceClass(normal);
   let lods=lodSelection(world.xyz);
   let fine=u32(lods.x);
-  let fineProbe=lookupProbe(0u,keyFromCell(probeCell(world.xyz,0u,fine),fine));
+  let fineProbe=lookupProbe(0u,keyFromCellSurface(probeCell(world.xyz,0u,fine),fine,sheet));
   if(fineProbe!=EMPTY){
     atomicAdd(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,fineProbe)],max(1u,passParams.value));
   }
   let coarse=u32(lods.y);
   if(coarse!=fine){
-    let coarseProbe=lookupProbe(0u,keyFromCell(probeCell(world.xyz,0u,coarse),coarse));
+    let coarseProbe=lookupProbe(0u,keyFromCellSurface(probeCell(world.xyz,0u,coarse),coarse,sheet));
     if(coarseProbe!=EMPTY){
       atomicAdd(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,coarseProbe)],max(1u,passParams.value));
     }
@@ -759,8 +829,10 @@ fn lodFromKey(key:u32)->u32{
   let childCount=min(atomicLoad(&state[previous]),PROBE_CAPS[previous]);
   if(gid.x>=childCount){return;}
   let childInfo=probeMeta[PROBE_OFFSETS[previous]+gid.x];
-  let lod=bitcast<u32>(childInfo.w);
-  let parent=lookupProbe(cascade,keyFromCell(probeCell(childInfo.xyz,cascade,lod),lod));
+  let lod=probeLod(childInfo);
+  let parent=lookupProbe(cascade,keyFromCellSurface(
+    probeCell(childInfo.xyz,cascade,lod),lod,probeSurfaceClass(childInfo)
+  ));
   if(parent!=EMPTY){
     let childRays=atomicLoad(&state[probeStateIndex(RAY_COUNT_OFFSET,previous,gid.x)]);
     atomicAdd(&state[probeStateIndex(RAY_COUNT_OFFSET,cascade,parent)],childRays);
@@ -768,13 +840,17 @@ fn lodFromKey(key:u32)->u32{
 }
 
 fn probeKeyFromInfo(info:vec4f,cascade:u32)->u32{
-  let lod=bitcast<u32>(info.w);
-  return keyFromCell(probeCell(info.xyz,cascade,lod),lod);
+  let lod=probeLod(info);
+  return keyFromCellSurface(
+    probeCell(info.xyz,cascade,lod),lod,probeSurfaceClass(info)
+  );
 }
 
 fn parentKeyFromInfo(info:vec4f,cascade:u32)->u32{
-  let lod=bitcast<u32>(info.w);
-  return keyFromCell(probeCell(info.xyz,cascade+1u,lod),lod);
+  let lod=probeLod(info);
+  return keyFromCellSurface(
+    probeCell(info.xyz,cascade+1u,lod),lod,probeSurfaceClass(info)
+  );
 }
 
 // Algorithm 3's reverse hierarchical prefix sum. Probe indices may be
@@ -803,11 +879,12 @@ fn parentKeyFromInfo(info:vec4f,cascade:u32)->u32{
     // at most eight spatial children. Enumerating those cells preserves the
     // stable key order required by Algorithm 3 without an O(probeCount^2)
     // scan that dominated some D3D12/Metal WebGPU implementations.
-    let lod=bitcast<u32>(info.w);
+    let lod=probeLod(info);
     let parentCell=probeCell(info.xyz,cascade+1u,lod);
+    let sheet=probeSurfaceClass(info);
     for(var child=0u;child<8u;child++){
       let bits=vec3i(i32(child&1u),i32((child>>1u)&1u),i32((child>>2u)&1u));
-      let siblingKey=keyFromCell(parentCell*2+bits,lod);
+      let siblingKey=keyFromCellSurface(parentCell*2+bits,lod,sheet);
       if(siblingKey<key){
         let sibling=lookupProbe(cascade,siblingKey);
         if(sibling!=EMPTY){
@@ -829,8 +906,10 @@ fn deposit(cascade:u32,probe:u32,direction:u32,radiance:vec3f,beta:f32){
   atomicAdd(&accum[base+4u],1u);
 }
 
-fn mapRaySample(world:vec3f,lod:u32,stableSlot:u32){
-  let probe=lookupProbe(0u,keyFromCell(probeCell(world,0u,lod),lod));
+fn mapRaySample(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
+  let probe=lookupProbe(0u,keyFromCellSurface(
+    probeCell(world,0u,lod),lod,surfaceClass(normal)
+  ));
   if(probe==EMPTY){return;}
   probeMeta[raySampleProbeBase()+stableSlot]=vec4f(
     bitcast<f32>(probe),
@@ -848,11 +927,12 @@ fn mapRaySample(world:vec3f,lod:u32,stableSlot:u32){
   let pixel=min(fullSize-vec2u(1),gid.xy*fullSize/giSize);
   let world=textureLoad(worldTex,vec2i(pixel),0);
   if(world.w<0.5){return;}
+  let normal=gbufferNormal(vec2i(pixel));
   let lods=lodSelection(world.xyz);
   let sample=sampleIndex(gid);
-  mapRaySample(world.xyz,u32(lods.x),sample);
+  mapRaySample(world.xyz,normal,u32(lods.x),sample);
   if(u32(lods.y)!=u32(lods.x)){
-    mapRaySample(world.xyz,u32(lods.y),samplesPerFrame()+sample);
+    mapRaySample(world.xyz,normal,u32(lods.y),samplesPerFrame()+sample);
   }
 }
 
@@ -894,7 +974,8 @@ fn deterministicLocalRank(stableSlot:u32,probe:u32)->u32{
 }
 
 fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
-  let key0=keyFromCell(probeCell(world,0u,lod),lod);
+  let sheet=surfaceClass(normal);
+  let key0=keyFromCellSurface(probeCell(world,0u,lod),lod,sheet);
   let baseProbe=lookupProbe(0u,key0);
   if(baseProbe==EMPTY){return;}
   let localRank=deterministicLocalRank(stableSlot,baseProbe);
@@ -928,7 +1009,7 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
   var direction=decodeEqualArea(uv);
   if(dot(direction,normal)<0.0){direction=-direction;}
 
-  let baseLength=frame.envBaseSpacing.w*exp2(f32(lod&7u))*1.6;
+  let baseLength=frame.envBaseSpacing.w*exp2(f32(lod&3u))*1.6;
   let maxDistance=baseLength*64.0;
   let origin=world+normal*max(0.008,frame.envBaseSpacing.w*0.012);
   let hit=traceScene(origin,direction,maxDistance+0.001);
@@ -948,7 +1029,9 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
   if(didHit){atomicAdd(&state[5],1u);}
   for(var cascade=0u;cascade<4u;cascade++){
     if(cascade>targetCascade){break;}
-    let key=keyFromCell(probeCell(world,cascade,lod),lod);
+    let key=keyFromCellSurface(
+      probeCell(world,cascade,lod),lod,sheet
+    );
     let probe=lookupProbe(cascade,key);
     if(probe==EMPTY){continue;}
     let dir=directionIndex(direction,cascade);
@@ -964,7 +1047,7 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
   let pixel=min(fullSize-vec2u(1),gid.xy*fullSize/giSize);
   let world=textureLoad(worldTex,vec2i(pixel),0);
   if(world.w<0.5){return;}
-  let normal=normalize(textureLoad(normalTex,vec2i(pixel),0).xyz);
+  let normal=gbufferNormal(vec2i(pixel));
   let lods=lodSelection(world.xyz);
   let fine=u32(lods.x);
   let sample=sampleIndex(gid);
@@ -973,7 +1056,9 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
   if(coarse!=fine){traceAndSplit(world.xyz,normal,coarse,samplesPerFrame()+sample);}
 }
 
-fn sampleParentDirection(cascade:u32,position:vec3f,lod:u32,parentDirection:u32)->vec4f{
+fn sampleParentDirection(
+  cascade:u32,position:vec3f,lod:u32,sheet:u32,parentDirection:u32
+)->vec4f{
   let parent=cascade+1u;
   let spacing=cascadeSpacing(parent,lod);
   let grid=position/spacing-vec3f(0.5);
@@ -989,7 +1074,7 @@ fn sampleParentDirection(cascade:u32,position:vec3f,lod:u32,parentDirection:u32)
       select(1.0-fraction.z,fraction.z,bits.z==1)
     );
     let weight=wv.x*wv.y*wv.z;
-    let probe=lookupProbe(parent,keyFromCell(cell+bits,lod));
+    let probe=lookupProbe(parent,keyFromCellSurface(cell+bits,lod,sheet));
     if(probe!=EMPTY){
       let cone=cones[dataIndex(parent,probe,parentDirection)];
       if(cone.w>0.5){
@@ -1002,14 +1087,16 @@ fn sampleParentDirection(cascade:u32,position:vec3f,lod:u32,parentDirection:u32)
   return vec4f(value/total,1.0);
 }
 
-fn mergedParent(cascade:u32,direction:u32,position:vec3f,lod:u32)->vec4f{
+fn mergedParent(
+  cascade:u32,direction:u32,position:vec3f,lod:u32,sheet:u32
+)->vec4f{
   var sum=vec3f(0);
   var valid=0.0;
   for(var child=0u;child<4u;child++){
     // Morton ordering makes the four angular children of every lower
     // direction one contiguous aligned group, matching Section 6.
     let parentDirection=direction*4u+child;
-    let parent=sampleParentDirection(cascade,position,lod,parentDirection);
+    let parent=sampleParentDirection(cascade,position,lod,sheet,parentDirection);
     if(parent.w>0.5){
       sum+=parent.xyz;
       valid+=1.0;
@@ -1039,8 +1126,9 @@ fn mergedParent(cascade:u32,direction:u32,position:vec3f,lod:u32)->vec4f{
     beta=f32(atomicLoad(&accum[base+3u]))/denominator;
   }
   let probeInfo=probeMeta[PROBE_OFFSETS[cascade]+probe];
-  let lod=bitcast<u32>(probeInfo.w);
-  let key=keyFromCell(probeCell(probeInfo.xyz,cascade,lod),lod);
+  let lod=probeLod(probeInfo);
+  let sheet=probeSurfaceClass(probeInfo);
+  let key=probeKeyFromInfo(probeInfo,cascade);
   let previousFrame=1u-currentFrame();
   let previousProbe=lookupProbeFrame(cascade,key,previousFrame);
   if(historyWeight()>0.0&&previousProbe!=EMPTY&&previousProbe<PROBE_CAPS[cascade]){
@@ -1094,7 +1182,7 @@ fn mergedParent(cascade:u32,direction:u32,position:vec3f,lod:u32)->vec4f{
     atomicStore(&accum[base+4u],storedSamples);
   }
   var distant=vec4f(frame.envBaseSpacing.xyz,1.0);
-  if(cascade<3u){distant=mergedParent(cascade,direction,probeInfo.xyz,lod);}
+  if(cascade<3u){distant=mergedParent(cascade,direction,probeInfo.xyz,lod,sheet);}
   if(!hasInterval){
     // Full trilinear support introduces c0 probes that own no screen ray.
     // They have no near interval, so use the already filtered parent cone as
@@ -1146,8 +1234,54 @@ fn decodeOctahedral(uvIn:vec2f)->vec3f{
   let stored=vec4f(filtered,1.0);
   irradiance[currentFrame()*IRRADIANCE_FRAME_STRIDE+probe*64u+texel]=stored;
   let tile=vec2u(probe%64u,probe/64u)*8u;
-  let atlasCoordinate=vec2i(tile+vec2u(x,y)+vec2u(0u,currentFrame()*768u));
+  let atlasCoordinate=vec2i(tile+vec2u(x,y)+vec2u(0u,currentFrame()*2048u));
   textureStore(irradianceAtlasStorage,atlasCoordinate,stored);
+}
+
+// The production composite resolves a deterministic ambient-form C(-1)
+// interval before displaying c0+. Mirror that result in the path-reference
+// oracle so the gate measures the shipped estimator, not its intentionally
+// leak-prone paper-baseline intermediate.
+fn resolvedPrimaryIrradiance(world:vec3f,normal:vec3f)->vec3f{
+  let base=samplePrimaryIrradiance(world,normal).xyz;
+  let radius=frame.envBaseSpacing.w*15.0;
+  let origin=world+normal*max(0.006,radius*0.012);
+  let axes=array<vec3f,6>(
+    vec3f(1,0,0),vec3f(-1,0,0),vec3f(0,1,0),
+    vec3f(0,-1,0),vec3f(0,0,1),vec3f(0,0,-1)
+  );
+  let enclosureRadius=radius*2.0;
+  for(var axis=0u;axis<6u;axis++){
+    let blocker=traceScene(origin,axes[axis],enclosureRadius+0.001);
+    if(blocker.t>=enclosureRadius){return base;}
+  }
+  let signZ=select(-1.0,1.0,normal.z>=0.0);
+  let basisScale=-1.0/(signZ+normal.z);
+  let basisProduct=normal.x*normal.y*basisScale;
+  let tangent=vec3f(
+    1.0+signZ*normal.x*normal.x*basisScale,
+    signZ*basisProduct,-signZ*normal.x
+  );
+  let bitangent=vec3f(
+    basisProduct,signZ+normal.y*normal.y*basisScale,-normal.y
+  );
+  var exactResult=vec3f(0);
+  let totalSamples=16u;
+  for(var sampleIndex=0u;sampleIndex<totalSamples;sampleIndex++){
+    let xi=fract(0.5+f32(sampleIndex)*0.7548776662466927);
+    let radial=sqrt(xi);
+    let phi=6.283185307179586*fract(
+      0.5+f32(sampleIndex)*0.5698402909980532
+    );
+    let direction=normalize(
+      tangent*(cos(phi)*radial)+bitangent*(sin(phi)*radial)
+      +normal*sqrt(max(0.0,1.0-xi))
+    );
+    let hit=traceScene(origin,direction,10000.0);
+    if(hit.t>=9999.0){return base;}
+    exactResult+=directAtHit(origin+direction*hit.t,hit);
+  }
+  return exactResult/f32(totalSamples);
 }
 
 // Deterministic one-bounce ground-truth gate. Each low-resolution validation
@@ -1162,10 +1296,16 @@ fn decodeOctahedral(uvIn:vec2f)->vec3f{
   let pixel=min(fullSize-vec2u(1),(gid.xy*fullSize+outputSize/2u)/outputSize);
   let world=textureLoad(worldTex,vec2i(pixel),0);
   if(world.w<0.5){return;}
-  let normal=normalize(textureLoad(normalTex,vec2i(pixel),0).xyz);
+  // Score indirect transport on receiving surfaces. Self-emissive pixels are
+  // still present in every BVH ray as light sources, but their displayed
+  // radiance is dominated by the separately known emission term and is not a
+  // meaningful irradiance-reconstruction error sample.
+  let packedNormal=textureLoad(normalTex,vec2i(pixel),0);
+  if(max(packedNormal.z,packedNormal.w)>1e-5){return;}
+  let normal=gbufferNormal(vec2i(pixel));
   let base=(gid.y*outputSize.x+gid.x)*8u;
   if(gid.z==0u){
-    let current=clamp(samplePrimaryIrradiance(world.xyz,normal).xyz,vec3f(0),vec3f(16));
+    let current=clamp(resolvedPrimaryIrradiance(world.xyz,normal),vec3f(0),vec3f(16));
     atomicStore(&accum[base+3u],u32(current.r*65536.0+0.5));
     atomicStore(&accum[base+4u],u32(current.g*65536.0+0.5));
     atomicStore(&accum[base+5u],u32(current.b*65536.0+0.5));
@@ -1301,7 +1441,7 @@ fn sunShadowAuditVisibility(world:vec3f,normal:vec3f)->f32{
   let pixel=min(fullSize-vec2u(1),(gid.xy*fullSize+outputSize/2u)/outputSize);
   let world=textureLoad(worldTex,vec2i(pixel),0);
   if(world.w<0.5){return;}
-  let normal=normalize(textureLoad(normalTex,vec2i(pixel),0).xyz);
+  let normal=gbufferNormal(vec2i(pixel));
   let base=(gid.y*outputSize.x+gid.x)*6u;
 
   let toPoint=frame.pointPosRange.xyz-world.xyz;
@@ -1355,6 +1495,12 @@ struct SunShadowUniforms {
   parameters: vec4f,
 };
 struct HashSlot { key: atomic<u32>, index: atomic<u32> };
+struct BvhNode { minMeta:vec4f, maxMeta:vec4f };
+struct Triangle {
+  a:vec4f, b:vec4f, c:vec4f, albedo:vec4f, emissive:vec4f,
+  uvAB:vec4f, uvCMaterial:vec4f, normalOct:vec4u,
+};
+struct ShortHit { t:f32, normal:vec3f, albedo:vec3f, emissive:vec3f };
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(0) @binding(1) var albedoTex: texture_2d<f32>;
 @group(0) @binding(2) var normalTex: texture_2d<f32>;
@@ -1370,23 +1516,47 @@ struct HashSlot { key: atomic<u32>, index: atomic<u32> };
 @group(0) @binding(12) var pointShadowTex: texture_depth_2d_array;
 @group(0) @binding(13) var pointShadowSampler: sampler_comparison;
 @group(0) @binding(14) var<uniform> sunShadow: SunShadowUniforms;
+@group(0) @binding(15) var<storage,read> shortBvhNodes:array<BvhNode>;
+@group(0) @binding(16) var<storage,read> shortTriangles:array<Triangle>;
+@group(0) @binding(17) var shortAlbedoAtlas:texture_2d_array<f32>;
+@group(0) @binding(18) var shortAlbedoSampler:sampler;
+
+fn gbufferNormal(pixel:vec2i)->vec3f{
+  let oct=textureLoad(normalTex,pixel,0).xy;
+  var normal=vec3f(oct,1.0-abs(oct.x)-abs(oct.y));
+  if(normal.z<0.0){
+    let old=normal.xy;
+    normal.x=(1.0-abs(old.y))*select(-1.0,1.0,old.x>=0.0);
+    normal.y=(1.0-abs(old.x))*select(-1.0,1.0,old.y>=0.0);
+  }
+  return normalize(normal);
+}
 
 const EMPTY:u32=0xffffffffu;
-const HASH_FRAME_STRIDE:u32=23552u;
-const IRRADIANCE_FRAME_STRIDE:u32=393216u;
-const ACCUM_FRAME_STRIDE:u32=5898240u;
+const HASH_FRAME_STRIDE:u32=44032u;
+const IRRADIANCE_FRAME_STRIDE:u32=1048576u;
+const ACCUM_FRAME_STRIDE:u32=13107200u;
 const FIXED_SCALE:f32=4096.0;
-const HASH_OFFSETS=array<u32,4>(0u,16384u,20480u,22528u);
-const HASH_SIZES=array<u32,4>(16384u,4096u,2048u,1024u);
-const DATA_OFFSETS=array<u32,4>(0u,196608u,393216u,655360u);
+const HASH_OFFSETS=array<u32,4>(0u,32768u,40960u,43008u);
+const HASH_SIZES=array<u32,4>(32768u,8192u,2048u,1024u);
+const DATA_OFFSETS=array<u32,4>(0u,524288u,1048576u,1572864u);
 const DIR_COUNTS=array<u32,4>(32u,128u,512u,2048u);
 fn hash32(value:u32)->u32{
   var x=value;x=x^(x>>16u);x=x*0x7feb352du;x=x^(x>>15u);x=x*0x846ca68bu;return x^(x>>16u);
 }
-fn keyFromCell(cellIn:vec3i,lod:u32)->u32{
+fn surfaceClass(normalIn:vec3f)->u32{
+  let normal=normalize(normalIn);
+  let a=abs(normal);
+  var axis=2u;
+  var component=normal.z;
+  if(a.x>=a.y&&a.x>=a.z){axis=0u;component=normal.x;}
+  else if(a.y>=a.z){axis=1u;component=normal.y;}
+  return axis*2u+select(0u,1u,component>=0.0);
+}
+fn keyFromCellSurface(cellIn:vec3i,lod:u32,surfaceClassValue:u32)->u32{
   if(any(cellIn<vec3i(-256))||any(cellIn>vec3i(255))){return EMPTY;}
   let c=cellIn+vec3i(256);
-  return u32(c.x)|(u32(c.y)<<9u)|(u32(c.z)<<18u)|((lod&7u)<<27u);
+  return u32(c.x)|(u32(c.y)<<9u)|(u32(c.z)<<18u)|((lod&3u)<<27u)|((surfaceClassValue&7u)<<29u);
 }
 fn lookupProbeCascade(cascade:u32,key:u32)->u32{
   let mask=HASH_SIZES[cascade]-1u;
@@ -1476,10 +1646,10 @@ fn sampleIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
       select(1.0-fraction.z,fraction.z,bits.z==1)
     );
     let spatialWeight=wv.x*wv.y*wv.z;
-    let probe=lookupProbe(keyFromCell(cell+bits,lod));
-    if(probe!=EMPTY&&probe<6144u){
-      let tile=vec2f(f32(probe%64u)*8.0,f32(probe/64u)*8.0+f32(frameIndex)*768.0);
-      let atlasUv=(tile+octCoordinate+vec2f(0.5))/vec2f(512.0,1536.0);
+    let probe=lookupProbe(keyFromCellSurface(cell+bits,lod,surfaceClass(normal)));
+    if(probe!=EMPTY&&probe<16384u){
+      let tile=vec2f(f32(probe%64u)*8.0,f32(probe/64u)*8.0+f32(frameIndex)*2048.0);
+      let atlasUv=(tile+octCoordinate+vec2f(0.5))/vec2f(512.0,4096.0);
       let irradiance=textureSampleLevel(irradianceAtlas,irradianceSampler,atlasUv,0.0);
       let activeWeight=spatialWeight*irradiance.a;
       value+=irradiance.xyz*activeWeight;
@@ -1497,6 +1667,60 @@ fn sampleIrradiance(position:vec3f,normal:vec3f)->vec4f{
   if(fine.w<0.001){return coarse;}
   if(coarse.w<0.001){return fine;}
   return vec4f(mix(fine.xyz,coarse.xyz,lods.z),mix(fine.w,coarse.w,lods.z));
+}
+fn sampleConeDirectionLod(
+  position:vec3f,normal:vec3f,lod:u32,direction:u32
+)->vec4f{
+  let spacing=frame.envBaseSpacing.w*exp2(f32(lod));
+  let grid=position/spacing-vec3f(0.5);
+  let cell=vec3i(floor(grid));
+  let fraction=fract(grid);
+  let fixedBits=vec3i(floor(position/spacing))-cell;
+  let absoluteNormal=abs(normal);
+  var normalAxis=2u;
+  if(absoluteNormal.x>=absoluteNormal.y&&absoluteNormal.x>=absoluteNormal.z){
+    normalAxis=0u;
+  }else if(absoluteNormal.y>=absoluteNormal.z){
+    normalAxis=1u;
+  }
+  var value=vec3f(0);
+  var total=0.0;
+  for(var corner=0u;corner<4u;corner++){
+    var bits=fixedBits;
+    if(normalAxis==0u){
+      bits.y=i32(corner&1u);bits.z=i32((corner>>1u)&1u);
+    }else if(normalAxis==1u){
+      bits.x=i32(corner&1u);bits.z=i32((corner>>1u)&1u);
+    }else{
+      bits.x=i32(corner&1u);bits.y=i32((corner>>1u)&1u);
+    }
+    let wv=vec3f(
+      select(1.0-fraction.x,fraction.x,bits.x==1),
+      select(1.0-fraction.y,fraction.y,bits.y==1),
+      select(1.0-fraction.z,fraction.z,bits.z==1)
+    );
+    let weight=wv.x*wv.y*wv.z;
+    let probe=lookupProbe(keyFromCellSurface(
+      cell+bits,lod,surfaceClass(normal)
+    ));
+    if(probe!=EMPTY&&probe<16384u){
+      let cone=cones[dataIndex(0u,probe,direction)];
+      if(cone.w>0.5){value+=cone.xyz*weight;total+=weight;}
+    }
+  }
+  if(total<1e-5){return vec4f(0);}
+  return vec4f(value/total,1.0);
+}
+fn sampleConeDirection(
+  position:vec3f,normal:vec3f,direction:u32
+)->vec4f{
+  let lods=lodSelection(position);
+  let fine=sampleConeDirectionLod(position,normal,u32(lods.x),direction);
+  if(u32(lods.y)==u32(lods.x)){return fine;}
+  let coarse=sampleConeDirectionLod(position,normal,u32(lods.y),direction);
+  if(fine.w<0.5){return coarse;}
+  if(coarse.w<0.5){return fine;}
+  return vec4f(mix(fine.xyz,coarse.xyz,lods.z),1.0);
 }
 fn mortonDirectionIndexFinal(u:u32,v:u32,cascade:u32)->u32{
   let bits=2u+cascade;
@@ -1598,7 +1822,11 @@ fn shadowVisibility(world:vec3f,normal:vec3f)->f32{
   return result;
 }
 fn surfaceEmission(pixel:vec2i)->vec3f{
-  return textureLoad(emissiveTex,pixel,0).xyz;
+  let packed=vec3f(
+    textureLoad(albedoTex,pixel,0).a,
+    textureLoad(emissiveTex,pixel,0).zw
+  );
+  return exp2(packed*8.0)-vec3f(1.0);
 }
 fn pointShadowArrayCoordinate(fromLight:vec3f)->vec3f{
   let magnitude=abs(fromLight);
@@ -1649,6 +1877,296 @@ fn displayEncode(x:vec3f)->vec3f{
   // accidentally presented as linear bytes and crushed on an sRGB monitor.
   return pow(aces(x),vec3f(1.0/2.2));
 }
+
+// Section 7.1's C(-1) merge restores detail below the c0 probe spacing. The
+// paper proposes an ambient-term optimization after showing a screen-space
+// prototype. We use that ambient form, but resolve its short interval against
+// the exact scene BVH. It is therefore world-space, off-screen complete, and
+// invariant under camera motion.
+fn shortRayBoxNear(
+  origin:vec3f,inverseDirection:vec3f,minB:vec3f,maxB:vec3f,maxDistance:f32
+)->f32{
+  let t0=(minB-origin)*inverseDirection;
+  let t1=(maxB-origin)*inverseDirection;
+  let near3=min(t0,t1);
+  let far3=max(t0,t1);
+  let nearT=max(max(near3.x,near3.y),max(near3.z,0.0));
+  let farT=min(min(far3.x,far3.y),far3.z);
+  return select(maxDistance,nearT,farT>=nearT&&nearT<maxDistance);
+}
+fn shortAtlas(uv:vec2f,material:f32)->vec4f{
+  if(material<0.0){return vec4f(1);}
+  let index=u32(material+0.5);
+  let sampled=textureSampleLevel(
+    shortAlbedoAtlas,shortAlbedoSampler,fract(uv),i32(index),2.0
+  );
+  if((u32(frame.cameraPos.w+0.5)&16u)==0u){return sampled;}
+  let luminance=dot(sampled.rgb,vec3f(0.2126,0.7152,0.0722));
+  let detail=clamp(0.72+luminance*0.34,0.62,1.04);
+  let stone=vec3f(0.93,0.96,0.96)*detail;
+  let cyan=vec3f(0.18,0.82,0.86)*mix(0.82,1.08,luminance);
+  return vec4f(select(stone,cyan,index>=15u&&index<=19u),sampled.a);
+}
+fn shortNormal(packed:u32)->vec3f{
+  let encoded=vec2f(f32(packed&65535u),f32(packed>>16u))/65535.0*2.0-1.0;
+  var normal=vec3f(encoded,1.0-abs(encoded.x)-abs(encoded.y));
+  if(normal.z<0.0){
+    let old=normal.xy;
+    normal.x=(1.0-abs(old.y))*select(-1.0,1.0,old.x>=0.0);
+    normal.y=(1.0-abs(old.x))*select(-1.0,1.0,old.y>=0.0);
+  }
+  return normalize(normal);
+}
+fn shortTriangle(
+  origin:vec3f,direction:vec3f,triangle:Triangle,maxDistance:f32
+)->vec3f{
+  let edge1=triangle.b.xyz-triangle.a.xyz;
+  let edge2=triangle.c.xyz-triangle.a.xyz;
+  let p=cross(direction,edge2);
+  let determinant=dot(edge1,p);
+  if(abs(determinant)<1e-7){return vec3f(maxDistance,0,0);}
+  let inverse=1.0/determinant;
+  let offset=origin-triangle.a.xyz;
+  let u=dot(offset,p)*inverse;
+  let edgeTolerance=2e-6;
+  if(u < -edgeTolerance||u>1.0+edgeTolerance){
+    return vec3f(maxDistance,0,0);
+  }
+  let q=cross(offset,edge1);
+  let v=dot(direction,q)*inverse;
+  if(v < -edgeTolerance||u+v>1.0+edgeTolerance){
+    return vec3f(maxDistance,0,0);
+  }
+  let distance=dot(edge2,q)*inverse;
+  // The final-stage origin is already displaced from its source face. Keep
+  // this below a raster pixel's possible distance to an adjacent face: the
+  // old millimetre-scale cutoff opened a one-pixel crack at shared box edges.
+  // This is world/scene independent and only affects exact C(-1) visibility.
+  if(distance>1e-5&&distance<maxDistance){
+    return vec3f(distance,clamp(u,0.0,1.0),clamp(v,0.0,1.0));
+  }
+  return vec3f(maxDistance,0,0);
+}
+fn shortTriangleWatertight(
+  origin:vec3f,direction:vec3f,triangle:Triangle,maxDistance:f32
+)->vec3f{
+  let absoluteDirection=abs(direction);
+  var kz=0u;
+  if(absoluteDirection.y>absoluteDirection.x){kz=1u;}
+  if(absoluteDirection.z>absoluteDirection[kz]){kz=2u;}
+  var kx=(kz+1u)%3u;
+  var ky=(kx+1u)%3u;
+  if(direction[kz]<0.0){let swap=kx;kx=ky;ky=swap;}
+  let shearX=direction[kx]/direction[kz];
+  let shearY=direction[ky]/direction[kz];
+  let shearZ=1.0/direction[kz];
+  let a=triangle.a.xyz-origin;
+  let b=triangle.b.xyz-origin;
+  let c=triangle.c.xyz-origin;
+  let ax=a[kx]-shearX*a[kz]; let ay=a[ky]-shearY*a[kz];
+  let bx=b[kx]-shearX*b[kz]; let by=b[ky]-shearY*b[kz];
+  let cx=c[kx]-shearX*c[kz]; let cy=c[ky]-shearY*c[kz];
+  let edgeA=bx*cy-by*cx;
+  let edgeB=cx*ay-cy*ax;
+  let edgeC=ax*by-ay*bx;
+  let hasNegative=edgeA<0.0||edgeB<0.0||edgeC<0.0;
+  let hasPositive=edgeA>0.0||edgeB>0.0||edgeC>0.0;
+  if(hasNegative&&hasPositive){return vec3f(maxDistance,0,0);}
+  let determinant=edgeA+edgeB+edgeC;
+  if(determinant==0.0){return vec3f(maxDistance,0,0);}
+  let distanceScaled=edgeA*(a[kz]*shearZ)
+    +edgeB*(b[kz]*shearZ)+edgeC*(c[kz]*shearZ);
+  if(determinant>0.0){
+    if(distanceScaled<=1e-5*determinant||distanceScaled>=maxDistance*determinant){
+      return vec3f(maxDistance,0,0);
+    }
+  }else if(distanceScaled>=1e-5*determinant||distanceScaled<=maxDistance*determinant){
+    return vec3f(maxDistance,0,0);
+  }
+  let inverseDeterminant=1.0/determinant;
+  return vec3f(
+    distanceScaled*inverseDeterminant,
+    edgeB*inverseDeterminant,
+    edgeC*inverseDeterminant
+  );
+}
+fn traceShortRangeImpl(
+  origin:vec3f,directionIn:vec3f,maxDistance:f32,watertight:bool
+)->ShortHit{
+  let direction=normalize(directionIn);
+  let inverseDirection=select(vec3f(-1e20),vec3f(1e20),direction>=vec3f(0))
+    /max(vec3f(1),abs(direction)*1e20);
+  var result=ShortHit(maxDistance,vec3f(0,1,0),vec3f(0),vec3f(0));
+  var stack:array<u32,64>;
+  var stackSize=1u;
+  stack[0]=0u;
+  loop{
+    if(stackSize==0u){break;}
+    stackSize-=1u;
+    let nodeIndex=stack[stackSize];
+    let node=shortBvhNodes[nodeIndex];
+    if(shortRayBoxNear(
+      origin,inverseDirection,node.minMeta.xyz,node.maxMeta.xyz,result.t
+    )>=result.t){continue;}
+    let left=bitcast<u32>(node.minMeta.w);
+    let right=bitcast<u32>(node.maxMeta.w);
+    if((left&0x80000000u)!=0u){
+      let first=left&0x7fffffffu;
+      for(var triangleOffset=0u;triangleOffset<right;triangleOffset++){
+        let triangle=shortTriangles[first+triangleOffset];
+        var intersection=shortTriangle(origin,direction,triangle,result.t);
+        if(watertight){
+          intersection=shortTriangleWatertight(origin,direction,triangle,result.t);
+        }
+        if(intersection.x<result.t){
+          let uv=triangle.uvAB.xy*(1.0-intersection.y-intersection.z)
+            +triangle.uvAB.zw*intersection.y+triangle.uvCMaterial.xy*intersection.z;
+          let surface=shortAtlas(uv,triangle.uvCMaterial.z);
+          if(triangle.uvCMaterial.w>0.0&&surface.a<triangle.uvCMaterial.w){continue;}
+          let barycentric=vec3f(
+            1.0-intersection.y-intersection.z,intersection.y,intersection.z
+          );
+          var hitNormal=normalize(
+            shortNormal(triangle.normalOct.x)*barycentric.x
+            +shortNormal(triangle.normalOct.y)*barycentric.y
+            +shortNormal(triangle.normalOct.z)*barycentric.z
+          );
+          if(dot(hitNormal,direction)>0.0){hitNormal=-hitNormal;}
+          result=ShortHit(
+            intersection.x,hitNormal,triangle.albedo.xyz*surface.rgb,
+            triangle.emissive.xyz
+          );
+        }
+      }
+    }else{
+      let leftNear=shortRayBoxNear(
+        origin,inverseDirection,shortBvhNodes[left].minMeta.xyz,
+        shortBvhNodes[left].maxMeta.xyz,result.t
+      );
+      let rightNear=shortRayBoxNear(
+        origin,inverseDirection,shortBvhNodes[right].minMeta.xyz,
+        shortBvhNodes[right].maxMeta.xyz,result.t
+      );
+      if(leftNear<result.t&&rightNear<result.t){
+        if(stackSize>61u){break;}
+        if(leftNear<rightNear){stack[stackSize]=right;stack[stackSize+1u]=left;}
+        else{stack[stackSize]=left;stack[stackSize+1u]=right;}
+        stackSize+=2u;
+      }else if(leftNear<result.t){
+        if(stackSize>62u){break;}
+        stack[stackSize]=left;stackSize+=1u;
+      }else if(rightNear<result.t){
+        if(stackSize>62u){break;}
+        stack[stackSize]=right;stackSize+=1u;
+      }
+    }
+  }
+  return result;
+}
+fn traceShortRange(origin:vec3f,direction:vec3f,maxDistance:f32)->ShortHit{
+  return traceShortRangeImpl(origin,direction,maxDistance,false);
+}
+fn traceShortRangeWatertight(
+  origin:vec3f,direction:vec3f,maxDistance:f32
+)->ShortHit{
+  return traceShortRangeImpl(origin,direction,maxDistance,true);
+}
+
+fn fastSunVisibility(world:vec3f,normal:vec3f)->f32{
+  let cascade=sunCascadeIndex(world);
+  let clip=sunShadow.matrices[cascade]*vec4f(
+    world+normal*max(0.006,sunShadow.texelSizes[cascade]*0.35),1.0
+  );
+  let ndc=clip.xyz/clip.w;
+  let uv=vec2f(ndc.x*0.5+0.5,0.5-ndc.y*0.5);
+  if(any(uv<vec2f(0))||any(uv>vec2f(1))||ndc.z<0.0||ndc.z>1.0){return 1.0;}
+  return textureSampleCompareLevel(shadowTex,shadowSampler,uv,i32(cascade),ndc.z);
+}
+
+fn outgoingAtShortHit(
+  hitWorld:vec3f,hit:ShortHit,compartmentSun:f32,compartmentPoint:f32
+)->vec3f{
+  let lightDirection=normalize(-frame.sunDirTime.xyz);
+  let sun=frame.sunColorIntensity.xyz*frame.sunColorIntensity.w
+    *max(0.0,dot(hit.normal,lightDirection))
+    *min(compartmentSun,fastSunVisibility(hitWorld,hit.normal));
+  let toPoint=frame.pointPosRange.xyz-hitWorld;
+  let distance=length(toPoint);
+  let pointWindow=max(0.0,1.0-distance/frame.pointPosRange.w);
+  let point=frame.pointColorIntensity.xyz*frame.pointColorIntensity.w
+    *max(0.0,dot(hit.normal,toPoint/max(distance,1e-4)))
+    *pointWindow*pointWindow/(1.0+0.06*distance*distance)
+    *min(compartmentPoint,pointShadowVisibility(hitWorld,hit.normal));
+  return hit.emissive+hit.albedo*(sun+point);
+}
+
+fn cMinusOneIrradiance(
+  pixel:vec2i,world:vec3f,normal:vec3f,baseIrradiance:vec3f
+)->vec3f{
+  // Resolve fifteen base cells exactly. This spans the complete local
+  // enclosure neighborhood (including c0 and the near part of c1), where
+  // sparse spatial sharing is most likely to cross a thin wall. Longer paths
+  // remain the responsibility of the radiance cascades.
+  let radius=frame.envBaseSpacing.w*15.0;
+  // Keep the origin entirely world-space. A previous 3x3 screen-neighbor
+  // crease blend changed as pixels reprojected and caused visible enclosure
+  // shimmer; watertight triangle traversal now handles shared-edge cracks.
+  let origin=world+normal*max(0.006,radius*0.012);
+  let sunDirection=normalize(-frame.sunDirTime.xyz);
+  let sunBlocker=traceShortRange(origin,sunDirection,10000.0);
+  let compartmentSun=select(0.0,1.0,sunBlocker.t>=9999.0);
+  let toPoint=frame.pointPosRange.xyz-origin;
+  let pointDistance=length(toPoint);
+  var compartmentPoint=0.0;
+  if(pointDistance<frame.pointPosRange.w){
+    let pointBlocker=traceShortRange(
+      origin,toPoint/max(pointDistance,1e-4),max(0.001,pointDistance-0.03)
+    );
+    compartmentPoint=select(0.0,1.0,pointBlocker.t>=pointDistance-0.04);
+  }
+  let axes=array<vec3f,6>(
+    vec3f(1,0,0),vec3f(-1,0,0),vec3f(0,1,0),
+    vec3f(0,-1,0),vec3f(0,0,1),vec3f(0,0,-1)
+  );
+  let enclosureRadius=radius*2.0;
+  for(var axis=0u;axis<6u;axis++){
+    let blocker=traceShortRange(origin,axes[axis],enclosureRadius+0.001);
+    if(blocker.t>=enclosureRadius){return baseIrradiance;}
+  }
+  let signZ=select(-1.0,1.0,normal.z>=0.0);
+  let basisScale=-1.0/(signZ+normal.z);
+  let basisProduct=normal.x*normal.y*basisScale;
+  let tangent=vec3f(
+    1.0+signZ*normal.x*normal.x*basisScale,
+    signZ*basisProduct,-signZ*normal.x
+  );
+  let bitangent=vec3f(
+    basisProduct,signZ+normal.y*normal.y*basisScale,-normal.y
+  );
+  var exactResult=vec3f(0);
+  let totalSamples=16u;
+  // A world-stable R2 sequence and one universal variance test implement the
+  // paper's ambient-form C(-1) estimator. Every asset receives the same
+  // fixed 16-ray budget; neither depends on scene identity nor the camera.
+  for(var sampleIndex=0u;sampleIndex<totalSamples;sampleIndex++){
+    let xi=fract(0.5+f32(sampleIndex)*0.7548776662466927);
+    let radial=sqrt(xi);
+    let phi=6.283185307179586*fract(
+      0.5+f32(sampleIndex)*0.5698402909980532
+    );
+    let direction=normalize(
+      tangent*(cos(phi)*radial)+bitangent*(sin(phi)*radial)
+      +normal*sqrt(max(0.0,1.0-xi))
+    );
+    let hit=traceShortRangeWatertight(origin,direction,10000.0);
+    if(hit.t>=9999.0){return baseIrradiance;}
+    exactResult+=outgoingAtShortHit(
+      origin+direction*hit.t,hit,compartmentSun,compartmentPoint
+    );
+  }
+  return exactResult/f32(totalSamples);
+}
+
 @vertex fn fullscreenVS(@builtin(vertex_index) index:u32)->@builtin(position) vec4f{
   let uv=vec2f(f32((index<<1u)&2u),f32(index&2u));
   return vec4f(uv*2.0-1.0,0.0,1.0);
@@ -1663,9 +2181,10 @@ fn displayEncode(x:vec3f)->vec3f{
   }
   let albedoData=textureLoad(albedoTex,pixel,0);
   let albedo=albedoData.xyz;
-  let normal=normalize(textureLoad(normalTex,pixel,0).xyz);
+  let normal=gbufferNormal(pixel);
   let sample=sampleIrradiance(world.xyz,normal);
-  let indirect=albedo*sample.xyz*frame.controls.x;
+  let resolvedIrradiance=cMinusOneIrradiance(pixel,world.xyz,normal,sample.xyz);
+  let indirect=albedo*resolvedIrradiance*frame.controls.x;
   let L=normalize(-frame.sunDirTime.xyz);
   let sun=albedo*frame.sunColorIntensity.xyz*frame.sunColorIntensity.w*max(0.0,dot(normal,L))*shadowVisibility(world.xyz,normal);
   let toPoint=frame.pointPosRange.xyz-world.xyz;
@@ -1683,7 +2202,7 @@ fn displayEncode(x:vec3f)->vec3f{
   if(mode==5u){color=albedo;}
   // Test-only mode 6 removes material color from the comparison so the
   // motion gate measures the reconstructed irradiance field itself.
-  if(mode==6u){color=sample.xyz;}
+  if(mode==6u){color=resolvedIrradiance;}
   if(mode<=2u||mode==6u){color=displayEncode(color*frame.controls.y);}
   return vec4f(color,1.0);
 }

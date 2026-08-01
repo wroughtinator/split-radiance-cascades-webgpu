@@ -21,6 +21,9 @@ is required.
 - back-to-front cascade merge
 - 6x6 octahedral irradiance prefilter
 - exact-key world-space temporal accumulation
+- dominant-normal surface-sheet keys across every cascade
+- exact world-space enclosed-volume `C(-1)` visibility resolution
+- automatic asset-scale probe spacing with no per-scene GI presets
 - four camera-fitted, texel-stabilized directional shadow cascades with
   cross-faded boundaries and 5x5 tent PCF
 
@@ -33,8 +36,10 @@ The equation-by-equation audit is in
 ## Stability
 
 The shipped renderer has one diffuse Split RC configuration. The paper's
-optional multibounce, rough-specular, and directional `C(-1)` experiments are
-not compiled into the production shader and have no UI controls.
+optional multibounce and rough-specular experiments are not compiled into the
+production shader. The ambient-form `C(-1)` proposed in Section 7.1 is included
+as an always-on production extension for locally closed volumes; it has no
+quality-changing UI toggle.
 
 Stable mode advances a deterministic global low-discrepancy temporal rotation,
 uses exact canonical screen-sample ranks, orders every allocation decision by
@@ -55,7 +60,9 @@ permanently downscaled.
 The sparse hierarchy is recreated from current visible surfaces every frame,
 as specified by Algorithms 1 and 3. Only probes that exist in both frames may
 reuse an exact-key world-space interval. Old off-screen probes are not retained
-as interpolation neighbors. To remove the paper's documented nearest-only
+as interpolation neighbors. Every key also carries a dominant-normal surface
+sheet through c0-c3 so opposite sides of thin geometry cannot share radiance.
+To remove the paper's documented nearest-only
 quality tradeoff, c0 initialization allocates the four interpolation neighbors
 in the dominant surface tangent plane while retaining one Algorithm 3 ray per
 visible pixel. The same four-neighbor footprint is used for reconstruction, so
@@ -65,6 +72,19 @@ current-frame FXAA; there is no recursive screen-space presentation history.
 These two invariants prevent a long camera translation from accumulating stale
 block-shaped light and ensure that rebuilding history at a fixed pose produces
 the same sparse population.
+
+For geometry below c0 spacing, an exact BVH `C(-1)` resolve first classifies
+whether a surface is locally enclosed. Open surfaces retain the smooth paper
+cascade result; enclosed surfaces use deterministic cosine rays with
+watertight triangle edges, fixed world-space radius, and world-normal-only ray
+origins. The sealed-box audit requires zero displayed luminance at every pixel
+while moving the camera and exact loop closure.
+
+The GI configuration is universal across the complete scene suite. Base probe
+spacing is derived automatically from asset bounds and triangle density; no
+scene identity enters the cascade layout, temporal policy, C(-1) sample count,
+or storage capacities. Scene-specific values describe only content (camera,
+materials, lights, environment, and exposure), not GI behavior.
 
 Stable mode advances the deterministic R2/Cranley-Patterson sequence
 continuously. An odd 32-bit Weyl permutation supplies the global rotation, so
@@ -100,13 +120,14 @@ The built-in audit has twelve independent gates:
   sweep and mandatory coverage of all six point-shadow layers in Cornell
 - sparse-hash, key-range, capacity, BVH-stack, and WebGPU error diagnostics
 
-On the development NVIDIA RTX 5080, the full low-floor Sponza forward/backward
-coverage loop measures exactly 0/255 maximum byte delta at every adjacent
-matched surface and at same-pose closure. The corresponding indirect-only loop
-measures 1/255 at p95, 3/255 at p99, and 0.65/255 trimmed RMSE. The same path
-with moving lighting remains 1/255 at p95 and 4/255 at p99. Every per-capture
-sparse diagnostic is zero. This directly covers the final image rather than
-inferring stability from probe values.
+On the development NVIDIA RTX 5080, Sponza's world-keyed probe comparison under
+camera motion measures 0.293% p95 relative change. Re-rendering the same poses
+has 0/255 p95 and p99 delta (1/255 maximum). The uninterrupted final composite
+measures 2/255 at p95 and 6/255 at p99; with moving lighting it remains 2/255
+at p95 and 4/255 at p99. Rebuilding history at the same pose after the reported
+low-camera translation measures 2/255 at p95 and 5/255 at p99. Every
+per-capture sparse diagnostic is zero. These tests cover both cache stability
+and the displayed image.
 
 ## Twelve validation scenes
 
@@ -142,17 +163,19 @@ Balanced mode bounds the internal screen to 360,000 pixels; the development
 viewport resolves to 800x450 and traces one primary R2 ray per internal-screen
 pixel:
 
-- the final all-scene audit measured Sponza at 6.49 ms GPU and 60 FPS; the
-  slowest callback rate across all 12 scenes was 55.40 FPS
+- the final all-scene audit measured Sponza at 6.82 ms GPU and 59.02 FPS; the
+  slowest callback rate across all 12 scenes was 56.26 FPS
 - baseline and moving-light 32-frame motion gates measure 2/255 at p95
-- the 512-spp Sponza reference gate measures 24.20% raw NRMSE, 20.93%
-  99%-trimmed NRMSE, 14.18% low-frequency scale-invariant NRMSE, 0.0467
-  scene-linear p95 error, 0% severe under-light outliers, and 0.65%
+- the 512-spp Sponza reference gate measures 23.25% raw NRMSE, 21.37%
+  99%-trimmed NRMSE, 13.14% low-frequency scale-invariant NRMSE, 0.0496
+  scene-linear p95 error, 0.087% severe under-light outliers, and 0.349%
   bright-leak candidates
+- the sealed-box audit measures zero luminance at every displayed pixel and
+  exact same-pose loop closure while the camera moves inside the volume
 - the point-shadow/BVH classification mismatch is 0% in the laboratory and
   Cornell scenes and 1.19% on the large heightmap; corresponding sun-shadow
   mismatch is 0%, 1.52%, and 1.04%
-- no sparse-hash, capacity, or BVH-stack overflow was observed
+- no sparse-hash, capacity, BVH-stack, or WebGPU error was observed
 
 The final machine-readable summary is
 [`docs/validation/RTX-5080-balanced.json`](docs/validation/RTX-5080-balanced.json).
