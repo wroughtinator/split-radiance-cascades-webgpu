@@ -56,7 +56,7 @@ test("production audit gates camera motion, moving lights, floor loops, and sun 
   assert.match(engine, /point\.perFace\.every\(\(face\) => face\.samples >= 4\)/);
   assert.match(engine, /diagnosticOverflows === 0/);
   assert.match(engine, /per-capture sparse diagnostics/);
-  assert.match(engine, /this\.sampleFrameIndex < 24/);
+  assert.match(engine, /const fixedLightHistory = 0\.92/);
   assert.match(engine, /this\.animateLights[\s\S]*\? 0\.965/);
   assert.doesNotMatch(engine, /multibounce|roughSpecular|cMinusOne/);
   assert.match(engine, /animate-lights[\s\S]*this\.resetProbeHistory\(\)/);
@@ -115,7 +115,7 @@ test("presentation preserves shadow detail and height fields use smooth normals"
 });
 
 test("production module graph uses a release cache key", () => {
-  const releaseKey = "v=2026-07-31-daylight-door7";
+  const releaseKey = "v=2026-07-31-daylight-door8";
   assert.ok(app.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(standalone.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(engine.includes(`./math.js?${releaseKey}`));

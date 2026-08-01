@@ -1347,13 +1347,14 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
 
   let baseLength=frame.envBaseSpacing.w*exp2(f32(lod&3u))*1.6;
   let maxDistance=baseLength*64.0;
-  // Section 7.1 starts c0 after the C(-1) interval.  The previous build
-  // traced c0 from the receiving surface and then tried to replace a much
-  // larger interval in the composite.  Besides double-counting near hits,
-  // that made the result switch discontinuously at an enclosure test.
-  // Keep the split point in world space and independent of camera LOD: C(-1)
-  // owns [0, delta_s0], while c0 and higher cascades own the remaining ray.
-  let cMinusOneEnd=frame.envBaseSpacing.w;
+  // Section 7.1's C(-1) prototype is optional. When its directional interval
+  // is not evaluated for every open receiver, the paper's base c0 must begin
+  // at the receiving surface (t_-1 = 0). Starting c0 at delta_s0 while later
+  // returning the unmodified c0 field silently dropped all nearby reflected
+  // radiance and produced the stable dark patches found by the path-reference
+  // gate. Near emitters are still integrated analytically below, but ordinary
+  // near geometry remains part of the unbiased ray-splitting estimator.
+  let cMinusOneEnd=0.0;
   let surfaceOrigin=world+normal*max(0.008,frame.envBaseSpacing.w*0.012);
   let origin=surfaceOrigin+direction*cMinusOneEnd;
   let remainingDistance=max(0.001,maxDistance-cMinusOneEnd);
@@ -1369,12 +1370,16 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
       targetCascade+=1u; end*=4.0;
     }
   }
-  // This ray starts after C(-1), so an emissive hit belongs to c0 or a
-  // coarser interval. The analytic estimator below overlaps that boundary
-  // smoothly instead of making an emitter switch between representations.
-  let radiance=select(
+  var radiance=select(
     frame.envBaseSpacing.xyz,directAtHit(origin+direction*hit.t,hit),didHit
   );
+  // Emission inside the first probe spacing is evaluated by the stable exact
+  // polygon estimator at the receiver. Remove only that emission term from
+  // the stochastic c0 sample so tessellated area lights are not counted twice;
+  // reflected sun/point radiance at the same hit remains in Split RC.
+  if(didHit&&hit.t<frame.envBaseSpacing.w){
+    radiance=max(vec3f(0),radiance-hit.emissive.xyz);
+  }
   atomicAdd(&state[4],1u);
   if(didHit){atomicAdd(&state[5],1u);}
   for(var cascade=0u;cascade<4u;cascade++){

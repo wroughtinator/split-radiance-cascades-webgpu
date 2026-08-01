@@ -126,8 +126,9 @@ test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
   assert.match(rasterShader, /let emissiveMarker=select\(0\.0,1\.0,any\(visibleEmission>vec3f\(0\)\)\)/);
   assert.doesNotMatch(finalShader, /compartmentSun|compartmentPoint|enclosureRadius/);
   assert.doesNotMatch(finalShader, /if\(hit\.t>=9999\.0\)\{return baseIrradiance;\}/);
-  assert.match(computeShader, /let cMinusOneEnd=frame\.envBaseSpacing\.w/);
+  assert.match(computeShader, /let cMinusOneEnd=0\.0/);
   assert.match(computeShader, /let origin=surfaceOrigin\+direction\*cMinusOneEnd/);
+  assert.match(computeShader, /radiance-hit\.emissive\.xyz/);
   assert.match(finalShader, /let origin=world\+normal\*max\(0\.006,intervalEnd\*0\.012\)/);
   assert.doesNotMatch(finalShader, /creaseSafeOrigin/);
   assert.match(finalShader, /total\/max\(normalWeight,1e-5\)/);

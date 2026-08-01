@@ -1,13 +1,13 @@
 import {
   adaptiveBudgetScale, add3, clamp, cross3, dot3, mat4LookAt, mat4Multiply, mat4Ortho,
   mat4Perspective, mul3, normalize3, sub3,
-} from "./math.js?v=2026-07-31-daylight-door7";
+} from "./math.js?v=2026-07-31-daylight-door8";
 import {
   createDynamicSceneGeometry, createScene, dynamicSceneKey, SCENE_INFO,
-} from "./scenes.js?v=2026-07-31-daylight-door7";
+} from "./scenes.js?v=2026-07-31-daylight-door8";
 import {
   computeShader, finalShader, presentShader, rasterShader, shaderConstants as K,
-} from "./shaders.js?v=2026-07-31-daylight-door7";
+} from "./shaders.js?v=2026-07-31-daylight-door8";
 
 const SUN_CASCADE_COUNT = 4;
 
@@ -1468,12 +1468,16 @@ class SplitRadianceCascades {
     u.set([...this.scene.env, this.scene.baseSpacing], 52);
     u.set([this.width, this.height, this.giWidth, this.giHeight], 56);
     const frameParity = this.frameIndex & (K.hashFrames - 1);
-    // A nonzero fixed-light value enables exact sample-count accumulation in
-    // the shader; its magnitude is used only by animated-light EMA. Exact-key
-    // rejection still makes disocclusions immediate.
-    const fixedLightHistory = this.sampleFrameIndex < 24
-      ? 0.92
-      : 0.98;
+    // A nonzero fixed-light value enables exact sample-count accumulation for
+    // measured cones; its magnitude controls only reconstructed support probes
+    // (and the separate moving-light EMA). Exact-key rejection still makes
+    // disocclusions immediate.
+    // Support probes have no primary ray of their own, so a long-tail EMA can
+    // make the reconstructed field depend on how long a camera path happened
+    // to run before returning to a pose. A fixed, quickly convergent weight
+    // reaches the same steady state after every reset while exact measured
+    // cones still use the sample-count accumulation in mergeCascade.
+    const fixedLightHistory = 0.92;
     const historyBlend = this.temporalStability && this.historyValid
       ? (this.animateLights
         ? 0.965

@@ -5,7 +5,7 @@ import {
   normalize3,
   sub3,
   TAU,
-} from "./math.js?v=2026-07-31-daylight-door7";
+} from "./math.js?v=2026-07-31-daylight-door8";
 
 const C = {
   chalk: [0.72, 0.75, 0.72],
