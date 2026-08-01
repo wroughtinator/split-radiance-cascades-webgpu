@@ -38,8 +38,9 @@ The equation-by-equation audit is in
 The shipped renderer has one diffuse Split RC configuration. The paper's
 optional multibounce and rough-specular experiments are not compiled into the
 production shader. The ambient-form `C(-1)` proposed in Section 7.1 is included
-as an always-on production extension for locally closed volumes; it has no
-quality-changing UI toggle.
+as an always-on production extension. It uses deterministic world-space short
+visibility for open surfaces and a full scene-bounds watertight guard for
+enclosed volumes; it has no quality-changing UI toggle.
 
 Stable mode advances a deterministic global low-discrepancy temporal rotation,
 uses exact canonical screen-sample ranks, orders every allocation decision by
@@ -65,20 +66,22 @@ sheet through c0-c3 so opposite sides of thin geometry cannot share radiance.
 To remove the paper's documented nearest-only
 quality tradeoff, c0 initialization allocates the four interpolation neighbors
 in the dominant surface tangent plane while retaining one Algorithm 3 ray per
-visible pixel. The same four-neighbor footprint is used for reconstruction, so
-camera motion cannot toggle floor or wall coverage as pixels cross a nearest
-probe boundary. The tone-mapped current Split RC result receives only
+visible pixel. Zero-owner support probes reconstruct from all eight immediate
+same-sheet tangent neighbors and exact-key world history, so camera motion
+cannot toggle floor or wall coverage or abruptly swap a partial source set as
+pixels cross a nearest probe boundary. The tone-mapped current Split RC result receives only
 current-frame FXAA; there is no recursive screen-space presentation history.
 These two invariants prevent a long camera translation from accumulating stale
 block-shaped light and ensure that rebuilding history at a fixed pose produces
 the same sparse population.
 
-For geometry below c0 spacing, an exact BVH `C(-1)` resolve first classifies
-whether a surface is locally enclosed. Open surfaces retain the smooth paper
-cascade result; enclosed surfaces use deterministic cosine rays with
-watertight triangle edges, fixed world-space radius, and world-normal-only ray
-origins. The sealed-box audit requires zero displayed luminance at every pixel
-while moving the camera and exact loop closure.
+For geometry below c0 spacing, an exact BVH `C(-1)` resolve evaluates a
+rotation-balanced 14-point ambient quadrature. Blocker distance is filtered
+across the finite c0 cone footprint, preserving a smooth scalar correction
+without sparse directional color fans. Enclosed surfaces extend those
+watertight rays through the complete scene bounds, with fixed world-space and
+world-normal-only origins. The sealed-box audit requires zero displayed
+luminance at every pixel while moving the camera and exact loop closure.
 
 The GI configuration is universal across the complete scene suite. Base probe
 spacing is derived automatically from asset bounds and triangle density; no
@@ -145,7 +148,7 @@ and the displayed image.
 6. Industrial pipe maze - curved pipework, narrow gaps, and emitters.
 7. Sun temple - layered portals and moving sunlight.
 8. Orbital sculpture field - open-sky misses and high-curvature meshes.
-9. Night market - many colored emitters and dark-region stability.
+9. Daylight door room - sealed-room darkness, animated aperture transport, and curved-normal detail.
 10. Megacity stress grid - 12,992 triangles and high probe pressure.
 11. Cornell box reference - canonical red/green enclosure, two occluders,
     ceiling area emitter, and a moving comparison light.

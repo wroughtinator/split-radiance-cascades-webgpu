@@ -6,15 +6,15 @@ export const shaderConstants = {
   dataOffsets: [0, 524288, 1048576, 1572864],
   directions: [32, 128, 512, 2048],
   totalHashSlots: 44032,
-  hashFrames: 2,
+  hashFrames: 4,
   totalProbeMeta: 22016,
   totalDirectionData: 2621440,
   irradianceTexels: 64,
   irradianceAtlasWidth: 512,
   irradianceAtlasFrameHeight: 2048,
-  irradianceFrames: 2,
+  irradianceFrames: 4,
   accumFrames: 2,
-  stateWords: 66064,
+  stateWords: 197136,
 };
 
 export const rasterShader = /* wgsl */`
@@ -108,7 +108,17 @@ fn encodeSurfaceEmission(emission:vec3f)->vec3f{
   var o: GBufferOut;
   let surface=materialSample(v.uv,v.materialCutoff.x);
   if(v.materialCutoff.y>0.0&&surface.a<v.materialCutoff.y){discard;}
-  let emission=encodeSurfaceEmission(v.emissive);
+  // Procedural and imported area emitters are oriented surfaces. Treating
+  // their back face as luminous lets a recessed ceiling panel illuminate the
+  // ceiling above it and creates the conspicuous square "halo" that is not
+  // present in the reference scene. Closed emissive meshes still radiate in
+  // every outward direction because each outward-facing facet remains lit.
+  // Use the authored surface normal for radiometric sidedness. The raster
+  // front_facing convention can be inverted by the view/projection handedness
+  // on a backend even though the physical source orientation is unchanged.
+  let sourceVisible=dot(normalize(v.normal),frame.cameraPos.xyz-v.world)>0.0;
+  let visibleEmission=select(vec3f(0),v.emissive,sourceVisible);
+  let emission=encodeSurfaceEmission(visibleEmission);
   o.albedo = vec4f(v.albedo*surface.rgb, emission.r);
   o.normal = vec4f(
     encodeNormalOct(select(-v.normal,v.normal,frontFacing)),emission.gb
@@ -119,7 +129,7 @@ fn encodeSurfaceEmission(emission:vec3f)->vec3f{
   // from either side. The independent 1.0 emitter bit preserves packed RGB.
   let closedBackFace=!frontFacing&&v.materialCutoff.y< -0.5;
   let surfaceMarker=1.0+select(0.0,0.25,closedBackFace);
-  let emissiveMarker=select(0.0,1.0,any(v.emissive>vec3f(0)));
+  let emissiveMarker=select(0.0,1.0,any(visibleEmission>vec3f(0)));
   o.world = vec4f(v.world,surfaceMarker+emissiveMarker);
   return o;
 }
@@ -217,7 +227,6 @@ fn gbufferNormal(pixel:vec2i)->vec3f{
   }
   return normalize(normal);
 }
-
 const EMPTY: u32 = 0xffffffffu;
 const PI: f32 = 3.141592653589793;
 const TAU: f32 = 6.283185307179586;
@@ -234,7 +243,8 @@ const ACCUM_FRAME_STRIDE: u32 = 13107200u;
 const RAY_COUNT_OFFSET: u32 = 16u;
 const RAY_OFFSET_OFFSET: u32 = 22032u;
 const RAY_CURSOR_OFFSET: u32 = 44048u;
-const BLOCK_COUNT_OFFSET: u32 = 66064u;
+const SUPPORT_SOURCE_OFFSET: u32 = 66064u;
+const BLOCK_COUNT_OFFSET: u32 = 197136u;
 const TOTAL_PROBE_META: u32 = 22016u;
 
 fn hash32(value: u32) -> u32 {
@@ -308,7 +318,7 @@ fn probePositionFromCell(cell: vec3i, cascade: u32, lod: u32) -> vec3f {
 }
 
 fn currentFrame() -> u32 {
-  return min(1u, u32(floor(frame.controls.w)));
+  return u32(floor(frame.controls.w))&3u;
 }
 
 fn historyWeight() -> f32 {
@@ -362,7 +372,7 @@ fn dataIndex(cascade: u32, probe: u32, direction: u32) -> u32 {
 }
 
 fn accumIndexFrame(cascade:u32,probe:u32,direction:u32,frameIndex:u32)->u32{
-  return frameIndex*ACCUM_FRAME_STRIDE+dataIndex(cascade,probe,direction)*5u;
+  return (frameIndex&1u)*ACCUM_FRAME_STRIDE+dataIndex(cascade,probe,direction)*5u;
 }
 
 fn accumIndex(cascade:u32,probe:u32,direction:u32)->u32{
@@ -515,7 +525,13 @@ fn traceScene(origin: vec3f, directionIn: vec3f, maxDistance: f32) -> Hit {
             +decodeOctNormal(tri.normalOct.z)*barycentric.z
           );
           if(dot(n,direction)>0.0){n=-n;}
-          result=Hit(intersection.x,n,tri.albedo.xyz*surface.rgb,tri.emissive.xyz);
+          let sourceFrontFace=dot(
+            cross(tri.b.xyz-tri.a.xyz,tri.c.xyz-tri.a.xyz),direction
+          )<0.0;
+          result=Hit(
+            intersection.x,n,tri.albedo.xyz*surface.rgb,
+            select(vec3f(0),tri.emissive.xyz,sourceFrontFace)
+          );
         }
       }
     } else {
@@ -574,7 +590,7 @@ fn sampleAtlasIrradiance(probe:u32,normalIn:vec3f,frameIndex:u32)->vec4f{
   }
   let octCoordinate=clamp((oct*0.5+0.5)*6.0+vec2f(0.5),vec2f(0),vec2f(7));
   let tile=vec2f(f32(probe%64u)*8.0,f32(probe/64u)*8.0+f32(frameIndex)*2048.0);
-  let atlasUv=(tile+octCoordinate+vec2f(0.5))/vec2f(512.0,4096.0);
+  let atlasUv=(tile+octCoordinate+vec2f(0.5))/vec2f(512.0,8192.0);
   return textureSampleLevel(
     irradianceAtlasSampled,irradianceAtlasSampler,atlasUv,0.0
   );
@@ -614,9 +630,33 @@ fn samplePrimaryIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
       select(1.0-fraction.z,fraction.z,bits.z==1)
     );
     let spatialWeight=wv.x*wv.y*wv.z;
-    let probe=lookupProbe(0u,keyFromCellSurface(cell+bits,lod,surfaceClass(normal)));
+    let key=keyFromCellSurface(cell+bits,lod,surfaceClass(normal));
+    let probe=lookupProbe(0u,key);
+    var irradiance=vec4f(0);
     if(probe!=EMPTY&&probe<PROBE_CAPS[0]){
-      let irradiance=sampleAtlasIrradiance(probe,normal,currentFrame());
+      irradiance=sampleAtlasIrradiance(probe,normal,currentFrame());
+    }
+    // A tangent support key can disappear from the current sparse hash when
+    // primary-ray ownership shifts by one pixel. Search exact world/sheet
+    // history whether the current probe is empty or merely has no ray yet.
+    // This is the continuity bridge; restricting it to an existing current
+    // probe made coverage itself flicker under camera translation.
+    if(irradiance.a<0.001){
+      for(var age=1u;age<4u;age++){
+        let historyFrame=(currentFrame()+4u-age)&3u;
+        let historyProbe=lookupProbeFrame(0u,key,historyFrame);
+        if(historyProbe!=EMPTY&&historyProbe<PROBE_CAPS[0]){
+          let historyIrradiance=sampleAtlasIrradiance(
+            historyProbe,normal,historyFrame
+          );
+          if(historyIrradiance.a>0.001){
+            irradiance=historyIrradiance;
+            break;
+          }
+        }
+      }
+    }
+    if(irradiance.a>0.001){
       let activeWeight=spatialWeight*irradiance.a;
       value+=irradiance.xyz*activeWeight;
       total+=activeWeight;
@@ -656,6 +696,7 @@ fn samplePrimaryConeDirectionLod(
     normalAxis=1u;
   }
   var value=vec3f(0);
+  var environmentTransmittance=0.0;
   var total=0.0;
   for(var corner=0u;corner<4u;corner++){
     var bits=fixedBits;
@@ -677,11 +718,15 @@ fn samplePrimaryConeDirectionLod(
     ));
     if(probe!=EMPTY&&probe<PROBE_CAPS[0]){
       let cone=cones[dataIndex(0u,probe,direction)];
-      if(cone.w>0.5){value+=cone.xyz*weight;total+=weight;}
+      if(cone.w>0.5){
+        value+=cone.xyz*weight;
+        environmentTransmittance+=max(0.0,cone.w-1.0)*weight;
+        total+=weight;
+      }
     }
   }
   if(total<1e-5){return vec4f(0);}
-  return vec4f(value/total,1.0);
+  return vec4f(value/total,1.0+environmentTransmittance/total);
 }
 
 fn samplePrimaryConeDirection(
@@ -697,7 +742,7 @@ fn samplePrimaryConeDirection(
   );
   if(fine.w<0.5){return coarse;}
   if(coarse.w<0.5){return fine;}
-  return vec4f(mix(fine.xyz,coarse.xyz,lods.z),1.0);
+  return mix(fine,coarse,lods.z);
 }
 
 fn primaryPointAabbDistanceSquared(
@@ -792,6 +837,11 @@ fn primaryEmissiveTriangleIrradiance(
   let a=triangle.a.xyz;
   let b=triangle.b.xyz;
   let c=triangle.c.xyz;
+  // Radiance from an authored area source exists only in the hemisphere of
+  // its geometric normal. This is independent of tessellation and scene
+  // scale, and prevents back-side energy from contaminating nearby probes.
+  let sourceNormal=cross(b-a,c-a);
+  if(dot(sourceNormal,origin-(a+b+c)/3.0)<=0.0){return vec3f(0);}
   let minimum=min(a,min(b,c));
   let maximum=max(a,max(b,c));
   let proximityDistance=sqrt(primaryPointAabbDistanceSquared(
@@ -923,6 +973,29 @@ export const computeShader = sharedCompute + /* wgsl */`
   let slot=currentFrame()*HASH_FRAME_STRIDE+gid.x;
   atomicStore(&slots[slot].key,EMPTY);
   atomicStore(&slots[slot].index,EMPTY);
+}
+
+// Decide once per frame whether an unlit/non-emissive view has any actual
+// connection to the environment. A screen miss or an exactly sun-visible
+// primary surface proves the connection. The final pass then uses one
+// estimator for the whole frame, avoiding camera-dependent per-pixel wedges.
+@compute @workgroup_size(8,8) fn classifyEnvironmentAccess(
+  @builtin(global_invocation_id) gid:vec3u
+){
+  if(featureEnabled(64u)||frame.pointColorIntensity.w>0.0001){
+    if(all(gid.xy==vec2u(0))){atomicStore(&state[8],1u);}
+    return;
+  }
+  let size=vec2u(u32(frame.resolution.x),u32(frame.resolution.y));
+  if(any(gid.xy>=size)){return;}
+  let world=textureLoad(worldTex,vec2i(gid.xy),0);
+  if(world.w<0.5){atomicStore(&state[8],1u);return;}
+  let normal=gbufferNormal(vec2i(gid.xy));
+  let direction=normalize(-frame.sunDirTime.xyz);
+  if(dot(normal,direction)<=0.001){return;}
+  let origin=world.xyz+normal*max(0.008,frame.envBaseSpacing.w*0.012);
+  let blocker=traceScene(origin,direction,frame.sceneBounds.w*1.001);
+  if(blocker.t>=frame.sceneBounds.w*1.001){atomicStore(&state[8],1u);}
 }
 
 fn insertTangentSupport(position:vec3f,normal:vec3f,lod:u32){
@@ -1342,6 +1415,7 @@ fn sampleParentDirection(
   let cell=vec3i(floor(grid));
   let fraction=fract(grid);
   var value=vec3f(0);
+  var environmentTransmittance=0.0;
   var total=0.0;
   for(var corner=0u;corner<8u;corner++){
     let bits=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
@@ -1356,18 +1430,20 @@ fn sampleParentDirection(
       let cone=cones[dataIndex(parent,probe,parentDirection)];
       if(cone.w>0.5){
         value+=cone.xyz*weight;
+        environmentTransmittance+=max(0.0,cone.w-1.0)*weight;
         total+=weight;
       }
     }
   }
   if(total<1e-5){return vec4f(0);}
-  return vec4f(value/total,1.0);
+  return vec4f(value/total,1.0+environmentTransmittance/total);
 }
 
 fn mergedParent(
   cascade:u32,direction:u32,position:vec3f,lod:u32,sheet:u32
 )->vec4f{
   var sum=vec3f(0);
+  var environmentTransmittance=0.0;
   var valid=0.0;
   for(var child=0u;child<4u;child++){
     // Morton ordering makes the four angular children of every lower
@@ -1376,11 +1452,12 @@ fn mergedParent(
     let parent=sampleParentDirection(cascade,position,lod,sheet,parentDirection);
     if(parent.w>0.5){
       sum+=parent.xyz;
+      environmentTransmittance+=max(0.0,parent.w-1.0);
       valid+=1.0;
     }
   }
   if(valid<0.5){return vec4f(0);}
-  return vec4f(sum/valid,1.0);
+  return vec4f(sum/valid,1.0+environmentTransmittance/valid);
 }
 
 @compute @workgroup_size(64) fn mergeCascade(@builtin(global_invocation_id) gid: vec3u) {
@@ -1406,7 +1483,7 @@ fn mergedParent(
   let lod=probeLod(probeInfo);
   let sheet=probeSurfaceClass(probeInfo);
   let key=probeKeyFromInfo(probeInfo,cascade);
-  let previousFrame=1u-currentFrame();
+  let previousFrame=(currentFrame()+3u)&3u;
   let previousProbe=lookupProbeFrame(cascade,key,previousFrame);
   if(historyWeight()>0.0&&previousProbe!=EMPTY&&previousProbe<PROBE_CAPS[cascade]){
     let previousBase=accumIndexFrame(cascade,previousProbe,direction,previousFrame);
@@ -1458,14 +1535,19 @@ fn mergedParent(
     atomicStore(&accum[base+3u],u32(clamp(beta,0.0,1.0)*storageScale+0.5));
     atomicStore(&accum[base+4u],storedSamples);
   }
-  var distant=vec4f(frame.envBaseSpacing.xyz,1.0);
+  // w packs validity + the fraction of this cone that still reaches the
+  // environment. Keeping transmittance beside radiance lets the per-pixel
+  // visibility merge remove only leaked sky energy without discarding valid
+  // light from internal emitters or point sources.
+  var distant=vec4f(frame.envBaseSpacing.xyz,2.0);
   if(cascade<3u){distant=mergedParent(cascade,direction,probeInfo.xyz,lod,sheet);}
   if(!hasInterval){
-    // Full trilinear support introduces c0 probes that own no screen ray.
-    // They have no near interval, so use the already filtered parent cone as
-    // a conservative low-frequency estimate.  Other missing directions stay
-    // invalid exactly as Section 5 requires.
-    cones[index]=select(vec4f(0),distant,cascade==0u&&distant.w>0.5);
+    // Full trilinear support can introduce probes that own no screen ray.
+    // They have no measured transmittance, so inheriting a parent environment
+    // cone fabricates an escape path through sealed geometry. Keep them
+    // invalid; the spatial gather renormalizes over measured same-sheet
+    // neighbors, as required for sparse probes in Section 5.
+    cones[index]=vec4f(0);
     return;
   }
   if(beta>0.999&&distant.w<0.5){
@@ -1474,7 +1556,7 @@ fn mergedParent(
   }
   cones[index]=vec4f(
     min(vec3f(16.0),interval+clamp(beta,0.0,1.0)*distant.xyz),
-    1.0
+    1.0+clamp(beta,0.0,1.0)*max(0.0,distant.w-1.0)
   );
 }
 
@@ -1489,6 +1571,108 @@ fn decodeOctahedral(uvIn:vec2f)->vec3f{
   return normalize(n);
 }
 
+// Tangent support probes are allocated to make sparse trilinear interpolation
+// complete, but Algorithm 3 assigns each screen ray to only its nearest probe.
+// Reconstruct a zero-owner support probe from measured, immediately adjacent
+// probes on the same orientation sheet. This never inherits an environment
+// cone from a coarser cascade and therefore cannot manufacture a path through
+// a sealed wall. The source predicate uses the immutable ray count, so reads
+// cannot chain through writes from this dispatch and the result is deterministic.
+const TANGENT_OFFSETS=array<vec2i,8>(
+  vec2i(-1,0),vec2i(1,0),vec2i(0,-1),vec2i(0,1),
+  vec2i(-1,-1),vec2i(-1,1),vec2i(1,-1),vec2i(1,1)
+);
+
+@compute @workgroup_size(64) fn resolveTangentSupportSources(
+  @builtin(global_invocation_id) gid:vec3u
+){
+  let probe=gid.x;
+  let activeCount=min(atomicLoad(&state[0]),PROBE_CAPS[0]);
+  if(probe>=activeCount){return;}
+  if(atomicLoad(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,probe)])>0u){return;}
+  let info=probeMeta[PROBE_OFFSETS[0]+probe];
+  let lod=probeLod(info);
+  let sheet=probeSurfaceClass(info);
+  let cell=probeCell(info.xyz,0u,lod);
+  let normalAxis=sheet/2u;
+  var stored=0u;
+  for(var neighborOffset=0u;neighborOffset<8u;neighborOffset++){
+    let tangent=TANGENT_OFFSETS[neighborOffset];
+    var offset=vec3i(0);
+    if(normalAxis==0u){offset.y=tangent.x;offset.z=tangent.y;}
+    else if(normalAxis==1u){offset.x=tangent.x;offset.z=tangent.y;}
+    else{offset.x=tangent.x;offset.y=tangent.y;}
+    let neighbor=lookupProbe(
+      0u,keyFromCellSurface(cell+offset,lod,sheet)
+    );
+    if(neighbor==EMPTY||neighbor>=PROBE_CAPS[0]){continue;}
+    if(atomicLoad(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,neighbor)])==0u){
+      continue;
+    }
+    atomicStore(
+      &state[SUPPORT_SOURCE_OFFSET+probe*8u+stored],neighbor+1u
+    );
+    stored+=1u;
+  }
+}
+
+@compute @workgroup_size(64) fn resolveTangentSupportIrradiance(
+  @builtin(global_invocation_id) gid:vec3u
+){
+  let probe=gid.x/64u;
+  let texel=gid.x-probe*64u;
+  let activeCount=min(atomicLoad(&state[0]),PROBE_CAPS[0]);
+  if(probe>=activeCount){return;}
+  if(atomicLoad(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,probe)])>0u){return;}
+  var sum=vec3f(0);
+  var valid=0.0;
+  for(var sourceOffset=0u;sourceOffset<8u;sourceOffset++){
+    let encoded=atomicLoad(
+      &state[SUPPORT_SOURCE_OFFSET+probe*8u+sourceOffset]
+    );
+    if(encoded==0u){continue;}
+    let source=irradiance[
+      currentFrame()*IRRADIANCE_FRAME_STRIDE+(encoded-1u)*64u+texel
+    ];
+    if(source.a>0.5){
+      sum+=source.xyz;
+      valid+=1.0;
+    }
+  }
+  if(valid>0.5){
+    var reconstructed=sum/valid;
+    // The exact world/sheet key is the temporal identity of a support probe.
+    // Its measured-neighbor set may change as primary ownership moves between
+    // pixels, even though the support itself has not moved. Blend the complete
+    // eight-neighbor reconstruction with the previous exact-key value, using
+    // the same fixed/moving-light history policy as radiance intervals. This
+    // removes source-set popping while still tracking animated illumination.
+    let info=probeMeta[PROBE_OFFSETS[0]+probe];
+    let key=probeKeyFromInfo(info,0u);
+    let previousFrame=(currentFrame()+3u)&3u;
+    let previousProbe=lookupProbeFrame(0u,key,previousFrame);
+    if(previousProbe!=EMPTY&&previousProbe<PROBE_CAPS[0]){
+      let previous=irradiance[
+        previousFrame*IRRADIANCE_FRAME_STRIDE+previousProbe*64u+texel
+      ];
+      if(previous.a>0.5){
+        reconstructed=mix(reconstructed,previous.xyz,historyWeight());
+      }
+    }
+    let stored=vec4f(reconstructed,1.0);
+    irradiance[
+      currentFrame()*IRRADIANCE_FRAME_STRIDE+probe*64u+texel
+    ]=stored;
+    let x=texel%8u;
+    let y=texel/8u;
+    let tile=vec2u(probe%64u,probe/64u)*8u;
+    textureStore(
+      irradianceAtlasStorage,
+      vec2i(tile+vec2u(x,y)+vec2u(0u,currentFrame()*2048u)),stored
+    );
+  }
+}
+
 @compute @workgroup_size(64) fn prefilterIrradiance(@builtin(global_invocation_id) gid: vec3u) {
   let probe=gid.x/64u;
   let texel=gid.x-probe*64u;
@@ -1500,15 +1684,17 @@ fn decodeOctahedral(uvIn:vec2f)->vec3f{
   // the one-texel border is equivalent to the paper's seam-copying pass.
   let normal=decodeOctahedral(vec2f((f32(x)-0.5)/6.0,(f32(y)-0.5)/6.0));
   var result=vec3f(0);
+  var validDirections=0u;
   for(var direction=0u;direction<32u;direction++){
     let ray=directionFromIndex(direction,0u);
     let cone=cones[dataIndex(0u,probe,direction)];
     if(cone.w>0.5){
       result+=cone.xyz*max(0.0,dot(normal,ray));
+      validDirections++;
     }
   }
   let filtered=result*(4.0/32.0);
-  let stored=vec4f(filtered,1.0);
+  let stored=vec4f(filtered,select(0.0,1.0,validDirections>0u));
   irradiance[currentFrame()*IRRADIANCE_FRAME_STRIDE+probe*64u+texel]=stored;
   let tile=vec2u(probe%64u,probe/64u)*8u;
   let atlasCoordinate=vec2i(tile+vec2u(x,y)+vec2u(0u,currentFrame()*2048u));
@@ -1524,35 +1710,44 @@ fn resolvedPrimaryIrradiance(
   let nearEmission=primaryNearEmissiveIrradiance(
     origin,normal,intervalEnd
   );
-  // C(-1) is evaluated for every receiver. No screen-space footprint or
-  // camera-dependent branch may switch the estimator. A camera inside a
-  // declared closed volume traces to the scene diagonal, which is a true
-  // geometry bound; open/two-sided back faces retain the paper interval.
+  // A back face explicitly authored as part of one closed volume needs the
+  // long guard. Ordinary receiving surfaces retain the paper's C(-1) extent;
+  // empty tangent-support probes are rejected at merge time instead of being
+  // allowed to manufacture environment visibility.
   let visibilityGuardEnd=select(
     intervalEnd,max(intervalEnd,frame.sceneBounds.w*1.001),closedBackFace
   );
-  var mergedResult=vec3f(0);
+  var ambientWeight=0.0;
+  var ambientVisible=0.0;
+  let enclosureGuard=frame.pointColorIntensity.w<=0.0001
+    &&!featureEnabled(64u)&&atomicLoad(&state[8])==0u;
+  // The ambient-form optimization avoids Section 7.1's expensive directional
+  // gather. One deterministic visibility sample per already-filtered c0 cone
+  // is sufficient because the result is a single hemispherical ratio, not 32
+  // independently displayed angular sectors.
   for(var directionIndexValue=0u;directionIndexValue<32u;directionIndexValue++){
     let direction=directionFromIndex(directionIndexValue,0u);
     let cosine=max(0.0,dot(normal,direction));
     if(cosine<=0.0){continue;}
-    // Probe interpolation may borrow a cone from the other side of geometry.
-    // Validate the first local/c0 neighborhood in the same direction before
-    // accepting the continuation. This is a per-direction replacement, not
-    // a whole-pixel enclosure switch, so it remains continuous at box gaps.
+    ambientWeight+=cosine;
     let hit=traceScene(origin,direction,visibilityGuardEnd+0.001);
-    if(hit.t<visibilityGuardEnd){
-      mergedResult+=max(
-        vec3f(0),directAtHit(origin+direction*hit.t,hit)-hit.emissive
-      )*cosine;
-    }else{
-      let continuation=samplePrimaryConeDirection(
-        world,normal,directionIndexValue
-      );
-      mergedResult+=select(base,continuation.xyz,continuation.w>0.5)*cosine;
+    var visible=hit.t>=visibilityGuardEnd;
+    if(visible&&enclosureGuard){
+      let farEnd=max(intervalEnd,frame.sceneBounds.w*1.001);
+      let farHit=traceScene(origin,direction,farEnd+0.001);
+      visible=farHit.t>=farEnd;
     }
+    if(visible){ambientVisible+=cosine;}
   }
-  return mergedResult*(4.0/32.0)+nearEmission;
+  // Section 7.1 explicitly proposes this ambient-form production path for
+  // C(-1): retain the smooth directional c0 irradiance and apply the exact
+  // short-interval energy ratio as one scalar. Clamping the validated energy
+  // prevents a single sub-cone hit from becoming a bright angular petal.
+  let visibilityCorrection=select(
+    1.0,clamp(ambientVisible/ambientWeight,0.0,1.0),
+    ambientWeight>1e-7
+  );
+  return base*visibilityCorrection+nearEmission;
 }
 
 // Deterministic one-bounce ground-truth gate. Each low-resolution validation
@@ -1787,7 +1982,7 @@ struct ShortHit { t:f32, normal:vec3f, albedo:vec3f, emissive:vec3f };
 @group(0) @binding(6) var<storage,read_write> slots: array<HashSlot>;
 @group(0) @binding(7) var irradianceAtlas: texture_2d<f32>;
 @group(0) @binding(8) var<storage,read> cones: array<vec4f>;
-@group(0) @binding(9) var<storage,read_write> accum: array<atomic<u32>>;
+@group(0) @binding(9) var<storage,read_write> frameState: array<atomic<u32>>;
 @group(0) @binding(10) var irradianceSampler: sampler;
 @group(0) @binding(11) var emissiveTex: texture_2d<f32>;
 @group(0) @binding(12) var pointShadowTex: texture_depth_2d_array;
@@ -1809,6 +2004,9 @@ fn gbufferNormal(pixel:vec2i)->vec3f{
     normal.y=(1.0-abs(old.x))*select(-1.0,1.0,old.y>=0.0);
   }
   return normalize(normal);
+}
+fn finalFeatureEnabled(bit:u32)->bool{
+  return (u32(frame.cameraPos.w+0.5)&bit)!=0u;
 }
 
 const EMPTY:u32=0xffffffffu;
@@ -1837,10 +2035,9 @@ fn keyFromCellSurface(cellIn:vec3i,lod:u32,surfaceClassValue:u32)->u32{
   let c=cellIn+vec3i(256);
   return u32(c.x)|(u32(c.y)<<9u)|(u32(c.z)<<18u)|((lod&3u)<<27u)|((surfaceClassValue&7u)<<29u);
 }
-fn lookupProbeCascade(cascade:u32,key:u32)->u32{
+fn lookupProbeCascadeFrame(cascade:u32,key:u32,frameIndex:u32)->u32{
   let mask=HASH_SIZES[cascade]-1u;
   let start=hash32(key)&mask;
-  let frameIndex=min(1u,u32(floor(frame.controls.w)));
   let base=frameIndex*HASH_FRAME_STRIDE+HASH_OFFSETS[cascade];
   for(var step=0u;step<32u;step++){
     let slot=base+((start+step)&mask);
@@ -1849,6 +2046,11 @@ fn lookupProbeCascade(cascade:u32,key:u32)->u32{
     if(found==EMPTY){return EMPTY;}
   }
   return EMPTY;
+}
+fn lookupProbeCascade(cascade:u32,key:u32)->u32{
+  return lookupProbeCascadeFrame(
+    cascade,key,u32(floor(frame.controls.w))&3u
+  );
 }
 fn lookupProbe(key:u32)->u32{return lookupProbeCascade(0u,key);}
 fn lodDistance(position:vec3f)->f32{
@@ -1907,7 +2109,7 @@ fn sampleIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
     );
   }
   let octCoordinate=clamp((oct*0.5+0.5)*6.0+vec2f(0.5),vec2f(0),vec2f(7));
-  let frameIndex=min(1u,u32(floor(frame.controls.w)));
+  let frameIndex=u32(floor(frame.controls.w))&3u;
   var value=vec3f(0);
   var total=0.0;
   for(var corner=0u;corner<4u;corner++){
@@ -1925,11 +2127,36 @@ fn sampleIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
       select(1.0-fraction.z,fraction.z,bits.z==1)
     );
     let spatialWeight=wv.x*wv.y*wv.z;
-    let probe=lookupProbe(keyFromCellSurface(cell+bits,lod,surfaceClass(normal)));
+    let key=keyFromCellSurface(cell+bits,lod,surfaceClass(normal));
+    let probe=lookupProbe(key);
+    var irradiance=vec4f(0);
     if(probe!=EMPTY&&probe<16384u){
       let tile=vec2f(f32(probe%64u)*8.0,f32(probe/64u)*8.0+f32(frameIndex)*2048.0);
-      let atlasUv=(tile+octCoordinate+vec2f(0.5))/vec2f(512.0,4096.0);
-      let irradiance=textureSampleLevel(irradianceAtlas,irradianceSampler,atlasUv,0.0);
+      let atlasUv=(tile+octCoordinate+vec2f(0.5))/vec2f(512.0,8192.0);
+      irradiance=textureSampleLevel(irradianceAtlas,irradianceSampler,atlasUv,0.0);
+    }
+    if(irradiance.a<0.001){
+      for(var age=1u;age<4u;age++){
+        let historyFrame=(frameIndex+4u-age)&3u;
+        let historyProbe=lookupProbeCascadeFrame(0u,key,historyFrame);
+        if(historyProbe!=EMPTY&&historyProbe<16384u){
+          let historyTile=vec2f(
+            f32(historyProbe%64u)*8.0,
+            f32(historyProbe/64u)*8.0+f32(historyFrame)*2048.0
+          );
+          let historyUv=(historyTile+octCoordinate+vec2f(0.5))
+            /vec2f(512.0,8192.0);
+          let historyIrradiance=textureSampleLevel(
+            irradianceAtlas,irradianceSampler,historyUv,0.0
+          );
+          if(historyIrradiance.a>0.001){
+            irradiance=historyIrradiance;
+            break;
+          }
+        }
+      }
+    }
+    if(irradiance.a>0.001){
       let activeWeight=spatialWeight*irradiance.a;
       value+=irradiance.xyz*activeWeight;
       total+=activeWeight;
@@ -1963,6 +2190,7 @@ fn sampleConeDirectionLod(
     normalAxis=1u;
   }
   var value=vec3f(0);
+  var environmentTransmittance=0.0;
   var total=0.0;
   for(var corner=0u;corner<4u;corner++){
     var bits=fixedBits;
@@ -1984,11 +2212,15 @@ fn sampleConeDirectionLod(
     ));
     if(probe!=EMPTY&&probe<16384u){
       let cone=cones[dataIndex(0u,probe,direction)];
-      if(cone.w>0.5){value+=cone.xyz*weight;total+=weight;}
+      if(cone.w>0.5){
+        value+=cone.xyz*weight;
+        environmentTransmittance+=max(0.0,cone.w-1.0)*weight;
+        total+=weight;
+      }
     }
   }
   if(total<1e-5){return vec4f(0);}
-  return vec4f(value/total,1.0);
+  return vec4f(value/total,1.0+environmentTransmittance/total);
 }
 fn sampleConeDirection(
   position:vec3f,normal:vec3f,direction:u32
@@ -1999,7 +2231,7 @@ fn sampleConeDirection(
   let coarse=sampleConeDirectionLod(position,normal,u32(lods.y),direction);
   if(fine.w<0.5){return coarse;}
   if(coarse.w<0.5){return fine;}
-  return vec4f(mix(fine.xyz,coarse.xyz,lods.z),1.0);
+  return mix(fine,coarse,lods.z);
 }
 fn mortonDirectionIndexFinal(u:u32,v:u32,cascade:u32)->u32{
   let bits=2u+cascade;
@@ -2049,7 +2281,7 @@ fn dataIndex(cascade:u32,probe:u32,direction:u32)->u32{
   return DATA_OFFSETS[cascade]+probe*DIR_COUNTS[cascade]+direction;
 }
 fn accumIndex(cascade:u32,probe:u32,direction:u32)->u32{
-  let frameIndex=min(1u,u32(floor(frame.controls.w)));
+  let frameIndex=u32(floor(frame.controls.w))&1u;
   return frameIndex*ACCUM_FRAME_STRIDE+dataIndex(cascade,probe,direction)*5u;
 }
 fn sunSplitDepth(cascade:u32)->f32{
@@ -2314,9 +2546,15 @@ fn traceShortRangeImpl(
             +shortNormal(triangle.normalOct.z)*barycentric.z
           );
           if(dot(hitNormal,direction)>0.0){hitNormal=-hitNormal;}
+          let sourceFrontFace=dot(
+            cross(
+              triangle.b.xyz-triangle.a.xyz,
+              triangle.c.xyz-triangle.a.xyz
+            ),direction
+          )<0.0;
           result=ShortHit(
             intersection.x,hitNormal,triangle.albedo.xyz*surface.rgb,
-            triangle.emissive.xyz
+            select(vec3f(0),triangle.emissive.xyz,sourceFrontFace)
           );
         }
       }
@@ -2367,16 +2605,38 @@ fn fastSunVisibility(world:vec3f,normal:vec3f)->f32{
 
 fn outgoingAtShortHit(hitWorld:vec3f,hit:ShortHit)->vec3f{
   let lightDirection=normalize(-frame.sunDirTime.xyz);
+  let sunCosine=max(0.0,dot(hit.normal,lightDirection));
+  var sunVisibility=0.0;
+  if(sunCosine>0.0){
+    // C(-1) hit points are frequently off screen. Camera-frustum shadow maps
+    // intentionally return visible outside their atlas, which is unsuitable
+    // for indirect visibility and leaks sunlight into sealed rooms. Resolve
+    // these secondary rays against the same exact, watertight scene BVH.
+    if(frame.pointColorIntensity.w<=0.0001&&!finalFeatureEnabled(64u)
+      &&atomicLoad(&frameState[8])==0u){
+      let sunOrigin=hitWorld+hit.normal*max(0.006,frame.envBaseSpacing.w*0.01);
+      let sunBlocker=traceShortRangeWatertight(
+        sunOrigin,lightDirection,frame.sceneBounds.w*1.001
+      );
+      sunVisibility=select(0.0,1.0,sunBlocker.t>=frame.sceneBounds.w*1.001);
+    }else{
+      sunVisibility=fastSunVisibility(hitWorld,hit.normal);
+    }
+  }
   let sun=frame.sunColorIntensity.xyz*frame.sunColorIntensity.w
-    *max(0.0,dot(hit.normal,lightDirection))
-    *fastSunVisibility(hitWorld,hit.normal);
+    *sunCosine*sunVisibility;
   let toPoint=frame.pointPosRange.xyz-hitWorld;
   let distance=length(toPoint);
   let pointWindow=max(0.0,1.0-distance/frame.pointPosRange.w);
+  let pointDirection=toPoint/max(distance,1e-4);
+  var pointVisibility=0.0;
+  if(frame.pointColorIntensity.w>0.0&&pointWindow>0.0){
+    pointVisibility=pointShadowVisibility(hitWorld,hit.normal);
+  }
   let point=frame.pointColorIntensity.xyz*frame.pointColorIntensity.w
-    *max(0.0,dot(hit.normal,toPoint/max(distance,1e-4)))
+    *max(0.0,dot(hit.normal,pointDirection))
     *pointWindow*pointWindow/(1.0+0.06*distance*distance)
-    *pointShadowVisibility(hitWorld,hit.normal);
+    *pointVisibility;
   // Emissive geometry inside C(-1) is integrated analytically below. A
   // center-ray hit would quantize an entire angular bin and double count it.
   return hit.albedo*(sun+point);
@@ -2470,6 +2730,8 @@ fn emissiveTriangleIrradiance(
   let a=triangle.a.xyz;
   let b=triangle.b.xyz;
   let c=triangle.c.xyz;
+  let sourceNormal=cross(b-a,c-a);
+  if(dot(sourceNormal,origin-(a+b+c)/3.0)<=0.0){return vec3f(0);}
   let minimum=min(a,min(b,c));
   let maximum=max(a,max(b,c));
   let proximityDistance=sqrt(pointAabbDistanceSquared(origin,minimum,maximum));
@@ -2558,6 +2820,25 @@ fn nearEmissiveIrradiance(
   return result;
 }
 
+// A 14-point Lebedev rule (the six axes plus the eight cube corners) is a
+// deterministic, rotation-balanced quadrature for the ambient C(-1) term.
+// It avoids both screen-space visibility changes and the directional fans of
+// returning one sparse ray as outgoing radiance.  The final normalization
+// below makes the rule energy preserving for every receiver normal.
+const C_MINUS_DIRECTIONS=array<vec3f,14>(
+  vec3f( 1.0, 0.0, 0.0),vec3f(-1.0, 0.0, 0.0),
+  vec3f( 0.0, 1.0, 0.0),vec3f( 0.0,-1.0, 0.0),
+  vec3f( 0.0, 0.0, 1.0),vec3f( 0.0, 0.0,-1.0),
+  vec3f( 0.577350269, 0.577350269, 0.577350269),
+  vec3f( 0.577350269, 0.577350269,-0.577350269),
+  vec3f( 0.577350269,-0.577350269, 0.577350269),
+  vec3f( 0.577350269,-0.577350269,-0.577350269),
+  vec3f(-0.577350269, 0.577350269, 0.577350269),
+  vec3f(-0.577350269, 0.577350269,-0.577350269),
+  vec3f(-0.577350269,-0.577350269, 0.577350269),
+  vec3f(-0.577350269,-0.577350269,-0.577350269)
+);
+
 fn cMinusOneIrradiance(
   world:vec3f,normal:vec3f,baseIrradiance:vec3f,
   closedBackFace:bool
@@ -2575,29 +2856,43 @@ fn cMinusOneIrradiance(
   // Run the same directional estimator at every pixel. In particular, do
   // not key C(-1) activation to neighboring screen pixels: that would make a
   // receiver change estimators as silhouettes move through the G-buffer.
-  // Closed-volume interiors use their scene's geometric diagonal rather than
-  // an empirical interval multiplier. Open/two-sided surfaces are unaffected.
+  var ambientWeight=0.0;
+  var ambientVisible=0.0;
+  let enclosureGuard=frame.pointColorIntensity.w<=0.0001
+    &&!finalFeatureEnabled(64u)&&atomicLoad(&frameState[8])==0u;
   let visibilityGuardEnd=select(
-    intervalEnd,max(intervalEnd,frame.sceneBounds.w*1.001),closedBackFace
+    intervalEnd,max(intervalEnd,frame.sceneBounds.w*1.001),
+    enclosureGuard||closedBackFace
   );
-  var mergedResult=vec3f(0);
-  for(var directionIndexValue=0u;directionIndexValue<32u;directionIndexValue++){
-    let direction=directionFromIndex(directionIndexValue,0u);
+  for(var directionIndexValue=0u;directionIndexValue<14u;directionIndexValue++){
+    let direction=C_MINUS_DIRECTIONS[directionIndexValue];
     let cosine=max(0.0,dot(normal,direction));
     if(cosine<=0.0){continue;}
-    let hit=traceShortRangeWatertight(
-      origin,direction,visibilityGuardEnd+0.001
-    );
-    if(hit.t<visibilityGuardEnd){
-      mergedResult+=outgoingAtShortHit(origin+direction*hit.t,hit)*cosine;
-    }else{
-      let continuation=sampleConeDirection(world,normal,directionIndexValue);
-      mergedResult+=select(
-        baseIrradiance,continuation.xyz,continuation.w>0.5
-      )*cosine;
+    ambientWeight+=cosine;
+    let shortHit=traceShortRangeWatertight(origin,direction,intervalEnd+0.001);
+    // A c0 direction represents a finite solid-angle cone, not an infinitesimal
+    // binary ray. Filter the blocker distance across the complete C(-1)
+    // interval as a cone-footprint estimate. This removes hard AO contours as
+    // either the receiver or blocker crosses t_-1, without screen coordinates,
+    // random noise, or a scene-dependent threshold.
+    var visibility=smoothstep(0.0,intervalEnd,shortHit.t);
+    if((enclosureGuard||closedBackFace)&&visibility>0.0){
+      let farHit=traceShortRangeWatertight(
+        origin,direction,visibilityGuardEnd+0.001
+      );
+      visibility*=select(0.0,1.0,farHit.t>=visibilityGuardEnd);
     }
+    ambientVisible+=cosine*visibility;
   }
-  return mergedResult*(4.0/32.0)+nearEmission;
+  // The paper calls out this ambient-term form as the practical C(-1)
+  // optimization. One energy correction preserves the smooth directional c0
+  // result while exact short rays recover fine occlusion. It cannot create
+  // bright fan sectors because validated energy is bounded by its cone.
+  let visibilityCorrection=select(
+    1.0,clamp(ambientVisible/ambientWeight,0.0,1.0),
+    ambientWeight>1e-7
+  );
+  return baseIrradiance*visibilityCorrection+nearEmission;
 }
 
 @vertex fn fullscreenVS(@builtin(vertex_index) index:u32)->@builtin(position) vec4f{
@@ -2615,7 +2910,19 @@ fn cMinusOneIrradiance(
   let albedoData=textureLoad(albedoTex,pixel,0);
   let albedo=albedoData.xyz;
   let normal=gbufferNormal(pixel);
+  let mode=u32(frame.controls.z+0.5);
   let sample=sampleIrradiance(world.xyz,normal);
+  if(mode==3u){return vec4f(normal*0.5+0.5,1.0);}
+  if(mode==4u){
+    return vec4f(mix(vec3f(0.35,0.025,0.015),vec3f(0.05,1.0,0.55),sample.w),1.0);
+  }
+  if(mode==5u){return vec4f(albedo,1.0);}
+  // Test-only mode 7 isolates the pre-C(-1) cascade gather and deliberately
+  // returns before the short-interval resolve so its timing is independently
+  // measurable.
+  if(mode==7u){
+    return vec4f(displayEncode(sample.xyz*frame.controls.y),1.0);
+  }
   let resolvedIrradiance=cMinusOneIrradiance(
     world.xyz,normal,sample.xyz,fract(world.w)>0.125
   );
@@ -2628,13 +2935,9 @@ fn cMinusOneIrradiance(
   let point=albedo*frame.pointColorIntensity.xyz*frame.pointColorIntensity.w*max(0.0,dot(normal,toPoint/max(distance,1e-4)))*pointWindow*pointWindow/(1.0+0.06*distance*distance)*pointShadowVisibility(world.xyz,normal);
   let emissive=surfaceEmission(pixel);
   let direct=sun+point+emissive;
-  let mode=u32(frame.controls.z+0.5);
   var color=direct+indirect;
   if(mode==1u){color=indirect;}
   if(mode==2u){color=direct;}
-  if(mode==3u){color=normal*0.5+0.5;}
-  if(mode==4u){color=mix(vec3f(0.35,0.025,0.015),vec3f(0.05,1.0,0.55),sample.w);}
-  if(mode==5u){color=albedo;}
   // Test-only mode 6 removes material color from the comparison so the
   // motion gate measures the reconstructed irradiance field itself.
   if(mode==6u){color=resolvedIrradiance;}

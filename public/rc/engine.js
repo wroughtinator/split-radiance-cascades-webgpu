@@ -1,11 +1,13 @@
 import {
   adaptiveBudgetScale, add3, clamp, cross3, dot3, mat4LookAt, mat4Multiply, mat4Ortho,
   mat4Perspective, mul3, normalize3, sub3,
-} from "./math.js?v=2026-07-31-universal18";
-import { createScene, SCENE_INFO } from "./scenes.js?v=2026-07-31-universal18";
+} from "./math.js?v=2026-07-31-daylight-door5";
+import {
+  createDynamicSceneGeometry, createScene, dynamicSceneKey, SCENE_INFO,
+} from "./scenes.js?v=2026-07-31-daylight-door5";
 import {
   computeShader, finalShader, presentShader, rasterShader, shaderConstants as K,
-} from "./shaders.js?v=2026-07-31-universal18";
+} from "./shaders.js?v=2026-07-31-daylight-door5";
 
 const SUN_CASCADE_COUNT = 4;
 
@@ -396,7 +398,7 @@ class SplitRadianceCascades {
           translationPerFrame: numericParameter("translationPerFrame", 0.06),
           recoveryWarmup: numericParameter("recoveryWarmup", 48),
           movingLights: parameters.get("movingLights") === "1",
-          debugMode: Math.max(0, Math.min(6, Math.floor(numericParameter("mode", 1)))),
+          debugMode: Math.max(0, Math.min(7, Math.floor(numericParameter("mode", 1)))),
           preservePose: parameters.get("show") === "1",
         });
         this.exposeTestReport(report);
@@ -543,6 +545,8 @@ class SplitRadianceCascades {
           SCENE_INFO.length - 1,
         );
         await this.loadScene(index);
+        const requestedTime = Number(new URLSearchParams(location.search).get("time"));
+        if (Number.isFinite(requestedTime)) this.testTimeOverride = requestedTime;
       }, 200);
     } else if (new URLSearchParams(location.search).get("pose") === "inside-box") {
       setTimeout(async () => {
@@ -741,8 +745,11 @@ class SplitRadianceCascades {
       assignOffsets: cp("assignRayOffsets"),
       mapPrimary: cp("mapPrimaryRaySamples"),
       prefixRayBlocks: cp("prefixRayBlocks"),
+      classifyEnvironmentAccess: cp("classifyEnvironmentAccess"),
       splitRays: cp("splitRays"),
       merge: cp("mergeCascade"),
+      resolveTangentSupportSources: cp("resolveTangentSupportSources"),
+      resolveTangentSupportIrradiance: cp("resolveTangentSupportIrradiance"),
       prefilter: cp("prefilterIrradiance"),
       validateReference: cp("validateReference"),
       validateShadowMaps: cp("validateShadowMaps"),
@@ -935,7 +942,7 @@ class SplitRadianceCascades {
   createPersistentResources() {
     const d = this.device;
     this.frameBuffer = createBuffer(d, "frame uniforms", 272, GPU.UNIFORM | GPU.COPY_DST);
-    this.hashBuffer = createBuffer(d, "double-buffered sparse probe hash", K.totalHashSlots * K.hashFrames * 8, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
+    this.hashBuffer = createBuffer(d, "world-key probe hash history", K.totalHashSlots * K.hashFrames * 8, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
     this.stateBuffer = createBuffer(d, "probe counters, ray prefixes, and diagnostics", K.stateWords * 4, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
     this.probeMetaBuffer = createBuffer(d, "sparse probe metadata", K.totalProbeMeta * 16, GPU.STORAGE | GPU.COPY_DST);
     this.accumBuffer = createBuffer(
@@ -945,18 +952,18 @@ class SplitRadianceCascades {
       GPU.STORAGE | GPU.COPY_DST,
     );
     this.coneBuffer = createBuffer(d, "merged radiance cones", K.totalDirectionData * 16, GPU.STORAGE | GPU.COPY_DST);
-    this.irradianceBuffer = createBuffer(d, "double-buffered bordered 6x6 probe irradiance", K.probeCaps[0] * K.irradianceTexels * K.irradianceFrames * 16, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
+    this.irradianceBuffer = createBuffer(d, "world-key bordered 6x6 probe irradiance history", K.probeCaps[0] * K.irradianceTexels * K.irradianceFrames * 16, GPU.STORAGE | GPU.COPY_SRC | GPU.COPY_DST);
     // WebGPU forbids writable storage and sampled usage for one texture in a
     // single synchronization scope. Keep the compute target separate, then
     // copy the completed frame half into the filterable atlas.
     this.irradianceAtlasWrite = d.createTexture({
-      label: "double-buffered 8x8 probe irradiance storage atlas",
+      label: "world-key 8x8 probe irradiance storage atlas history",
       size: [K.irradianceAtlasWidth, K.irradianceAtlasFrameHeight * K.irradianceFrames],
       format: "rgba16float",
       usage: TEX.STORAGE_BINDING | TEX.COPY_SRC,
     });
     this.irradianceAtlas = d.createTexture({
-      label: "double-buffered filterable 8x8 probe irradiance atlas",
+      label: "world-key filterable 8x8 probe irradiance atlas history",
       size: [K.irradianceAtlasWidth, K.irradianceAtlasFrameHeight * K.irradianceFrames],
       format: "rgba16float",
       usage: TEX.TEXTURE_BINDING | TEX.COPY_DST,
@@ -1195,7 +1202,7 @@ class SplitRadianceCascades {
         { binding: 6, resource: { buffer: this.hashBuffer } },
         { binding: 7, resource: this.irradianceAtlas.createView() },
         { binding: 8, resource: { buffer: this.coneBuffer } },
-        { binding: 9, resource: { buffer: this.accumBuffer } },
+        { binding: 9, resource: { buffer: this.stateBuffer } },
         { binding: 10, resource: this.irradianceSampler },
         // Binding 11 aliases the normal/emission packed target. Keeping the
         // binding separate makes the fragment interface explicit while the
@@ -1238,7 +1245,12 @@ class SplitRadianceCascades {
     this.emissiveTriangleBuffer?.destroy();
     const geometry = scene.geometry;
     this.vertexBuffer = createBuffer(this.device, `${info.short} raster geometry`, geometry.vertices.byteLength, GPU.VERTEX | GPU.COPY_DST, geometry.vertices);
-    this.bvhNodeBuffer = createBuffer(this.device, `${info.short} BVH nodes`, geometry.nodes.byteLength, GPU.STORAGE | GPU.COPY_DST, geometry.nodes);
+    // A moving primitive can change SAH partitioning by a few nodes without
+    // changing triangle topology. Reserve a small bounded margin so the door
+    // can update the hierarchy in-place without reallocating GPU resources or
+    // rebuilding bind groups during animation.
+    const bvhNodeCapacity = geometry.nodes.byteLength + (scene.dynamicGeometry ? 4096 : 0);
+    this.bvhNodeBuffer = createBuffer(this.device, `${info.short} BVH nodes`, bvhNodeCapacity, GPU.STORAGE | GPU.COPY_DST, geometry.nodes);
     this.triangleBuffer = createBuffer(this.device, `${info.short} BVH triangles`, geometry.triangles.byteLength, GPU.STORAGE | GPU.COPY_DST, geometry.triangles);
     this.emissiveBvhNodeBuffer = createBuffer(
       this.device,
@@ -1254,6 +1266,14 @@ class SplitRadianceCascades {
       GPU.STORAGE | GPU.COPY_DST,
       geometry.emissiveGeometry.triangles,
     );
+    this.dynamicGeometryCapacities = {
+      vertices: geometry.vertices.byteLength,
+      nodes: bvhNodeCapacity,
+      triangles: geometry.triangles.byteLength,
+      emissiveNodes: geometry.emissiveGeometry.nodes.byteLength,
+      emissiveTriangles: geometry.emissiveGeometry.triangles.byteLength,
+    };
+    this.dynamicGeometryKey = dynamicSceneKey(index, 0);
     this.scene = scene;
     this.sceneIndex = index;
     this.setCameraFromScene(scene);
@@ -1271,6 +1291,37 @@ class SplitRadianceCascades {
       bvhNodes: geometry.nodeCount,
       emissiveTriangles: geometry.emissiveGeometry.emissiveTriangleCount,
     });
+  }
+
+  updateDynamicSceneGeometry(seconds) {
+    if (!this.scene?.dynamicGeometry) return;
+    const key = dynamicSceneKey(this.sceneIndex, seconds);
+    if (key == null || key === this.dynamicGeometryKey) return;
+    const geometry = createDynamicSceneGeometry(this.sceneIndex, seconds);
+    if (!geometry) return;
+    const sizes = {
+      vertices: geometry.vertices.byteLength,
+      nodes: geometry.nodes.byteLength,
+      triangles: geometry.triangles.byteLength,
+      emissiveNodes: geometry.emissiveGeometry.nodes.byteLength,
+      emissiveTriangles: geometry.emissiveGeometry.triangles.byteLength,
+    };
+    for (const [name, size] of Object.entries(sizes)) {
+      if (size > this.dynamicGeometryCapacities[name]) {
+        throw new Error(`Dynamic scene exceeded ${name} capacity (${size} bytes).`);
+      }
+    }
+    this.device.queue.writeBuffer(this.vertexBuffer, 0, geometry.vertices);
+    this.device.queue.writeBuffer(this.bvhNodeBuffer, 0, geometry.nodes);
+    this.device.queue.writeBuffer(this.triangleBuffer, 0, geometry.triangles);
+    this.device.queue.writeBuffer(
+      this.emissiveBvhNodeBuffer, 0, geometry.emissiveGeometry.nodes,
+    );
+    this.device.queue.writeBuffer(
+      this.emissiveTriangleBuffer, 0, geometry.emissiveGeometry.triangles,
+    );
+    this.scene.geometry = geometry;
+    this.dynamicGeometryKey = geometry.dynamicKey;
   }
 
   setCameraFromScene(scene) {
@@ -1318,6 +1369,7 @@ class SplitRadianceCascades {
 
   updateUniforms(now) {
     const seconds = this.testTimeOverride ?? this.testFrameTime ?? (now - this.startTime) / 1000;
+    this.updateDynamicSceneGeometry(seconds);
     const cameraPose = this.cameraPose(seconds);
     const cameraPosition = cameraPose.position;
     const view = mat4LookAt(cameraPosition, cameraPose.target);
@@ -1406,7 +1458,8 @@ class SplitRadianceCascades {
     u.set(sunVP, 16);
     const featureFlags = (this.temporalStability ? 8 : 0)
       | (this.scene.paperPalette ? 16 : 0)
-      | (this.animateLights ? 32 : 0);
+      | (this.animateLights ? 32 : 0)
+      | (this.scene.geometry.emissiveGeometry.emissiveTriangleCount > 0 ? 64 : 0);
     u.set([...cameraPosition, featureFlags], 32);
     u.set([...sunDirection, seconds], 36);
     u.set([...sunColor, this.scene.sun], 40);
@@ -1414,7 +1467,7 @@ class SplitRadianceCascades {
     u.set([...pointColor, pointIntensity], 48);
     u.set([...this.scene.env, this.scene.baseSpacing], 52);
     u.set([this.width, this.height, this.giWidth, this.giHeight], 56);
-    const frameParity = this.frameIndex & 1;
+    const frameParity = this.frameIndex & (K.hashFrames - 1);
     // A nonzero fixed-light value enables exact sample-count accumulation in
     // the shader; its magnitude is used only by animated-light EMA. Exact-key
     // rejection still makes disocclusions immediate.
@@ -1529,7 +1582,12 @@ class SplitRadianceCascades {
     encoder.clearBuffer(this.stateBuffer);
     const accumFrameBytes = K.totalDirectionData * 5 * 4;
     encoder.clearBuffer(this.accumBuffer, (this.frameIndex & 1) * accumFrameBytes, accumFrameBytes);
-    let pass = encoder.beginComputePass({
+    let pass = encoder.beginComputePass({ label: "classify environment access" });
+    pass.setPipeline(this.computePipelines.classifyEnvironmentAccess);
+    pass.setBindGroup(0, this.computeBindGroups[0]);
+    pass.dispatchWorkgroups(Math.ceil(this.width / 8), Math.ceil(this.height / 8));
+    pass.end();
+    pass = encoder.beginComputePass({
       label: "reset sparse hash",
       timestampWrites: profile ? { querySet: this.querySet, beginningOfPassWriteIndex: 4 } : undefined,
     });
@@ -1603,15 +1661,27 @@ class SplitRadianceCascades {
       pass.dispatchWorkgroups(Math.ceil(K.probeCaps[cascade] * K.directions[cascade] / 64));
       pass.end();
     }
+    pass = encoder.beginComputePass({ label: "find measured same-sheet support sources" });
+    pass.setPipeline(this.computePipelines.resolveTangentSupportSources);
+    pass.setBindGroup(0, this.computeBindGroups[0]);
+    pass.dispatchWorkgroups(Math.ceil(K.probeCaps[0] / 64));
+    pass.end();
     pass = encoder.beginComputePass({
       label: "prefilter probe irradiance",
-      timestampWrites: profile ? { querySet: this.querySet, endOfPassWriteIndex: 5 } : undefined,
     });
     pass.setPipeline(this.computePipelines.prefilter);
     pass.setBindGroup(0, this.computeBindGroups[0]);
     pass.dispatchWorkgroups(Math.ceil(K.probeCaps[0] * K.irradianceTexels / 64));
     pass.end();
-    const atlasFrameY = (this.frameIndex & 1) * K.irradianceAtlasFrameHeight;
+    pass = encoder.beginComputePass({
+      label: "resolve same-sheet tangent support irradiance",
+      timestampWrites: profile ? { querySet: this.querySet, endOfPassWriteIndex: 5 } : undefined,
+    });
+    pass.setPipeline(this.computePipelines.resolveTangentSupportIrradiance);
+    pass.setBindGroup(0, this.computeBindGroups[0]);
+    pass.dispatchWorkgroups(Math.ceil(K.probeCaps[0] * K.irradianceTexels / 64));
+    pass.end();
+    const atlasFrameY = (this.frameIndex & (K.hashFrames - 1)) * K.irradianceAtlasFrameHeight;
     encoder.copyTextureToTexture(
       { texture: this.irradianceAtlasWrite, origin: [0, atlasFrameY, 0] },
       { texture: this.irradianceAtlas, origin: [0, atlasFrameY, 0] },
@@ -2029,11 +2099,11 @@ class SplitRadianceCascades {
       await this.device.queue.onSubmittedWorkDone();
       const hashBytes = K.totalHashSlots * K.hashFrames * 8;
       const irradianceBytes = K.probeCaps[0] * K.irradianceTexels * K.irradianceFrames * 16;
-      // Capture both buffers and the frame parity in one submission. Separate
+      // Capture both buffers and the history-frame index in one submission. Separate
       // asynchronous copies allowed animation frames to advance between copies,
       // occasionally pairing a hash frame with the wrong irradiance frame.
-      current = (this.frameIndex - 1) & 1;
-      previous = 1 - current;
+      current = (this.frameIndex - 1) & (K.hashFrames - 1);
+      previous = (current + K.hashFrames - 1) & (K.hashFrames - 1);
       hashReadback = createBuffer(this.device, "stability hash readback", hashBytes, GPU.COPY_DST | GPU.MAP_READ);
       irradianceReadback = createBuffer(this.device, "stability irradiance readback", irradianceBytes, GPU.COPY_DST | GPU.MAP_READ);
       const encoder = this.device.createCommandEncoder({ label: "atomic world-probe stability snapshot" });

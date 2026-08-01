@@ -5,8 +5,8 @@ import {
 } from "../public/rc/shaders.js";
 
 test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
-  assert.equal(shaderConstants.hashFrames, 2);
-  assert.equal(shaderConstants.irradianceFrames, 2);
+  assert.equal(shaderConstants.hashFrames, 4);
+  assert.equal(shaderConstants.irradianceFrames, 4);
   assert.match(computeShader, /fn assignRayOffsets/);
   assert.match(computeShader, /fn mortonDirectionIndex/);
   assert.match(computeShader, /let parentDirection=direction\*4u\+child/);
@@ -22,6 +22,9 @@ test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
   assert.match(computeShader, /atomicStore\(&accum\[base\+4u\],storedSamples\)/);
   assert.match(computeShader, /accumIndexFrame\(cascade,previousProbe,direction,previousFrame\)/);
   assert.match(computeShader, /fn canonicalizeProbes/);
+  assert.match(computeShader, /fn resolveTangentSupportIrradiance/);
+  assert.match(computeShader, /fn resolveTangentSupportSources/);
+  assert.match(computeShader, /probeStateIndex\(RAY_COUNT_OFFSET,0u,neighbor\)/);
   assert.match(computeShader, /let compactIndex=atomicAdd\(&state\[cascade\],1u\)/);
   assert.match(computeShader, /probeKeyFromInfo\(otherInfo,cascade\)<key/);
   assert.match(computeShader, /for\(var child=0u;child<8u;child\+\+\)/);
@@ -63,7 +66,10 @@ test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
     shaderConstants.irradianceAtlasFrameHeight * shaderConstants.irradianceAtlasWidth,
     shaderConstants.probeCaps[0] * shaderConstants.irradianceTexels,
   );
-  assert.equal(shaderConstants.stateWords, 16 + shaderConstants.totalProbeMeta * 3);
+  assert.equal(
+    shaderConstants.stateWords,
+    16 + shaderConstants.totalProbeMeta * 3 + shaderConstants.probeCaps[0] * 8,
+  );
   assert.match(finalShader, /fn sampleIrradianceLod/);
   assert.doesNotMatch(finalShader, /fn sampleIrradianceWithCoverage/);
   assert.match(finalShader, /var emissiveTex: texture_2d<f32>/);
@@ -92,16 +98,18 @@ test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
   assert.match(finalShader, /fn traceShortRangeWatertight/);
   assert.match(finalShader, /fn shortTriangleWatertight/);
   assert.match(finalShader, /var<storage,read> shortBvhNodes/);
-  assert.match(finalShader, /directionIndexValue=0u;directionIndexValue<32u/);
-  assert.doesNotMatch(finalShader, /&64u|featureEnabled\(64u\)/);
-  assert.doesNotMatch(computeShader, /featureEnabled\(64u\)/);
+  assert.match(finalShader, /const C_MINUS_DIRECTIONS=array<vec3f,14>/);
+  assert.match(finalShader, /directionIndexValue=0u;directionIndexValue<14u/);
+  assert.match(computeShader, /fn classifyEnvironmentAccess/);
+  assert.match(computeShader, /atomicStore\(&state\[8\],1u\)/);
+  assert.match(finalShader, /atomicLoad\(&frameState\[8\]\)==0u/);
   assert.match(finalShader, /let intervalEnd=frame\.envBaseSpacing\.w/);
   assert.match(finalShader, /frame\.sceneBounds\.w\*1\.001/);
   assert.doesNotMatch(finalShader, /needsLocalInterval|intervalEnd\*15\.0/);
   assert.doesNotMatch(computeShader, /primaryNeedsLocalInterval|intervalEnd\*15\.0/);
-  assert.match(finalShader, /sampleConeDirection\(world,normal,directionIndexValue\)/);
-  assert.match(finalShader, /select\(\s*baseIrradiance,continuation\.xyz,continuation\.w>0\.5\s*\)/);
-  assert.match(finalShader, /outgoingAtShortHit\(origin\+direction\*hit\.t,hit\)/);
+  assert.doesNotMatch(finalShader, /let continuation=sampleConeDirection\(world,normal,parentDirection\)/);
+  assert.match(finalShader, /ambientVisible\/ambientWeight/);
+  assert.match(finalShader, /return baseIrradiance\*visibilityCorrection\+nearEmission/);
   assert.match(finalShader, /fn clippedTriangleFormFactor/);
   assert.match(finalShader, /var<storage,read> emissiveBvhNodes/);
   assert.match(finalShader, /nearEmissiveIrradiance\(origin,normal,intervalEnd\)/);
@@ -113,7 +121,8 @@ test("Algorithm 3 allocation, LOD overlap, and history are implemented", () => {
   assert.match(computeShader, /fn primaryClippedTriangleFormFactor/);
   assert.match(computeShader, /fn primaryEmissivePatchIrradiance/);
   assert.match(rasterShader, /let closedBackFace=!frontFacing&&v\.materialCutoff\.y< -0\.5/);
-  assert.match(rasterShader, /let emissiveMarker=select\(0\.0,1\.0,any\(v\.emissive>vec3f\(0\)\)\)/);
+  assert.match(rasterShader, /let sourceVisible=dot\(normalize\(v\.normal\),frame\.cameraPos\.xyz-v\.world\)>0\.0/);
+  assert.match(rasterShader, /let emissiveMarker=select\(0\.0,1\.0,any\(visibleEmission>vec3f\(0\)\)\)/);
   assert.doesNotMatch(finalShader, /compartmentSun|compartmentPoint|enclosureRadius/);
   assert.doesNotMatch(finalShader, /if\(hit\.t>=9999\.0\)\{return baseIrradiance;\}/);
   assert.match(computeShader, /let cMinusOneEnd=frame\.envBaseSpacing\.w/);

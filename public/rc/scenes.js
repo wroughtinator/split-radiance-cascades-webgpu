@@ -5,7 +5,7 @@ import {
   normalize3,
   sub3,
   TAU,
-} from "./math.js?v=2026-07-31-universal18";
+} from "./math.js?v=2026-07-31-daylight-door5";
 
 const C = {
   chalk: [0.72, 0.75, 0.72],
@@ -273,7 +273,7 @@ export const SCENE_INFO = [
   {name:"Industrial pipe maze",short:"Pipes",description:"Dense curved pipework, narrow gaps, emissive furnaces, and complex self-occlusion."},
   {name:"Sun temple",short:"Temple",description:"Columns, layered portals, sharp-to-soft moving sunlight, and warm/cool material transfer."},
   {name:"Orbital sculpture field",short:"Orbit",description:"Freestanding high-curvature meshes test open-sky misses, distance intervals, and moving lights."},
-  {name:"Night market",short:"Market",description:"Many colored area emitters, stalls, fabric-like canopies, and dark-region stability."},
+  {name:"Daylight door room",short:"Door",description:"A sealed unlit room whose hinged door opens to moving sun and sky, with curved normal-detail sculptures inside."},
   {name:"Megacity stress grid",short:"Stress",description:"Large terrain, 150 structures, complex monuments, maximum probe pressure, and profiling load."},
   {name:"Cornell box reference",short:"Cornell",description:"Canonical red/green Cornell enclosure, two occluding boxes, ceiling area emitter, and an animated comparison light."},
   {name:"Grand concave heightmap",short:"Heightmap",description:"A 128×128, 32k-triangle terrain with nested bowls, a winding ravine, cliff shelves, moving sun, and orbiting fill light."},
@@ -387,27 +387,83 @@ function buildScene7(g) {
   return {camera:[30,14,32],target:[0,0,0],env:[0.025,0.035,0.09],sun:2.0};
 }
 
-function buildScene8(g) {
-  g.box([0,-0.2,0],[34,0.4,24],C.dark);
-  for(let row=0;row<3;row++)for(let i=0;i<8;i++){
-    const x=-14+i*4,z=-8+row*8;
-    g.box([x,1,z],[3.2,2,3.2],i%3===0?C.red:i%3===1?C.blue:C.green);
-    const canopy=i%2?C.yellow:C.violet;
-    g.quad([x-2,2,z-2],[x+2,2,z-2],[x+1.6,3.1,z+1.8],[x-1.6,3.1,z+1.8],canopy);
-    const e=i%3===0?[4.5,0.3,0.12]:i%3===1?[0.15,1.3,4.8]:[0.15,4.0,0.7];
-    // Model each lantern as one compact rectangular area source. A highly
-    // tessellated glowing sphere represents the same smooth source with 144
-    // redundant emissive triangles and turns exact partial-visibility work
-    // into geometry-dependent oversampling. Shape complexity remains in the
-    // stalls/canopies; light-source tessellation no longer changes GI cost.
-    g.quad(
-      [x-0.4,2.5,z-0.4],[x+0.4,2.5,z-0.4],
-      [x+0.4,2.5,z+0.4],[x-0.4,2.5,z+0.4],
-      [0.8,0.8,0.8],e,
-    );
+function daylightDoorOpenAmount(seconds) {
+  // Eight-second cycle with deliberate closed/open holds so both states are
+  // easy to inspect. The cubic ramps have zero velocity at either end.
+  const phase=((seconds%8)+8)%8;
+  const smooth=(value)=>value*value*(3-2*value);
+  if(phase<1.5)return 0;
+  if(phase<3.0)return smooth((phase-1.5)/1.5);
+  if(phase<5.5)return 1;
+  if(phase<7.0)return smooth((7.0-phase)/1.5);
+  return 0;
+}
+
+function buildScene8(g, seconds = 0) {
+  const wall=[0.39,0.42,0.43];
+  const plaster=[0.68,0.66,0.59];
+  const roomWidth=16,roomDepth=14,roomHeight=5.2;
+  const front=roomDepth*0.5;
+  const doorHalfWidth=1.35,doorHeight=4.35;
+
+  // Six opaque shells make a genuinely sealed room. The front is split only
+  // around the authored doorway; the slightly oversized leaf overlaps the
+  // jamb and floor in its closed pose to avoid numerical pinholes.
+  g.box([0,-0.2,0],[roomWidth,0.4,roomDepth],plaster);
+  g.box([0,roomHeight+0.2,0],[roomWidth,0.4,roomDepth],wall);
+  g.box([0,roomHeight*0.5,-roomDepth*0.5],[roomWidth,roomHeight,0.4],wall);
+  g.box([-roomWidth*0.5,roomHeight*0.5,0],[0.4,roomHeight,roomDepth],wall);
+  g.box([roomWidth*0.5,roomHeight*0.5,0],[0.4,roomHeight,roomDepth],wall);
+  const sideWidth=(roomWidth*0.5-doorHalfWidth);
+  g.box([-(doorHalfWidth+sideWidth*0.5),doorHeight*0.5,front],[sideWidth,doorHeight,0.4],wall);
+  g.box([doorHalfWidth+sideWidth*0.5,doorHeight*0.5,front],[sideWidth,doorHeight,0.4],wall);
+  g.box([0,doorHeight+(roomHeight-doorHeight)*0.5,front],[roomWidth,roomHeight-doorHeight,0.4],wall);
+
+  const openness=daylightDoorOpenAmount(seconds);
+  const angle=openness*Math.PI*0.49;
+  // The leaf overlaps all four sides of the structural opening, like a real
+  // rebated exterior door. Merely matching the aperture edge leaves a
+  // zero-width geometric seam through which exact floating-point rays can
+  // travel even though raster coverage looks closed.
+  const doorOverlap=0.18;
+  const hinge=[-doorHalfWidth-doorOverlap,doorHeight*0.5-0.02,front-0.27];
+  const leafWidth=doorHalfWidth*2+doorOverlap*2;
+  const center=[
+    hinge[0]+Math.cos(angle)*leafWidth*0.5,
+    hinge[1],
+    hinge[2]+Math.sin(angle)*leafWidth*0.5,
+  ];
+  g.boxRotatedY(center,[leafWidth,doorHeight+0.32,0.28],angle,[0.18,0.21,0.22]);
+
+  // Sunlit exterior ground and a pair of chunky portals make the changing
+  // daylight direction legible through the open doorway without adding any
+  // emissive or point-light source.
+  g.box([0,-0.18,15],[24,0.36,16],[0.30,0.34,0.27]);
+  g.box([-5.2,2.2,13.5],[1.2,4.4,1.2],C.stone);
+  g.box([5.0,1.5,17],[1.5,3.0,1.5],C.sand);
+
+  // Normal-rich interior exhibit: smooth curved normals, thin silhouettes,
+  // convex caps, and rotated planar forms under daylight only.
+  g.boxRotatedY([-3.1,0.38,3.4],[3.15,0.55,1.65],0.16,C.dark);
+  g.torus([-3.1,2.25,3.4],1.45,0.34,C.cyan,24,12,Math.PI/2);
+  g.sphere([1.35,1.05,3.65],1.05,C.orange,[0,0,0],10,18);
+  g.cylinder([5.3,1.65,-0.2],0.72,3.3,C.blue,18);
+  g.cone([-5.0,1.15,0.2],1.05,2.3,C.yellow,18);
+  g.torus([2.55,2.55,1.25],0.9,0.2,C.violet,20,10,0);
+  for(let i=0;i<7;i++){
+    const x=-5.7+i*1.9;
+    g.cylinder([x,3.7,-6.45],0.16,2.15,i%2?C.chalk:C.metal,10,0);
   }
-  for(let i=0;i<12;i++)g.cylinder([-16+i*2.9,2.3,0],0.08,4.6,C.metal,7);
-  return {camera:[28,12,28],target:[0,1.2,0],env:[0.003,0.006,0.018],sun:0.35};
+
+  return {
+    camera:[5.8,3.2,-3.2],target:[0,1.9,4.5],
+    env:[0.18,0.235,0.33],sun:3.0,pointIntensity:0,exposure:0.95,
+    // Keep the animated source high enough that an open aperture produces a
+    // compact daylight pool rather than a several-metre grazing needle. This
+    // is authored lighting (the universal GI path is unchanged), and the
+    // lower filmic peak retains detail instead of clipping the pool to white.
+    sunHorizontal:0.65,sunHeight:-0.88,dynamicGeometry:true,
+  };
 }
 
 function buildScene9(g) {
@@ -562,6 +618,23 @@ export function automaticBaseSpacing(radius, triangleCount) {
   return Math.max(0.22, radius * 0.077 / density);
 }
 
+export function dynamicSceneKey(index, seconds) {
+  if(index!==8)return null;
+  // Quantizing more finely than the visible angular motion prevents needless
+  // rebuilds during the two hold phases while keeping the hinge animation
+  // visually continuous.
+  return Math.round(daylightDoorOpenAmount(seconds)*480)/480;
+}
+
+export function createDynamicSceneGeometry(index, seconds) {
+  if(index!==8)return null;
+  const g=new Geometry();
+  BUILDERS[index](g,seconds);
+  const geometry=g.finish();
+  geometry.dynamicKey=dynamicSceneKey(index,seconds);
+  return geometry;
+}
+
 export function createScene(index) {
   if (index === 1 && typeof window !== "undefined") {
     return loadPackedSponzaGeometry().then((geometry) => {
@@ -589,7 +662,7 @@ export function createScene(index) {
     });
   }
   const g=new Geometry();
-  const settings=BUILDERS[index](g);
+  const settings=BUILDERS[index](g,0);
   const geometry=g.finish();
   const radius=Math.hypot(...geometry.boundsMax.map((v,i)=>(v-geometry.boundsMin[i])*0.5));
   return {

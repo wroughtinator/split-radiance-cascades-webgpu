@@ -115,7 +115,7 @@ test("presentation preserves shadow detail and height fields use smooth normals"
 });
 
 test("production module graph uses a release cache key", () => {
-  const releaseKey = "v=2026-07-31-universal18";
+  const releaseKey = "v=2026-07-31-daylight-door5";
   assert.ok(app.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(standalone.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(engine.includes(`./math.js?${releaseKey}`));

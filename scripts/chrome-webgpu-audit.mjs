@@ -16,6 +16,21 @@ const port = Number(options.get("--port") || (9400 + Math.floor(Math.random() * 
 const width = Math.max(640, Number(options.get("--width") || 1280));
 const height = Math.max(480, Number(options.get("--height") || 720));
 const debugView = options.has("--debug-view") ? Number(options.get("--debug-view")) : null;
+const frameStatsRequested = options.get("--frame-stats") === "1";
+const parseVector = (name) => {
+  const text = options.get(name);
+  if (!text) return null;
+  const values = text.split(",").map(Number);
+  if (values.length !== 3 || values.some((value) => !Number.isFinite(value))) {
+    throw new Error(`${name} must be three comma-separated finite numbers`);
+  }
+  return values;
+};
+const cameraPosition = parseVector("--camera");
+const cameraTarget = parseVector("--target");
+if ((cameraPosition === null) !== (cameraTarget === null)) {
+  throw new Error("--camera and --target must be provided together");
+}
 const profile = resolve(options.get("--profile") || `tmp/chrome-webgpu-${port}`);
 await mkdir(profile, { recursive: true });
 await mkdir(dirname(output), { recursive: true });
@@ -91,7 +106,13 @@ const evaluate = async (expression) => {
     returnByValue: true,
     userGesture: false,
   });
-  if (result.exceptionDetails) throw new Error(result.exceptionDetails.text || "Page evaluation failed");
+  if (result.exceptionDetails) {
+    const detail = result.exceptionDetails.exception?.description
+      || result.exceptionDetails.exception?.value
+      || result.exceptionDetails.text
+      || "Page evaluation failed";
+    throw new Error(detail);
+  }
   return result.result.value;
 };
 
@@ -103,16 +124,26 @@ const wantsReport = new URL(url).searchParams.has("autotest");
 let state;
 let debugViewApplied = debugView === null;
 let debugViewAppliedFrame = 0;
+let cameraPoseApplied = cameraPosition === null;
 while (Date.now() - started < timeout) {
   state = await evaluate(`(() => ({
-    webgpu: document.documentElement.dataset.webgpu || null,
-    audit: document.documentElement.dataset.audit || null,
+    webgpu: document.documentElement?.dataset.webgpu || null,
+    audit: document.documentElement?.dataset.audit || null,
     frameIndex: globalThis.__splitRC?.frameIndex || 0,
     running: !!globalThis.__splitRC?.running,
     reportReady: !!globalThis.__RC_TEST_REPORT__,
     status: document.getElementById('status-detail')?.textContent || null
   }))()`);
   if (state.webgpu === "failed") throw new Error(state.status || "WebGPU initialization failed");
+  if (!cameraPoseApplied && state.running && state.frameIndex >= 90) {
+    await evaluate(`(() => {
+      globalThis.__splitRC.setCameraPose(
+        ${JSON.stringify(cameraPosition)},${JSON.stringify(cameraTarget)}
+      );
+      globalThis.__splitRC.animateCamera = false;
+    })()`);
+    cameraPoseApplied = true;
+  }
   // Pose/test query handlers run on a short startup timer and may select their
   // own diagnostic mode. Apply an explicit harness override only after that
   // initialization window, then render enough frames before capture.
@@ -142,17 +173,68 @@ const audit = await evaluate(`(() => ({
   } : null,
   pose: globalThis.__splitRC?.cameraPose?.(globalThis.__splitRC?.testTimeOverride || 0) || null,
   metrics: globalThis.__splitRC?.metricsSnapshot?.() || null,
+  passTimes: globalThis.__splitRC?.passTimes
+    ? { ...globalThis.__splitRC.passTimes }
+    : null,
   debugMode: globalThis.__splitRC?.debugMode ?? null,
   emissiveTriangles: globalThis.__splitRC?.scene?.geometry?.emissiveGeometry?.emissiveTriangleCount ?? null,
   report: globalThis.__RC_TEST_REPORT__ || null,
   webgpu: document.documentElement.dataset.webgpu || null,
   auditState: document.documentElement.dataset.audit || null
 }))()`);
+const frameStats = frameStatsRequested ? await evaluate(`(async () => {
+  const frame = await globalThis.__splitRC.captureFinalFrame();
+  const values = [];
+  let maximum = 0;
+  let maximumPixel = [0, 0];
+  let maximumRgb = [0, 0, 0];
+  let maximumWorld = [0, 0, 0];
+  for (let y = 0; y < frame.height; y++) {
+    const pixelRow = y * frame.bytesPerRow;
+    const worldRow = y * (frame.worldBytesPerRow / 4);
+    for (let x = 0; x < frame.width; x++) {
+      if (frame.worldPixels[worldRow + x * 4 + 3] < 0.5) continue;
+      const offset = pixelRow + x * 4;
+      const luminance = frame.pixels[offset] * 0.2126
+        + frame.pixels[offset + 1] * 0.7152
+        + frame.pixels[offset + 2] * 0.0722;
+      values.push(luminance);
+      if (luminance > maximum) {
+        maximum = luminance;
+        maximumPixel = [x, y];
+        maximumRgb = [
+          frame.pixels[offset], frame.pixels[offset + 1], frame.pixels[offset + 2]
+        ];
+        maximumWorld = [
+          frame.worldPixels[worldRow + x * 4],
+          frame.worldPixels[worldRow + x * 4 + 1],
+          frame.worldPixels[worldRow + x * 4 + 2],
+        ];
+      }
+    }
+  }
+  values.sort((a, b) => a - b);
+  const percentile = (p) => values[
+    Math.min(values.length - 1, Math.floor((values.length - 1) * p))
+  ] || 0;
+  return {
+    surfacePixels: values.length,
+    p50LuminanceByte: percentile(0.5),
+    p95LuminanceByte: percentile(0.95),
+    p99LuminanceByte: percentile(0.99),
+    p999LuminanceByte: percentile(0.999),
+    maximumLuminanceByte: maximum,
+    maximumPixel,
+    maximumRgb,
+    maximumWorld,
+  };
+})()`) : null;
 const screenshot = await command("Page.captureScreenshot", { format: "png", fromSurface: true });
 await writeFile(output, Buffer.from(screenshot.data, "base64"));
 
 console.log(JSON.stringify({
   ...audit,
+  frameStats,
   screenshot: output,
   consoleErrors,
 }, null, 2));
