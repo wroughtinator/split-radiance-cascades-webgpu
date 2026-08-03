@@ -3,6 +3,9 @@
 A production browser implementation of Freeman and Sannikov's
 [Split Radiance Cascades](https://arxiv.org/abs/2607.20384).
 
+**Live demo: <https://wroughtinator.github.io/>** (WebGPU-capable browser
+required — Chrome or Edge 113+).
+
 The renderer implements the paper's primary sparse world-space diffuse GI
 path. It runs entirely in WebGPU with a GPU-resident
 software BVH, so no native ray-tracing extension, server, or runtime download
