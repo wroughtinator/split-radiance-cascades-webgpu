@@ -9,12 +9,12 @@ Cascades: Real-Time Global Illumination via Sparse Radiance Probes*
 | Eq. 1-2, Lambertian directional irradiance | 32 c0 equal-area directions are cosine-integrated into a bordered 6x6 octahedral irradiance field. | 512-spp, 64x36 cosine-weighted BVH references, robust/frozen regression gates, and RGB error image. |
 | Eq. 4-5, cascade scaling | Four cascades use `K=4`, `l=4`, `Theta0=4`, spacings `ds0*2^n`, 32/128/512/2048 directions, and `t0=1.6*ds0`. | Math unit tests and shader constants. |
 | Eq. 6, interval composition | Rays deposit `(J,beta)` into every crossed interval; merge evaluates `J + beta*I_parent` from c3 to c0. | Shader regression tests and reference audit. |
-| Algorithm 1, sparse RC | Every visible internal-screen pixel assigns its ray to the nearest half-cell c0 probe. For the higher-quality trilinear option discussed in Section 4, allocation also inserts the four neighbors in the dominant surface tangent plane; reconstruction uses the identical normalized footprint. Every cascade key carries a dominant-normal surface sheet so opposite sides of thin geometry never share a cache entry. | Byte-identical Sponza probe-coverage motion loop, twelve-scene capacity/finite-value tests, and live overflow counters. |
-| Section 4.1, LOD | Chebyshev-distance LODs are independent, scale spacing and cutoff together, overlap at 0.9, and cross-fade. | Shader tests and continuous camera test. |
+| Algorithm 1, sparse RC | Every visible internal-screen pixel assigns its ray to the nearest half-cell c0 probe. For the higher-quality trilinear option discussed in Section 4, allocation also inserts the four neighbors in the dominant surface tangent plane; reconstruction uses the identical normalized footprint. Every cascade key carries a dominant-normal surface sheet so opposite sides of thin geometry never share a cache entry. | Byte-identical effective-coverage Sponza motion loop, twelve-scene capacity/finite-value tests, and live overflow counters. |
+| Section 4.1, LOD | Chebyshev-distance LODs are independent and scale spacing/cutoff together. The paper's 0.9 cross-fade start is widened to 0.75 as a documented production residency extension so wheel impulses cannot skip the incoming LOD. | Forced ±120/±240 wheel, reversal, teleport, and continuous camera gates. |
 | Section 5, ray splitting | Rays originate on visible surfaces, face outward, and split at the cascade cutoffs instead of originating at probes. | Path-reference audit and Sponza comparison. |
 | Algorithm 2, equal-area map | Encode/decode use azimuth and uniform sphere height. | Round-trip and distribution unit tests. |
 | Algorithm 3, hierarchical R2 | One ray is assigned to every visible internal-screen pixel. Counts propagate c0-to-c3, reverse offsets assign contiguous parent segments, and each ray receives an exact deterministic local rank plus one global temporal rotation. | Byte-identical independent trajectory replay plus path-reference coverage gate. |
-| Section 5.2, temporal accumulation | Exact world/LOD keys retrieve the previous directional `(J,beta)` interval, which is blended before recursive merge. The current sparse hierarchy is recreated from current visible surfaces and parents; previous-only probes are removed exactly as described in Section 6. | Deterministic replay, uninterrupted motion, the low-camera Sponza translation/clean-rebuild gate, and a strict forward/backward floor loop. |
+| Section 5.2, temporal accumulation | Exact world/LOD keys retrieve the previous directional `(J,beta)` interval, which is blended before recursive merge. The current sparse hierarchy is recreated from current visible surfaces and parents; previous-only probes are not inserted. Rigid motion caps a swept cone's effective history instead of clearing it (the paper's Section 8.1 adaptive-averaging suggestion); a bounded fixed-light c0 resolved-cone cache is a separate static-scene cold-revisit extension and never acts as screen history. | Deterministic replay, uninterrupted motion, the low-camera Sponza translation/clean-rebuild gate, a strict forward/backward floor loop, and the one-way stale-shadow rebuild oracle. |
 | Section 6, irradiance optimization | A 6x6 octahedral field with an evaluated one-texel border is written to a double-buffered RGBA16F storage atlas, copied at the WebGPU usage boundary, and consumed through a filterable atlas; final gathers use one bilinear lookup for each of at most four surface-tangent neighbors per LOD. | Shader contract tests, four-scene reference comparison, and GPU profiling. |
 | Section 7.1, ambient-form `C(-1)` | The shipped production extension resolves the paper's missing sub-c0 visibility interval with exact software-BVH rays. A fixed world-space radius avoids camera-relative LOD discontinuities; a six-axis enclosure precheck keeps open surfaces on the smooth Split RC field, while every locally closed surface uses the same 16 deterministic R2 cosine rays. The robust path uses watertight shear-space triangle tests. | Closed-box 512-spp oracle, every-pixel displayed-leak scan, six-step camera loop, same-pose closure, and Cornell motion/reference gates. |
 | Section 7.1, denoising interpretation | Split RC itself is the spatiotemporal radiance-interval filter. OIDN is not shipped because the paper uses it only as an offline comparison baseline, not as part of Split RC. | Raw/reference/Split-RC error triptych. |
@@ -26,14 +26,25 @@ identifies sub-c0 visibility and interpolation leakage as unresolved limits.
 
 ## Dynamic geometry extension (outside the paper)
 
-The paper does not claim dynamic objects. This implementation adds
-change-projected radiance cascades for rigid instances: immutable local BLASes,
+The paper defers movable objects to future work (Section 5.2) and suggests
+adaptive averaging / multi-scale mean estimation as the intended refinement of
+its temporal accumulation (Section 8.1). The production extension implements
+exactly that shape: rigid instances use immutable local BLASes,
 current/swept/emissive TLASes, affine local-ray traversal, inverse-transpose
-normals, and shared raster/shadow/ray transforms. World-space probe identity is
-retained; mover swept bounds invalidate only overlapping directional/radial
-history instead of globally resetting the field or carrying an object-local
-lighting cache. Moving mesh lights participate in stochastic ray hits and
-exact near-field polygon integration.
+normals, and shared raster/shadow/ray transforms, while every receiver —
+static or rigid — uses the paper's estimator unchanged. The only dynamic
+mechanism is per-cone adaptive averaging driven by exact swept-volume and
+light-corridor tests: cones whose support a mover swept keep a capped
+effective sample count (graceful decay into a deterministic probe-keyed
+anchor quadrature), everything else converges with the paper's running
+average. There is no object-local lighting cache and no separate dynamic
+estimator; a rigid object that stops moving is indistinguishable from static
+geometry. Moving mesh lights participate in stochastic ray hits and exact
+near-field polygon integration.
+
+The daylight room uses the same extension: the complete room and doorway are
+static, while one oversized box-BLAS door leaf follows a hinge transform. Its
+current, shadow, and swept bounds all derive from the same instance record.
 
 The dynamic-Sponza audit requires 48 movers, at least six mesh lights, under
 64 KiB upload/frame, CPU update p95 below 1 ms, GPU time below 16.67 ms, zero

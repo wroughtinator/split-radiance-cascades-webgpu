@@ -17,7 +17,7 @@ is required.
 - ray splitting into `(J, beta)` intervals
 - sparse half-cell world probes and surface-tangent trilinear interpolation
 - the hierarchical R2 prefix allocator from Algorithm 3
-- 90%-boundary LOD overlap and cross-fade
+- a production 75%-to-boundary LOD residency overlap and cross-fade
 - back-to-front cascade merge
 - 6x6 octahedral irradiance prefilter
 - exact-key world-space temporal accumulation
@@ -40,7 +40,8 @@ as an extension, not misrepresented as paper baseline behavior. Static Sponza
 remains one immutable world BLAS; four reusable local mesh BLASes feed 48
 independent instances. The current TLAS, swept-change TLAS, emissive-only TLAS,
 and packed instance records share the existing node/triangle arenas so the
-compute pipeline remains within WebGPU's portable eight-storage-buffer limit.
+compute pipeline requests nine compute-stage storage buffers after verifying
+that exact adapter limit; this machine advertises sixteen.
 Raster, four sun shadows, six point shadows, compute rays, and final `C(-1)`
 visibility all consume the same frame's instance records.
 
@@ -57,7 +58,9 @@ Stable mode advances a deterministic global low-discrepancy temporal rotation,
 uses exact canonical screen-sample ranks, orders every allocation decision by
 probe key, and uses the paper's hierarchical key-ordered Algorithm 3 offsets.
 Directional `(J, beta)` intervals accumulate only on exact world/LOD key
-matches. Adjacent LODs cross-fade across the paper's 0.9 overlap. There is no
+matches. The paper begins its adjacent-LOD cross-fade at 0.9 of the boundary;
+this production build widens residency to 0.75 so ordinary wheel impulses
+cannot skip incoming support. There is no
 separate low-resolution ray lattice: Algorithm 3 assigns one ray to every pixel
 of the bounded internal render. Performance tiers vary that internal screen
 resolution, so thin and distant geometry cannot fall between ray samples and
@@ -86,14 +89,24 @@ These two invariants prevent a long camera translation from accumulating stale
 block-shaped light and ensure that rebuilding history at a fixed pose produces
 the same sparse population.
 
-For dynamic geometry, each previous directional interval is additionally
-tested against the mover swept-change TLAS. Only cone/radial intervals that
-overlap changed geometry reject history; unaffected Sponza cones retain their
-full convergence. Support-probe and final-atlas historical fallbacks are
-rejected near the same swept bounds. Moving emitters have a compact emissive
-TLAS and exact near-field polygon integration, while stochastic ray hits use
-the transformed emitter radiance. This change-projected temporal extension is
-shared by the Sponza stress scene and the daylight door.
+Rigid dynamic objects share the static path end to end: the same probes, the
+same Algorithm 3 rays, the same merge, the same reconstruction. Motion is
+expressed only as world-space cache invalidation. The swept-change TLAS holds
+just the instances that actually moved, with bounds equal to the union of
+their last twelve discrete pose AABBs; cones overlapping it blend history at
+a capped effective sample count (a graceful decay instead of a pop) and
+re-resolve from deterministic probe-keyed anchor rays, while
+population-dependent screen rays feed only cones that still accumulate. A
+light-corridor test additionally retires converged history whose stored
+radiance embeds direct shading that a mover's sweep could have changed, so
+indirect mover shadows cannot be frozen into the field. A dynamic object that
+stops moving drains out of the swept hierarchy and becomes exactly static —
+the persistent fixed-transport cache re-engages. Sub-probe-scale and
+sub-pixel instances read a projected-size band-limited field, because neither
+the probe grid nor the rasterizer supports directional detail below their
+sampling limits. Moving emitters keep a compact emissive TLAS, and the
+daylight door's hinged leaf is one reusable box BLAS instance under the same
+rules. This rigid-object path is explicitly outside the paper.
 
 For enclosed geometry below c0 spacing, an exact BVH `C(-1)` resolve evaluates
 a rotation-balanced 14-point ambient quadrature. Blocker distance is filtered
@@ -113,7 +126,7 @@ Stable mode advances the deterministic R2/Cranley-Patterson sequence
 continuously. An odd 32-bit Weyl permutation supplies the global rotation, so
 the 2D rotation pair cannot repeat before the full `2^32`-frame cycle and never
 loses precision through a large float conversion. Paused lighting accumulates
-an exact-key sample-count-weighted running average, capped at 16,384 effective
+an exact-key sample-count-weighted running average, capped at 65,535 effective
 samples per interval; animated lighting uses a bounded 0.965 EMA and is
 separately checked for both smooth motion and step-response lag. Toggling the
 lighting clock invalidates history
@@ -135,6 +148,10 @@ The built-in audit has twelve independent gates:
   at every matched pixel throughout the loop
 - a fixed-camera moving-light step response compared with a freshly converged
   target, which detects excessive temporal lag
+- a one-way staleness oracle that converges under continuous mover animation,
+  holds the final pose, and must match a clean rebuild of the identical state
+- simultaneous camera-path and mover animation, gated by owner-local
+  Lagrangian acceleration with samples bucketed by projected instance size
 - a deliberate near/far Sponza camera dolly aimed at view-sized distant meshes
 - deterministic 512-spp, 64x36 cosine-weighted BVH references for the
   color-bleed lab, Sponza, Cornell, and the large concave heightmap
@@ -203,12 +220,18 @@ pixel:
   Cornell scenes and 1.19% on the large heightmap; corresponding sun-shadow
   mismatch is 0%, 1.52%, and 1.04%
 - no sparse-hash, capacity, BVH-stack, or WebGPU error was observed
-- the dedicated dynamic-Sponza gate passes at 60 FPS / 7.09 ms GPU with 48
-  movers, seven mesh lights, 0.70 ms CPU-update p95, 20,384 upload bytes/frame,
-  2/255 motion p95, 6/255 motion p99, and 2/255 clean round-trip p95; an
-  emitter-off/on gate changes 0.734% of indirect-only channels with a 4/255
-  peak, and its 128-spp reference has 23.22% NRMSE with zero severe under-light
-  outliers
+- the dedicated dynamic-Sponza release bundle passes with 48 movers and seven
+  mesh lights on the unified world-field path: owner-local Lagrangian
+  acceleration on moving surfaces measures 1.5/255 at p95 (display) and
+  0.00055 scene-linear (raw transport, a 22x margin under its gate) at a near
+  pose projecting movers up to ~100 px, with zero screen-history blending;
+  fixed static surfaces measure 1/255 acceleration p95 under moving lights;
+  the one-way stale-shadow oracle closes at 2/255 p95 against a clean rebuild
+  after 96 frames of continuous motion, and the simultaneous camera+object
+  gate holds the same Lagrangian bounds along the animated camera path; CPU
+  update p95 is 0.70 ms with 28,576 upload bytes/frame; GPU frame time is an
+  interactive measurement (7.09 ms on the validation RTX 5080 — headless
+  compositors present via CPU readback and cannot time the swapchain)
 
 The final machine-readable summary is
 [`docs/validation/RTX-5080-balanced.json`](docs/validation/RTX-5080-balanced.json).

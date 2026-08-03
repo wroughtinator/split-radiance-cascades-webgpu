@@ -192,7 +192,7 @@ export function buildBVH(triangles, maxLeaf = 4) {
   if (!triangles.length) {
     return { nodes: new Float32Array(16), triangles: new Float32Array(32), nodeCount: 1 };
   }
-  const refs = triangles.map((t) => {
+  const refs = triangles.map((t, sourceIndex) => {
     const min = [
       Math.min(t.a[0], t.b[0], t.c[0]),
       Math.min(t.a[1], t.b[1], t.c[1]),
@@ -205,6 +205,7 @@ export function buildBVH(triangles, maxLeaf = 4) {
     ];
     return {
       t,
+      sourceIndex,
       min,
       max,
       c: [(min[0]+max[0])*0.5,(min[1]+max[1])*0.5,(min[2]+max[2])*0.5],
@@ -234,6 +235,7 @@ export function buildBVH(triangles, maxLeaf = 4) {
   };
   const nodes=[];
   const ordered=[];
+  const orderedSourceIndices=[];
   const build=(start,end,depth=0)=>{
     const nodeIndex=nodes.length;
     const node={min:[Infinity,Infinity,Infinity],max:[-Infinity,-Infinity,-Infinity],left:0,right:0,leaf:false};
@@ -252,7 +254,10 @@ export function buildBVH(triangles, maxLeaf = 4) {
     const count=end-start;
     if(count<=maxLeaf){
       node.leaf=true; node.left=ordered.length; node.right=count;
-      for(let i=start;i<end;i++) ordered.push(refs[i].t);
+      for(let i=start;i<end;i++) {
+        ordered.push(refs[i].t);
+        orderedSourceIndices.push(refs[i].sourceIndex);
+      }
     } else {
       let bestAxis=-1;
       let bestSplit=-1;
@@ -371,7 +376,11 @@ export function buildBVH(triangles, maxLeaf = 4) {
     triWords[o + 30] = packOctNormal(normals[2]);
     triWords[o + 31] = 0;
   });
-  return {nodes:new Float32Array(nodeData),triangles:triData,nodeCount:nodes.length,triangleCount:ordered.length};
+  return {
+    nodes:new Float32Array(nodeData),triangles:triData,
+    nodeCount:nodes.length,triangleCount:ordered.length,
+    orderedSourceIndices:new Uint32Array(orderedSourceIndices),
+  };
 }
 
 // Build a second, compact hierarchy containing only mesh-light triangles.

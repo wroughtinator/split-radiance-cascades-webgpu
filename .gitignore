@@ -46,3 +46,10 @@ next-env.d.ts
 /.tmp/
 /.codex-dev.*.log
 /.codex-static.*.log
+
+# local session tooling
+/.claude/
+
+# local copies of the reference paper (not redistributed)
+/docs/split-radiance-cascades-2607.20384.pdf
+/docs/split-radiance-cascades-2607.20384.txt

@@ -5,7 +5,7 @@ import {
   normalize3,
   sub3,
   TAU,
-} from "./math.js?v=2026-08-01-dynamic-tlas10";
+} from "./math.js?v=2026-08-02-unified-dynamics1";
 
 const C = {
   chalk: [0.72, 0.75, 0.72],
@@ -226,7 +226,7 @@ let sponzaGeometryPromise;
 async function loadPackedSponzaGeometry() {
   if (!sponzaGeometryPromise) {
     sponzaGeometryPromise = (async () => {
-      const response = await fetch("/models/sponza.rcb?v=2026-08-01-dynamic-tlas10");
+      const response = await fetch("/models/sponza.rcb?v=2026-08-02-unified-dynamics1");
       if (!response.ok) throw new Error(`Sponza geometry request failed (${response.status}).`);
       if (typeof DecompressionStream === "undefined") {
         throw new Error("This browser does not expose the gzip decompressor required by the Sponza scene.");
@@ -399,7 +399,7 @@ export function daylightDoorOpenAmount(seconds) {
   return 0;
 }
 
-function buildScene8(g, seconds = 0) {
+function buildScene8(g) {
   const wall=[0.39,0.42,0.43];
   const plaster=[0.68,0.66,0.59];
   const roomWidth=16,roomDepth=14,roomHeight=5.2;

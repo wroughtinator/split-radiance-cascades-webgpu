@@ -1,4 +1,4 @@
-import { Geometry, daylightDoorOpenAmount } from "./scenes.js?v=2026-08-01-dynamic-tlas10";
+import { Geometry, daylightDoorOpenAmount } from "./scenes.js?v=2026-08-02-unified-dynamics1";
 
 const INSTANCE_WORDS = 32;
 const NODE_WORDS = 8;
@@ -35,11 +35,6 @@ function rotateByQuaternion(vector, quaternion) {
   ];
 }
 
-function normalize(vector) {
-  const inverse = 1 / Math.max(1e-12, Math.hypot(...vector));
-  return vector.map((value) => value * inverse);
-}
-
 function transformedBounds(asset, instance) {
   const minimum = [Infinity, Infinity, Infinity];
   const maximum = [-Infinity, -Infinity, -Infinity];
@@ -56,6 +51,65 @@ function transformedBounds(asset, instance) {
     }
   }
   return { minimum, maximum };
+}
+
+function scaledAssetRadius(asset, scale) {
+  let radius = 0;
+  for (let mask = 0; mask < 8; mask++) {
+    const corner = [0, 1, 2].map((axis) => (
+      (mask & (1 << axis) ? asset.boundsMax[axis] : asset.boundsMin[axis])
+      * scale[axis]
+    ));
+    radius = Math.max(radius, Math.hypot(...corner));
+  }
+  return radius;
+}
+
+export function conservativeRigidSweep(asset, previous, current) {
+  const previousRadius = scaledAssetRadius(asset, previous.scale);
+  const currentRadius = scaledAssetRadius(asset, current.scale);
+  const sweepRadius = Math.max(previousRadius, currentRadius);
+  const centerDistance = Math.hypot(...current.center.map((value, axis) => (
+    value - previous.center[axis]
+  )));
+  const previousQuaternionLength = Math.max(1e-12, Math.hypot(...previous.rotation));
+  const currentQuaternionLength = Math.max(1e-12, Math.hypot(...current.rotation));
+  const quaternionCosine = Math.min(1, Math.abs(
+    current.rotation.reduce((sum, value, axis) => (
+      sum + value * previous.rotation[axis]
+    ), 0) / (previousQuaternionLength * currentQuaternionLength),
+  ));
+  const rotationMovement = 2 * sweepRadius * Math.sqrt(Math.max(
+    0,
+    1 - quaternionCosine * quaternionCosine,
+  ));
+  let scaleMovement = 0;
+  for (let mask = 0; mask < 8; mask++) {
+    const delta = [0, 1, 2].map((axis) => {
+      const local = mask & (1 << axis) ? asset.boundsMax[axis] : asset.boundsMin[axis];
+      return local * (current.scale[axis] - previous.scale[axis]);
+    });
+    scaleMovement = Math.max(scaleMovement, Math.hypot(...delta));
+  }
+  const maximumPointDisplacement = centerDistance + rotationMovement + scaleMovement;
+  // Deposited history only ever sampled the object at discrete frame poses,
+  // so invalidation must cover exactly where geometry stood at the previous
+  // pose and where it stands now: the union of the two tight transformed
+  // AABBs. Intermediate arc positions never contributed to any estimate. The
+  // former center-sphere sweep turned the thin hinged door leaf into a
+  // room-scale invalidation cube every animated frame.
+  const previousBox = transformedBounds(asset, previous);
+  const currentBox = transformedBounds(asset, current);
+  return {
+    moved: maximumPointDisplacement > MOVED_EPSILON,
+    maximumPointDisplacement,
+    minimum: previousBox.minimum.map((value, axis) => (
+      Math.min(value, currentBox.minimum[axis])
+    )),
+    maximum: previousBox.maximum.map((value, axis) => (
+      Math.max(value, currentBox.maximum[axis])
+    )),
+  };
 }
 
 function makeAsset(name) {
@@ -80,9 +134,22 @@ function makeAsset(name) {
   if (name === "torus") geometry.torus([0, 0, 0], 0.78, 0.27, [1, 1, 1], 12, 7);
   if (name === "cylinder") geometry.cylinder([0, 0, 0], 0.72, 2, [1, 1, 1], 12);
   const finished = geometry.finish();
+  // The SAH BVH deliberately reorders triangles into leaf-contiguous storage.
+  // Raster primitive IDs must name that same immutable BLAS triangle: material
+  // nodes use the ID to recover barycentrics, smooth normals, and object-local
+  // coordinates. Reorder the non-indexed raster stream once at asset build
+  // time instead of carrying a camera-visible indirection table every frame.
+  const rasterVertices = new Float32Array(finished.vertices.length);
+  for (let ordered = 0; ordered < finished.orderedSourceIndices.length; ordered++) {
+    const source = finished.orderedSourceIndices[ordered];
+    rasterVertices.set(
+      finished.vertices.subarray(source * 48, source * 48 + 48),
+      ordered * 48,
+    );
+  }
   return {
     name,
-    vertices: finished.vertices,
+    vertices: rasterVertices,
     nodes: finished.nodes,
     triangles: finished.triangles,
     nodeCount: finished.nodeCount,
@@ -131,7 +198,10 @@ function sponzaInstances(seconds) {
       // Match the sky/sun scene-linear exposure range. The former 3.2x red
       // boxes could legitimately saturate an entire nearby Sponza wall and
       // obscured the geometry this validation scene is meant to reveal.
-      emission: emissive ? tint.map((value) => 0.35 + value * 0.55) : [0, 0, 0],
+      // These are authored moving luminaires, not a GI compensation factor.
+      // Keep their scene-linear output visibly measurable after filmic display
+      // encoding while remaining far below the former saturating 3.2x panels.
+      emission: emissive ? tint.map((value) => 0.85 + value * 1.25) : [0, 0, 0],
       closed: asset !== "panel",
     });
   }
@@ -168,7 +238,7 @@ function sceneInstances(sceneIndex, seconds) {
   return [];
 }
 
-function packTlas(bounds, globalNodeOffset, capacity) {
+function packTlas(bounds, globalNodeOffset, capacity, target = null) {
   const nodes = [];
   const indices = bounds.map((_, index) => index);
   const build = (members) => {
@@ -204,7 +274,8 @@ function packTlas(bounds, globalNodeOffset, capacity) {
     return index;
   };
   if (indices.length) build(indices);
-  const packed = new Float32Array(capacity * NODE_WORDS);
+  const packed = target ?? new Float32Array(capacity * NODE_WORDS);
+  packed.fill(0);
   const words = new Uint32Array(packed.buffer);
   for (let index = 0; index < nodes.length; index++) {
     const node = nodes[index];
@@ -267,7 +338,11 @@ export class DynamicScene {
     this.combinedTriangles = new Float32Array(
       staticGeometry.triangles.length
       + dynamicTriangleCount * INSTANCE_WORDS
-      + MAX_INSTANCES * INSTANCE_WORDS,
+      // Current and previous rigid transforms share the existing triangle
+      // arena.  Keeping both states lets the final indirect resolve reproject
+      // a surface through its exact object-local point without adding another
+      // storage-buffer binding (the portable compute layout is already full).
+      + MAX_INSTANCES * INSTANCE_WORDS * 2,
     );
     this.combinedTriangles.set(staticGeometry.triangles);
     for (const asset of this.assets) {
@@ -287,7 +362,9 @@ export class DynamicScene {
     this.tlasData = new Float32Array(this.tlasCapacity * NODE_WORDS);
     this.sweptTlasData = new Float32Array(this.tlasCapacity * NODE_WORDS);
     this.emissiveTlasData = new Float32Array(this.tlasCapacity * NODE_WORDS);
-    this.instanceData = new Float32Array(MAX_INSTANCES * INSTANCE_WORDS);
+    this.instanceData = new Float32Array(MAX_INSTANCES * INSTANCE_WORDS * 2);
+    this.instanceWords = new Uint32Array(this.instanceData.buffer);
+    this.previousRecords = new Float32Array(MAX_INSTANCES * INSTANCE_WORDS);
     this.update(0, true);
     this.combinedNodes.set(this.tlasData, this.tlasNodeOffset * NODE_WORDS);
     this.combinedNodes.set(this.sweptTlasData, this.sweptTlasNodeOffset * NODE_WORDS);
@@ -310,8 +387,10 @@ export class DynamicScene {
         total + this.assetByName.get(instance.asset).vertices.length
       ), 0);
       this.rasterVertices = new Float32Array(Math.max(16, rasterFloatCount));
+      this.rasterPrimitiveBases = new Array(instances.length);
       let output = 0;
       for (let instanceIndex = 0; instanceIndex < instances.length; instanceIndex++) {
+        this.rasterPrimitiveBases[instanceIndex] = (output / 16 / 3) & 4095;
         const source = this.assetByName.get(instances[instanceIndex].asset).vertices;
         for (let vertex = 0; vertex < source.length; vertex += 16) {
           this.rasterVertices.set(source.subarray(vertex, vertex + 16), output);
@@ -330,24 +409,95 @@ export class DynamicScene {
       ...transformedBounds(this.assetByName.get(instance.asset), instance),
       instanceIndex,
     }));
+    // Preserve the complete previous record arena before writing the new
+    // transforms.  Stable instance indices are part of DynamicScene's public
+    // contract; topology changes cold-reset renderer history in loadScene.
+    this.previousRecords.set(
+      this.instanceData.subarray(0, MAX_INSTANCES * INSTANCE_WORDS),
+    );
+    const previousRecords = this.previousRecords;
     this.instanceData.fill(0);
-    const words = new Uint32Array(this.instanceData.buffer);
+    if (!initial) {
+      this.instanceData.set(previousRecords, MAX_INSTANCES * INSTANCE_WORDS);
+    }
+    const words = this.instanceWords;
+    const motions = instances.map((instance, index) => {
+      if (initial || !this.previousBounds[index]) {
+        return {
+          moved: false,
+          maximumPointDisplacement: 0,
+          minimum: [1, 1, 1],
+          maximum: [-1, -1, -1],
+        };
+      }
+      const base = index * INSTANCE_WORDS;
+      return conservativeRigidSweep(
+        this.assetByName.get(instance.asset),
+        {
+          center: [...previousRecords.slice(base, base + 3)],
+          rotation: [...previousRecords.slice(base + 4, base + 8)],
+          scale: [...previousRecords.slice(base + 8, base + 11)],
+        },
+        instance,
+      );
+    });
     let dynamicTriangles = 0;
+    let maximumDisplacement = 0;
+    // Invalidation needs a time constant, not a per-frame flicker: a tumbling
+    // instance's tight swept box grazes nearby cones differently every frame,
+    // which toggles those cones between converged history and the fresh
+    // anchored estimate and turns smooth motion into per-cone popping. The
+    // swept volume is therefore the union of the last SWEEP_WINDOW discrete
+    // pose AABBs, and an instance keeps its "recently moved" state for the
+    // same window. Cones near a moving object stay consistently on the
+    // deterministic current-state estimator; once the object rests for the
+    // window, the sweep collapses and accumulation resumes — a dynamic object
+    // that does not move is static.
+    const SWEEP_WINDOW = 12;
+    this.updateCount = (this.updateCount || 0) + 1;
+    this.recentPoseBoxes ??= [];
+    this.lastMovedUpdate ??= [];
+    const recentlyMovedFlags = [];
+    const sweptUnions = [];
+    for (let index = 0; index < instances.length; index++) {
+      const history = (this.recentPoseBoxes[index] ??= []);
+      history.push({
+        minimum: [...bounds[index].minimum],
+        maximum: [...bounds[index].maximum],
+      });
+      if (history.length > SWEEP_WINDOW + 1) history.shift();
+      if (motions[index].moved) this.lastMovedUpdate[index] = this.updateCount;
+      const movedRecently = !initial
+        && this.lastMovedUpdate[index] != null
+        && this.updateCount - this.lastMovedUpdate[index] <= SWEEP_WINDOW;
+      recentlyMovedFlags.push(movedRecently);
+      if (movedRecently) {
+        const union = {
+          minimum: [Infinity, Infinity, Infinity],
+          maximum: [-Infinity, -Infinity, -Infinity],
+        };
+        for (const box of history) {
+          for (let axis = 0; axis < 3; axis++) {
+            union.minimum[axis] = Math.min(union.minimum[axis], box.minimum[axis]);
+            union.maximum[axis] = Math.max(union.maximum[axis], box.maximum[axis]);
+          }
+        }
+        sweptUnions.push({ instanceIndex: index, ...union });
+      } else {
+        sweptUnions.push(null);
+      }
+    }
     for (let index = 0; index < instances.length; index++) {
       const instance = instances[index];
       const asset = this.assetByName.get(instance.asset);
-      const previous = this.previousBounds[index];
-      const displacement = previous
-        ? Math.max(...bounds[index].minimum.map((value, axis) => Math.abs(value - previous.minimum[axis])),
-          ...bounds[index].maximum.map((value, axis) => Math.abs(value - previous.maximum[axis])))
-        : 0;
-      const moved = !initial && displacement > MOVED_EPSILON;
-      const sweptMinimum = moved
-        ? bounds[index].minimum.map((value, axis) => Math.min(value, previous.minimum[axis]))
-        : [1, 1, 1];
-      const sweptMaximum = moved
-        ? bounds[index].maximum.map((value, axis) => Math.max(value, previous.maximum[axis]))
-        : [-1, -1, -1];
+      const motion = motions[index];
+      maximumDisplacement = Math.max(
+        maximumDisplacement,
+        motion.maximumPointDisplacement,
+      );
+      const moved = recentlyMovedFlags[index];
+      const sweptMinimum = moved ? sweptUnions[index].minimum : [1, 1, 1];
+      const sweptMaximum = moved ? sweptUnions[index].maximum : [-1, -1, -1];
       const base = index * INSTANCE_WORDS;
       this.instanceData.set([...instance.center, 1], base);
       this.instanceData.set(instance.rotation, base + 4);
@@ -355,6 +505,11 @@ export class DynamicScene {
       this.instanceData.set([...instance.albedo, 0], base + 12);
       this.instanceData.set([...instance.emission, 0], base + 16);
       this.instanceData.set([...sweptMinimum, 0], base + 20);
+      // The packed G-buffer primitive is the concatenated dynamic draw's
+      // 12-bit triangle index.  Preserve this instance's modulo-4096 draw
+      // base in an otherwise-unused float so compute can recover the immutable
+      // BLAS-local primitive for material-space surface nodes.
+      this.instanceData[base + 23] = this.rasterPrimitiveBases?.[index] ?? 0;
       this.instanceData.set([...sweptMaximum, 0], base + 24);
       words[base + 28] = asset.globalNodeOffset;
       words[base + 29] = asset.globalTriangleOffset;
@@ -364,25 +519,56 @@ export class DynamicScene {
 
       dynamicTriangles += asset.triangleCount;
     }
-    const tlas = packTlas(bounds, this.tlasNodeOffset, this.tlasCapacity);
-    const sweptBounds = bounds.flatMap((current, instanceIndex) => {
-      const previous = this.previousBounds[instanceIndex];
-      if (initial || !previous) return [];
-      const displacement = Math.max(
-        ...current.minimum.map((value, axis) => Math.abs(value - previous.minimum[axis])),
-        ...current.maximum.map((value, axis) => Math.abs(value - previous.maximum[axis])),
-      );
-      if (displacement <= MOVED_EPSILON) return [];
-      return [{
-        instanceIndex,
-        minimum: current.minimum.map((value, axis) => Math.min(value, previous.minimum[axis])),
-        maximum: current.maximum.map((value, axis) => Math.max(value, previous.maximum[axis])),
-      }];
+    // Separate a radiometric discontinuity from continuous emitter motion.
+    // Both are real source changes and both are independent of the UI light
+    // toggle, but they need different estimators: an output step invalidates
+    // every old cone, while a moved finite emitter is localized by the swept
+    // TLAS and can retain unrelated, motion-bounded history.
+    this.dynamicEmissionDiscontinuity = !initial && instances.some((instance, index) => {
+      const base = index * INSTANCE_WORDS;
+      const wasEmitter = previousRecords.slice(base + 16, base + 19)
+        .some((value) => value > 0);
+      const isEmitter = instance.emission.some((value) => value > 0);
+      if (!wasEmitter && !isEmitter) return false;
+      if (wasEmitter !== isEmitter) return true;
+      for (const offset of [16, 17, 18]) {
+        if (Math.abs(this.instanceData[base + offset] - previousRecords[base + offset]) > 1e-7) {
+          return true;
+        }
+      }
+      return false;
     });
+    this.dynamicEmissionMoving = !initial && instances.some((instance, index) => {
+      const base = index * INSTANCE_WORDS;
+      const wasEmitter = previousRecords.slice(base + 16, base + 19)
+        .some((value) => value > 0);
+      const isEmitter = instance.emission.some((value) => value > 0);
+      if (!wasEmitter && !isEmitter) return false;
+      return motions[index].moved;
+    });
+    this.maximumDisplacement = initial ? 0 : maximumDisplacement;
+    // The first frame has no temporal predecessor.  Mirroring current records
+    // makes every transform lookup finite while the renderer's history-valid
+    // bit still prevents reuse.
+    if (initial) {
+      this.instanceData.copyWithin(
+        MAX_INSTANCES * INSTANCE_WORDS,
+        0,
+        MAX_INSTANCES * INSTANCE_WORDS,
+      );
+    }
+    const tlas = packTlas(
+      bounds,
+      this.tlasNodeOffset,
+      this.tlasCapacity,
+      this.tlasData,
+    );
+    const sweptBounds = sweptUnions.filter(Boolean);
     const sweptTlas = packTlas(
       sweptBounds,
       this.sweptTlasNodeOffset,
       this.tlasCapacity,
+      this.sweptTlasData,
     );
     const emissiveBounds = bounds.filter((_, instanceIndex) => (
       instances[instanceIndex].emission.some((value) => value > 0)
@@ -391,6 +577,7 @@ export class DynamicScene {
       emissiveBounds,
       this.emissiveTlasNodeOffset,
       this.tlasCapacity,
+      this.emissiveTlasData,
     );
     this.tlasData = tlas.packed;
     this.tlasNodeCount = tlas.nodeCount;

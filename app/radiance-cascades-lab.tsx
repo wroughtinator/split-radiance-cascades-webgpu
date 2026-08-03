@@ -14,7 +14,7 @@ export function RadianceCascadesLab() {
     let active = true;
     const script = document.createElement("script");
     script.type = "module";
-    script.src = "/rc/engine.js?v=2026-08-01-dynamic-tlas10";
+    script.src = "/rc/engine.js?v=2026-08-02-unified-dynamics1";
     script.dataset.splitRcLoader = "true";
     script.addEventListener("load", () => {
       if (active && window.__splitRCLoaderGeneration === generation) {
@@ -79,7 +79,7 @@ export function RadianceCascadesLab() {
               <option value="1">Indirect only</option>
               <option value="2">Direct only</option>
               <option value="3">Surface normals</option>
-              <option value="4">Probe coverage</option>
+              <option value="4">Effective probe coverage</option>
               <option value="5">Albedo</option>
             </select>
           </label>
@@ -110,10 +110,10 @@ export function RadianceCascadesLab() {
           <label><input id="animate-camera" type="checkbox" defaultChecked /><span>Camera path</span></label>
           <label><input id="animate-lights" type="checkbox" defaultChecked /><span>Moving lights</span></label>
           <label><input id="temporal-stability" type="checkbox" defaultChecked /><span>Stable history</span></label>
-          <label><input id="show-profiler" type="checkbox" defaultChecked /><span>Pass profiler</span></label>
+          <label><input id="show-profiler" type="checkbox" /><span>Pass profiler</span></label>
         </section>
 
-        <section id="pass-profiler" className="profiler">
+        <section id="pass-profiler" className="profiler" hidden>
           <div><span>Algorithm 3 ray grid</span><i><b style={{ width: "100%" }} /></i><output id="gi-resolution">—</output></div>
           <div><span>Frame</span><i><b id="bar-frame" /></i><output id="pass-frame">—</output></div>
           <div><span>Geometry</span><i><b id="bar-geometry" /></i><output id="pass-geometry">—</output></div>

@@ -8,6 +8,7 @@ sun shadow pass + six-face moving-point shadow pass
   -> clear current hash, counters, prefixes, and interval accumulators
   -> insert four surface-tangent c0 support probes per visible pixel
   -> initialize c1 through c3 parents
+  -> resolve bounded persistent c0 slots for fixed immutable transport
   -> assign one ray per visible internal-screen pixel and count rays bottom-up
   -> assign deterministic hierarchical R2 offsets c3 through c0
   -> trace and split primary rays
@@ -36,17 +37,61 @@ structure without altering the Split RC interval equations:
   direction, so the affine ray parameter remains world distance under
   nonuniform scaling. Normals use the inverse-transpose equivalent.
 - The static BVH, all dynamic BLASes/TLASes, and 128-byte instance records are
-  co-packed into the existing node/triangle buffers, preserving WebGPU's
-  portable eight-storage-buffer compute limit.
+  co-packed into the existing node/triangle buffers. The fixed-light c0 cache
+  adds a ninth compute storage binding; device creation requests exactly nine
+  only when the adapter advertises that limit.
 - Raster and all ten shadow views transform immutable local vertices in the
   vertex stage from the same records used by compute and final traversal.
 
-Temporal reuse remains world-space. Before a previous `(J,beta)` interval is
-accepted, its cascade cone segment is tested against the swept-change TLAS
-with expansion by the cone footprint. Intersecting history is rejected;
-unaffected static history keeps converging. Irradiance support history is also
-rejected near swept volumes. This avoids global resets and object-local caches
-that would incorrectly carry incident radiance through space.
+The daylight room's walls, floor, ceiling, doorway, exterior, and sculptures
+remain one immutable BLAS. Only the oversized hinged door leaf is a dynamic
+box instance. Its transform drives rasterization, all shadow views, current
+TLAS traversal, and a conservative previous/current swept TLAS.
+
+Directional interval reuse remains world-space, and rigid receivers use the
+SAME estimator as static geometry end to end: mover pixels seed the same
+sparse world probes, own the same Algorithm 3 ranks, publish the same
+hazard-anchor candidates, and reconstruct from the same bordered octahedral
+field. There is no separate dynamic-receiver cache. Motion is expressed only
+as cache invalidation, with five production mechanisms:
+
+- The swept-change TLAS contains only instances whose transform actually
+  changed, with bounds equal to the union of the last twelve discrete pose
+  AABBs. The window is a time constant: a tumbling instance cannot toggle
+  nearby cones between estimators frame to frame, and a dynamic object that
+  stops moving drains out of the hierarchy and becomes exactly static —
+  including re-engaging the preserved-cone camera path and the persistent c0
+  cache (new feature bit 32768) once quiescent.
+- Invalidation is graceful, not destructive. A cone whose spatio-angular
+  support overlaps the swept TLAS keeps participating with its effective
+  sample count capped at twelve, so the converged value decays into the fresh
+  deterministic estimate over a few frames instead of popping. Teleports
+  (rigid-motion discontinuity, bit 2048) and radiometric steps (bit 512)
+  still reject outright, which keeps the round-trip immediate-closure and
+  emitter-step oracles exact.
+- A light-corridor test extends invalidation to endpoint shading: stored `J`
+  embeds direct light at the hit point, and a mover crossing the SUN or point
+  path to that endpoint never intersects the receiver cone. Four conservative
+  capsules from the interval span toward each analytic source cap such
+  history to the same graceful window, so converged cones cannot freeze a
+  mover's stale shadow into the field.
+- Population-dependent rays never feed swept-invalid cones. Algorithm 3's
+  rank/count assignment reshuffles with the visible-pixel population every
+  frame — measured as roughly five percent per-frame luminance churn on
+  exact-key probes near movers — so under continuous motion those cones
+  resolve purely from the deterministic probe-keyed anchor quadrature (one
+  universal R2 direction set shared by every probe, with owner-local winner
+  codes so anchor origins co-move with the material). On discontinuity frames
+  the gate stands down: history is rejected anyway and the extra rays only
+  improve the first fresh estimate.
+- Rigid pixels key their probes by the OWNER-CANONICAL normal, making the
+  dominant-normal sheet a material property that rotation cannot change, and
+  reconstruct with the full eight-corner trilinear using C1 Hermite weights
+  (the raster-churned tangent-axis machinery is bypassed). The directional
+  octahedral lookup is band-limited by the instance's projected size —
+  blending toward the probe's alpha-weighted ambient tile mean as the
+  projection shrinks — because neither the probe grid nor the rasterizer can
+  support directional detail below their sampling limits.
 
 The dedicated `?autotest=dynamic-sponza` gate checks 1/60-second camera/object/
 light motion, time round-trip closure against a clean rebuild, a fixed-pose
@@ -107,9 +152,20 @@ but it is never inserted merely because it existed in the prior frame. This
 matches the paper's per-frame hashmap recreation and prevents stale off-screen
 probes from becoming sparse interpolation neighbors.
 
-LOD selection uses Chebyshev distance. A coarser LOD begins at 90% of its
-nominal boundary; both LODs are initialized and evaluated through the overlap,
-then linearly blended.
+For fixed lighting and immutable geometry, a bounded two-choice/four-way cache
+retains the fully composed c0 directional radiance/transmittance field after a
+world key leaves the four-frame working set. A canonical-probe resolver owns
+one slot per current key, never evicts a key present in the complete current
+hash, and falls back to the ordinary paper path on contention. It does not
+insert previous-only probes, recur on a screen image, or average cumulative
+means. Dynamic geometry, moving analytic sources, and transport epochs bypass
+or invalidate this production extension.
+
+LOD selection uses Chebyshev distance. The paper's 90%-boundary band is widened
+to 75% in the production path; both LODs are initialized and evaluated through
+the overlap, then linearly blended. The wider residency band prevents a normal
+wheel impulse from jumping over incoming support and is documented as an
+extension rather than equation-identical paper behavior.
 
 ## Algorithm 3 on WebGPU
 
@@ -140,7 +196,7 @@ The temporal rotation uses an odd 32-bit Weyl permutation whose low/high halves
 approximate the paper's two irrational rotation increments. The complete pair
 does not repeat before `2^32` frames and avoids float precision collapse.
 Exact-key intervals therefore keep converging under paused lighting. Static
-intervals use their accumulated sample counts, capped at 16,384 effective
+intervals use their accumulated sample counts, capped at 65,535 effective
 samples; animated lighting keeps a bounded 0.965 EMA and is validated against a
 stepped, freshly-converged target.
 

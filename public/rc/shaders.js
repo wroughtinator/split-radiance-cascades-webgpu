@@ -14,7 +14,13 @@ export const shaderConstants = {
   irradianceAtlasFrameHeight: 2048,
   irradianceFrames: 4,
   accumFrames: 2,
-  stateWords: 197136,
+  persistentHashSlots: 32768,
+  persistentMetaWords: 131072,
+  persistentMapOffset: 5373952,
+  persistentWords: 5390336,
+  // Base counters/prefixes plus one deterministic winner per c0 probe and
+  // each of the 64 fixed current-state lanes used by dynamic transport.
+  stateWords: 2163216,
 };
 
 export const rasterShader = /* wgsl */`
@@ -31,6 +37,8 @@ struct FrameUniforms {
   controls: vec4f,
   sceneBounds: vec4f,
   dynamicInfo: vec4u,
+  previousViewProj: mat4x4<f32>,
+  lodCamera: vec4f,
 };
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
 @group(0) @binding(1) var albedoAtlas: texture_2d_array<f32>;
@@ -58,8 +66,15 @@ struct VertexOut {
   @location(3) emissive: vec3f,
   @location(4) uv: vec2f,
   @location(5) @interpolate(flat) materialCutoff: vec2f,
+  // 0xffffffff is immutable scene geometry; dynamic records use their stable
+  // instance slot.  The fragment packs this into world.w so every later pass
+  // can distinguish overlapping rigid receivers without another attachment.
+  @location(6) @interpolate(flat) dynamicOwner: u32,
+  @location(7) @interpolate(flat) rasterPrimitive: u32,
 };
-@vertex fn gbufferVS(v: VertexIn) -> VertexOut {
+@vertex fn gbufferVS(
+  v: VertexIn,@builtin(vertex_index) vertexIndex:u32
+) -> VertexOut {
   var o: VertexOut;
   o.clip = frame.viewProj * vec4f(v.position, 1.0);
   o.world = v.position;
@@ -68,13 +83,17 @@ struct VertexOut {
   o.emissive = v.emissive;
   o.uv = v.uv;
   o.materialCutoff = v.materialCutoff;
+  o.dynamicOwner = 0xffffffffu;
+  o.rasterPrimitive = vertexIndex/3u;
   return o;
 }
 fn rasterQuaternionRotate(vector:vec3f,quaternion:vec4f)->vec3f{
   let doubled=2.0*cross(quaternion.xyz,vector);
   return vector+quaternion.w*doubled+cross(quaternion.xyz,doubled);
 }
-@vertex fn dynamicGbufferVS(v:VertexIn)->VertexOut{
+@vertex fn dynamicGbufferVS(
+  v:VertexIn,@builtin(vertex_index) vertexIndex:u32
+)->VertexOut{
   let instanceIndex=u32(v.materialCutoff.x+0.5);
   let instance=rasterDynamicData[frame.dynamicInfo.y+instanceIndex];
   let world=instance.a.xyz+rasterQuaternionRotate(
@@ -91,6 +110,8 @@ fn rasterQuaternionRotate(vector:vec3f,quaternion:vec4f)->vec3f{
   o.emissive=instance.emissive.xyz;
   o.uv=v.uv;
   o.materialCutoff=vec2f(-1.0,v.materialCutoff.y);
+  o.dynamicOwner=instanceIndex;
+  o.rasterPrimitive=vertexIndex/3u;
   return o;
 }
 struct GBufferOut {
@@ -133,7 +154,10 @@ fn encodeSurfaceEmission(emission:vec3f)->vec3f{
   // use the two channels freed by octahedral normal encoding.
   return clamp(log2(vec3f(1.0)+max(emission,vec3f(0)))/8.0,vec3f(0),vec3f(1));
 }
-@fragment fn gbufferFS(v: VertexOut, @builtin(front_facing) frontFacing: bool) -> GBufferOut {
+@fragment fn gbufferFS(
+  v: VertexOut,
+  @builtin(front_facing) frontFacing: bool
+) -> GBufferOut {
   var o: GBufferOut;
   let surface=materialSample(v.uv,v.materialCutoff.x);
   if(v.materialCutoff.y>0.0&&surface.a<v.materialCutoff.y){discard;}
@@ -157,9 +181,23 @@ fn encodeSurfaceEmission(emission:vec3f)->vec3f{
   // visibility bit. Open and two-sided surfaces therefore render identically
   // from either side. The independent 1.0 emitter bit preserves packed RGB.
   let closedBackFace=!frontFacing&&v.materialCutoff.y< -0.5;
-  let surfaceMarker=1.0+select(0.0,0.25,closedBackFace);
-  let emissiveMarker=select(0.0,1.0,any(visibleEmission>vec3f(0)));
-  o.world = vec4f(v.world,surfaceMarker+emissiveMarker);
+  let flags=select(0u,1u,closedBackFace)
+    |select(0u,2u,any(visibleEmission>vec3f(0)));
+  // Preserve exact primitive/topology identity without another MRT. Static
+  // primitive IDs occupy the low 23 bits. Dynamic IDs set bit 23 and pack a
+  // six-bit owner plus the draw's stable 12-bit primitive index. The complete
+  // code remains below 2^24 and is therefore represented exactly by f32.
+  // Bit 2 is the static-surface validity sentinel. Using +1 as the sentinel
+  // collided with bit 0: a closed back face added another 1, carried into the
+  // emitter bit, and lost its closed-volume classification.
+  var packedSurface=4u+(v.rasterPrimitive<<2u)+flags;
+  if(v.dynamicOwner!=0xffffffffu){
+    packedSurface=0x800000u
+      |((v.dynamicOwner&63u)<<14u)
+      |((v.rasterPrimitive&4095u)<<2u)
+      |flags;
+  }
+  o.world = vec4f(v.world,f32(packedSurface));
   return o;
 }
 struct ShadowOut {
@@ -225,6 +263,8 @@ struct FrameUniforms {
   controls: vec4f,
   sceneBounds: vec4f,
   dynamicInfo: vec4u,
+  previousViewProj: mat4x4<f32>,
+  lodCamera: vec4f,
 };
 struct HashSlot { key: atomic<u32>, index: atomic<u32> };
 // Keep the frame and history epoch as independent 32-bit values. Packing both
@@ -273,6 +313,8 @@ struct Hit {
 @group(0) @binding(19) var sunShadowAuditTex: texture_depth_2d_array;
 @group(0) @binding(20) var sunShadowAuditSampler: sampler_comparison;
 @group(0) @binding(21) var<uniform> sunShadow: SunShadowUniforms;
+@group(0) @binding(22) var<storage,read_write> persistentIrradiance:array<atomic<u32>>;
+@group(0) @binding(23) var dynamicReceiverAuditTex:texture_2d<f32>;
 
 fn gbufferNormal(pixel:vec2i)->vec3f{
   let oct=textureLoad(normalTex,pixel,0).xy;
@@ -300,9 +342,140 @@ const ACCUM_FRAME_STRIDE: u32 = 13107200u;
 const RAY_COUNT_OFFSET: u32 = 16u;
 const RAY_OFFSET_OFFSET: u32 = 22032u;
 const RAY_CURSOR_OFFSET: u32 = 44048u;
-const SUPPORT_SOURCE_OFFSET: u32 = 66064u;
-const BLOCK_COUNT_OFFSET: u32 = 197136u;
+const HAZARD_WINNER_OFFSET: u32 = 66064u;
+const HAZARD_WINNER_LANES: u32 = 64u;
+const HAZARD_SECOND_OFFSET: u32 = 1114640u;
+const BLOCK_COUNT_OFFSET: u32 = 2163216u;
 const TOTAL_PROBE_META: u32 = 22016u;
+const PERSISTENT_BUCKETS:u32=8192u;
+const PERSISTENT_WAYS:u32=4u;
+const PERSISTENT_HASH_SLOTS:u32=32768u;
+const PERSISTENT_META_WORDS:u32=4u;
+const PERSISTENT_DATA_OFFSET:u32=131072u;
+const PERSISTENT_DIRECTION_WORDS:u32=5u;
+const PERSISTENT_MAP_OFFSET:u32=5373952u;
+
+fn clearPersistentDirections(slot:u32){
+  for(var direction=0u;direction<32u;direction++){
+    let base=PERSISTENT_DATA_OFFSET
+      +(slot*32u+direction)*PERSISTENT_DIRECTION_WORDS;
+    atomicStore(&persistentIrradiance[base+4u],0u);
+  }
+}
+
+fn initializePersistentSlot(slot:u32,generation:u32){
+  let address=slot*PERSISTENT_META_WORDS;
+  atomicStore(&persistentIrradiance[address+1u],generation);
+  atomicStore(&persistentIrradiance[address+2u],passParams.sampleEpoch);
+  clearPersistentDirections(slot);
+}
+
+fn persistentCandidateSlot(firstBucket:u32,secondBucket:u32,index:u32)->u32{
+  let bucket=select(firstBucket,secondBucket,index>=PERSISTENT_WAYS);
+  return bucket*PERSISTENT_WAYS+(index&(PERSISTENT_WAYS-1u));
+}
+
+fn resolvePersistentProbeSlot(key:u32)->u32{
+  let bucketMask=PERSISTENT_BUCKETS-1u;
+  let firstBucket=hash32(key)&bucketMask;
+  var secondBucket=hash32(key^0x9e3779b9u)&bucketMask;
+  if(secondBucket==firstBucket){secondBucket=(secondBucket+1u)&bucketMask;}
+  let generation=passParams.sampleFrame+1u;
+  // Two independent four-way buckets give bounded lookup cost. Claim only
+  // after scanning every candidate for an existing match; one canonical c0
+  // probe therefore owns at most one persistent slot.
+  for(var attempt=0u;attempt<4u;attempt++){
+    var emptySlot=EMPTY;
+    var victimSlot=EMPTY;
+    var victimKey=EMPTY;
+    var victimAge=0u;
+    for(var candidate=0u;candidate<PERSISTENT_WAYS*2u;candidate++){
+      let slot=persistentCandidateSlot(firstBucket,secondBucket,candidate);
+      let keyAddress=slot*PERSISTENT_META_WORDS;
+      let storedKey=atomicLoad(&persistentIrradiance[keyAddress]);
+      if(storedKey==key){
+        let storedEpoch=atomicLoad(&persistentIrradiance[keyAddress+2u]);
+        if(storedEpoch!=passParams.sampleEpoch){
+          initializePersistentSlot(slot,generation);
+        }else{
+          atomicStore(&persistentIrradiance[keyAddress+1u],generation);
+        }
+        return slot;
+      }
+      if(storedKey==EMPTY){
+        if(emptySlot==EMPTY){emptySlot=slot;}
+      }else if(lookupProbe(0u,storedKey)==EMPTY){
+        let lastSeen=atomicLoad(&persistentIrradiance[keyAddress+1u]);
+        let age=generation-lastSeen;
+        if(victimSlot==EMPTY||age>victimAge){
+          victimSlot=slot;
+          victimKey=storedKey;
+          victimAge=age;
+        }
+      }
+    }
+    if(emptySlot!=EMPTY){
+      let keyAddress=emptySlot*PERSISTENT_META_WORDS;
+      for(var retry=0u;retry<8u;retry++){
+        let claim=atomicCompareExchangeWeak(
+          &persistentIrradiance[keyAddress],EMPTY,key
+        );
+        if(claim.exchanged){
+          initializePersistentSlot(emptySlot,generation);
+          return emptySlot;
+        }
+        if(claim.old_value==key){
+          let storedEpoch=atomicLoad(&persistentIrradiance[keyAddress+2u]);
+          if(storedEpoch!=passParams.sampleEpoch){
+            initializePersistentSlot(emptySlot,generation);
+          }else{
+            atomicStore(&persistentIrradiance[keyAddress+1u],generation);
+          }
+          return emptySlot;
+        }
+        if(claim.old_value!=EMPTY){break;}
+      }
+      let afterRetry=atomicLoad(&persistentIrradiance[keyAddress]);
+      // Do not choose from stale metadata after another resolver changed the
+      // candidate. A still-empty weak-CAS failure is a safe cache miss.
+      if(afterRetry==EMPTY){
+        atomicAdd(&state[9],1u);
+        return EMPTY;
+      }
+      continue;
+    }
+    if(victimSlot!=EMPTY){
+      let victimAddress=victimSlot*PERSISTENT_META_WORDS;
+      for(var retry=0u;retry<8u;retry++){
+        let claim=atomicCompareExchangeWeak(
+          &persistentIrradiance[victimAddress],victimKey,key
+        );
+        if(claim.exchanged){
+          initializePersistentSlot(victimSlot,generation);
+          return victimSlot;
+        }
+        if(claim.old_value==key){
+          let storedEpoch=atomicLoad(&persistentIrradiance[victimAddress+2u]);
+          if(storedEpoch!=passParams.sampleEpoch){
+            initializePersistentSlot(victimSlot,generation);
+          }else{
+            atomicStore(&persistentIrradiance[victimAddress+1u],generation);
+          }
+          return victimSlot;
+        }
+        if(claim.old_value!=victimKey){break;}
+      }
+    }
+  }
+  // Contention is diagnostic only; the ordinary paper path remains valid.
+  atomicAdd(&state[9],1u);
+  return EMPTY;
+}
+
+fn persistentDirectionBase(slot:u32,direction:u32)->u32{
+  return PERSISTENT_DATA_OFFSET
+    +(slot*32u+direction)*PERSISTENT_DIRECTION_WORDS;
+}
 
 fn hash32(value: u32) -> u32 {
   var x = value;
@@ -339,8 +512,35 @@ fn surfaceClass(normalIn:vec3f)->u32{
   return axis*2u+select(0u,1u,component>=0.0);
 }
 
+// Sheet-class override for the rigid pixel the current invocation serves.
+// A tumbling instance's world normal crosses dominant-axis sheet boundaries
+// continuously, and every crossing swapped the pixel's entire interpolation
+// support to a different sheet's probes — the largest single source of
+// per-frame lighting jumps on moving receivers. Keying rigid pixels by the
+// owner-CANONICAL normal makes the sheet a fixed material property: rotation
+// can no longer change which probes describe a given face, while world cells
+// still provide the spatial identity. 8 means "no override" (static pixel).
+var<private> rigidSheetOverride:u32=8u;
+
+fn pixelSurfaceClass(normalIn:vec3f)->u32{
+  return select(
+    surfaceClass(normalIn),rigidSheetOverride,rigidSheetOverride!=8u
+  );
+}
+
+fn setRigidSheetOverride(world:vec4f,normal:vec3f){
+  rigidSheetOverride=8u;
+  let owner=packedDynamicOwner(world.w);
+  if(owner==EMPTY){return;}
+  let instance=triangles[frame.dynamicInfo.y+owner];
+  let canonicalNormal=normalize(
+    quaternionRotate(normal,vec4f(-instance.b.xyz,instance.b.w))*instance.c.xyz
+  );
+  rigidSheetOverride=surfaceClass(canonicalNormal);
+}
+
 fn lodDistance(position: vec3f) -> f32 {
-  let delta = abs(position - frame.cameraPos.xyz);
+  let delta = abs(position - frame.lodCamera.xyz);
   return max(delta.x, max(delta.y, delta.z));
 }
 
@@ -349,14 +549,17 @@ fn levelOfDetail(position: vec3f) -> u32 {
   return u32(clamp(floor(log2(ratio)), 0.0, 3.0));
 }
 
-// The paper starts each coarser LOD at 90% of the nominal boundary, then
-// linearly blends across the overlap. x=fine LOD, y=coarse LOD, z=blend.
+// Keep neighboring sparse LODs resident across a deliberately wider universal
+// overlap, then blend linearly. x=fine LOD, y=coarse LOD, z=blend.
 fn lodSelection(position: vec3f) -> vec3f {
   let fine = levelOfDetail(position);
   if (fine >= 3u) { return vec3f(f32(fine), f32(fine), 0.0); }
   let baseRange = max(0.001, frame.envBaseSpacing.w * 18.0);
   let boundary = baseRange * exp2(f32(fine + 1u));
-  let overlapStart = boundary * 0.9;
+  // A 25% residency overlap survives ordinary wheel impulses while preserving
+  // the same two-LOD bounded workload. The former 10% band could be skipped
+  // in one event, leaving both selected sparse fields cold.
+  let overlapStart = boundary * 0.75;
   let blend = clamp((lodDistance(position) - overlapStart) / max(0.001, boundary - overlapStart), 0.0, 1.0);
   let coarse = select(fine, fine + 1u, blend > 0.0);
   return vec3f(f32(fine), f32(coarse), blend);
@@ -416,10 +619,19 @@ fn insertProbeRaw(cascade:u32,key:u32){
   let base = currentFrame() * HASH_FRAME_STRIDE + HASH_OFFSETS[cascade];
   let mask = HASH_SIZES[cascade] - 1u;
   let start = hash32(key) & mask;
-  for (var step=0u; step<32u; step++) {
+  var step=0u;
+  var attempts=0u;
+  // WebGPU exposes only the weak compare/exchange operation. A spurious CAS
+  // failure while the slot is still EMPTY must retry that exact slot: moving
+  // on would leave a hole in the linear-probe cluster, and lookupProbeFrame
+  // deliberately terminates at its first EMPTY slot. Such a hole made probe
+  // coverage depend on GPU scheduling and produced rare temporal sparkles.
+  while(step<32u&&attempts<128u){
     let slot = base + ((start + step) & mask);
     let result = atomicCompareExchangeWeak(&slots[slot].key, EMPTY, key);
     if (result.exchanged || result.old_value == key) { return; }
+    attempts+=1u;
+    if(result.old_value!=EMPTY){step+=1u;}
   }
   atomicAdd(&state[6], 1u);
 }
@@ -792,25 +1004,40 @@ fn segmentIntersectsExpandedBox(
   return farDistance>=max(0.0,startDistance)&&nearDistance<=endDistance;
 }
 
-fn dynamicConeHistoryValid(
-  origin:vec3f,directionIn:vec3f,cascade:u32,lod:u32
+fn dynamicConeRootClear(
+  root:u32,origin:vec3f,directionIndexIn:u32,cascade:u32,lod:u32
 )->bool{
-  let sweptRoot=frame.dynamicInfo.w;
-  if(sweptRoot==0xffffffffu){return true;}
-  let direction=normalize(directionIn);
+  if(root==0xffffffffu){return true;}
+  let direction=directionFromIndex(directionIndexIn,cascade);
   let inverseDirection=select(vec3f(-1e20),vec3f(1e20),direction>=vec3f(0))
     /max(vec3f(1),abs(direction)*1e20);
   let baseLength=frame.envBaseSpacing.w*exp2(f32(lod&3u))*1.6;
   let intervalScale=exp2(f32(cascade)*2.0);
   let endDistance=baseLength*intervalScale;
   let startDistance=select(0.0,baseLength*intervalScale*0.25,cascade>0u);
-  // The directional bin is a cone, not a line. Expanding swept nodes by the
-  // probe/cascade footprint conservatively rejects every cone a mover could
-  // have entered while leaving unrelated, already-converged Sponza history.
-  let footprint=cascadeSpacing(cascade,lod)*0.72;
+  // Test the complete spatio-angular support, not only the bin's center ray.
+  // Algorithm 3 can contribute from any point in the probe cell and any
+  // equal-area direction inside this bin. The half-cell diagonal covers the
+  // former; the far-end angular radius derived from all four bin corners
+  // covers the latter. This is a conservative, scene-independent swept-cone
+  // predicate and prevents a thin mover or emitter from surviving in the
+  // untested corner of a high-cascade directional bin.
+  let theta=4u<<cascade;
+  let width=theta*2u;
+  let coordinate=mortonDirectionCoordinates(directionIndexIn,cascade);
+  var minimumCosine=1.0;
+  for(var corner=0u;corner<4u;corner++){
+    let cornerUv=vec2f(
+      (f32(coordinate.x)+f32(corner&1u))/f32(width),
+      (f32(coordinate.y)+f32((corner>>1u)&1u))/f32(theta)
+    );
+    minimumCosine=min(minimumCosine,dot(direction,decodeEqualArea(cornerUv)));
+  }
+  let angularRadius=endDistance*sqrt(max(0.0,1.0-minimumCosine*minimumCosine));
+  let footprint=cascadeSpacing(cascade,lod)*0.8660254+angularRadius;
   var stack:array<u32,32>;
   var stackSize=1u;
-  stack[0]=sweptRoot;
+  stack[0]=root;
   loop{
     if(stackSize==0u){break;}
     stackSize-=1u;
@@ -827,6 +1054,100 @@ fn dynamicConeHistoryValid(
     stack[stackSize]=left;
     stack[stackSize+1u]=right;
     stackSize+=2u;
+  }
+  return true;
+}
+
+fn dynamicConeHistoryValid(
+  origin:vec3f,directionIndexIn:u32,cascade:u32,lod:u32
+)->bool{
+  return dynamicConeRootClear(
+    frame.dynamicInfo.w,origin,directionIndexIn,cascade,lod
+  );
+}
+
+fn directionBinSine(directionIndexIn:u32,cascade:u32)->f32{
+  let direction=directionFromIndex(directionIndexIn,cascade);
+  let theta=4u<<cascade;
+  let width=theta*2u;
+  let coordinate=mortonDirectionCoordinates(directionIndexIn,cascade);
+  var minimumCosine=1.0;
+  for(var corner=0u;corner<4u;corner++){
+    let cornerUv=vec2f(
+      (f32(coordinate.x)+f32(corner&1u))/f32(width),
+      (f32(coordinate.y)+f32((corner>>1u)&1u))/f32(theta)
+    );
+    minimumCosine=min(minimumCosine,dot(direction,decodeEqualArea(cornerUv)));
+  }
+  return sqrt(max(0.0,1.0-minimumCosine*minimumCosine));
+}
+
+fn dynamicShadowCorridorClear(
+  origin:vec3f,direction:vec3f,distanceLimit:f32,radius:f32
+)->bool{
+  let root=frame.dynamicInfo.w;
+  if(root==0xffffffffu){return true;}
+  let inverseDirection=select(vec3f(-1e20),vec3f(1e20),direction>=vec3f(0))
+    /max(vec3f(1),abs(direction)*1e20);
+  var stack:array<u32,32>;
+  var stackSize=1u;
+  stack[0]=root;
+  loop{
+    if(stackSize==0u){break;}
+    stackSize-=1u;
+    let node=bvhNodes[stack[stackSize]];
+    if(!segmentIntersectsExpandedBox(
+      origin,inverseDirection,node.minMeta.xyz,node.maxMeta.xyz,
+      0.0,distanceLimit,radius
+    )){continue;}
+    let left=bitcast<u32>(node.minMeta.w);
+    let right=bitcast<u32>(node.maxMeta.w);
+    if((left&0x80000000u)!=0u){return false;}
+    if(stackSize>29u){return false;}
+    stack[stackSize]=left;
+    stack[stackSize+1u]=right;
+    stackSize+=2u;
+  }
+  return true;
+}
+
+// A stored interval's J embeds direct light at its hit point, and that hit
+// lies inside the cascade's own [start,end] span. A mover crossing the
+// LIGHT path to the endpoint changes J without ever intersecting the receiver
+// cone, so the swept-cone predicate alone freezes stale mover shadows into
+// converged history. Test conservative light corridors from four interval
+// sample points toward each analytic source; sample radius covers the
+// half-spacing between samples plus the bin's angular spread, so the swept
+// union of the four capsules contains the full corridor volume.
+fn dynamicEndpointShadingValid(
+  origin:vec3f,directionIndexIn:u32,cascade:u32,lod:u32
+)->bool{
+  if(frame.dynamicInfo.w==0xffffffffu){return true;}
+  let direction=directionFromIndex(directionIndexIn,cascade);
+  let baseLength=frame.envBaseSpacing.w*exp2(f32(lod&3u))*1.6;
+  let end=baseLength*exp2(f32(cascade)*2.0);
+  let start=select(0.0,end*0.25,cascade>0u);
+  let span=end-start;
+  let binSine=directionBinSine(directionIndexIn,cascade);
+  let towardSun=normalize(-frame.sunDirTime.xyz);
+  let sunActive=frame.sunColorIntensity.w>0.0;
+  let pointActive=frame.pointColorIntensity.w>0.0;
+  if(!sunActive&&!pointActive){return true;}
+  for(var sampleIndex=0u;sampleIndex<4u;sampleIndex++){
+    let hitDistance=start+(f32(sampleIndex)+0.5)*0.25*span;
+    let hitPoint=origin+direction*hitDistance;
+    let sampleRadius=cascadeSpacing(cascade,lod)*0.8660254
+      +hitDistance*binSine+span*0.125;
+    if(sunActive&&!dynamicShadowCorridorClear(
+      hitPoint,towardSun,frame.sceneBounds.w,sampleRadius
+    )){return false;}
+    if(pointActive){
+      let toPoint=frame.pointPosRange.xyz-hitPoint;
+      let pointDistance=length(toPoint);
+      if(pointDistance>1e-4&&!dynamicShadowCorridorClear(
+        hitPoint,toPoint/pointDistance,pointDistance,sampleRadius
+      )){return false;}
+    }
   }
   return true;
 }
@@ -869,6 +1190,28 @@ fn octTexel(normalIn:vec3f)->u32{
   return xy.x+xy.y*8u;
 }
 
+fn loadAtlasIrradianceBilinear(
+  probe:u32,frameIndex:u32,localIn:vec2f
+)->vec4f{
+  // Compact probe indices are intentionally unordered GPU storage addresses.
+  // Interpolate entirely in the 8x8 tile's local coordinates before adding
+  // the integer atlas origin, so assigning the same logical key to a different
+  // compact index cannot change fractional precision or sample a neighbor tile.
+  let local=clamp(localIn,vec2f(0),vec2f(7));
+  let low=vec2i(floor(local));
+  let high=min(low+vec2i(1),vec2i(7));
+  let fraction=local-vec2f(low);
+  let tile=vec2i(
+    i32(probe%64u)*8,
+    i32(probe/64u)*8+i32(frameIndex)*2048
+  );
+  let v00=textureLoad(irradianceAtlasSampled,tile+vec2i(low.x,low.y),0);
+  let v10=textureLoad(irradianceAtlasSampled,tile+vec2i(high.x,low.y),0);
+  let v01=textureLoad(irradianceAtlasSampled,tile+vec2i(low.x,high.y),0);
+  let v11=textureLoad(irradianceAtlasSampled,tile+high,0);
+  return mix(mix(v00,v10,fraction.x),mix(v01,v11,fraction.x),fraction.y);
+}
+
 fn sampleAtlasIrradiance(probe:u32,normalIn:vec3f,frameIndex:u32)->vec4f{
   var octNormal=normalize(normalIn);
   octNormal/=max(1e-6,abs(octNormal.x)+abs(octNormal.y)+abs(octNormal.z));
@@ -880,18 +1223,23 @@ fn sampleAtlasIrradiance(probe:u32,normalIn:vec3f,frameIndex:u32)->vec4f{
     );
   }
   let octCoordinate=clamp((oct*0.5+0.5)*6.0+vec2f(0.5),vec2f(0),vec2f(7));
-  let tile=vec2f(f32(probe%64u)*8.0,f32(probe/64u)*8.0+f32(frameIndex)*2048.0);
-  let atlasUv=(tile+octCoordinate+vec2f(0.5))/vec2f(512.0,8192.0);
-  return textureSampleLevel(
-    irradianceAtlasSampled,irradianceAtlasSampler,atlasUv,0.0
-  );
+  return loadAtlasIrradianceBilinear(probe,frameIndex,octCoordinate);
 }
 
 fn samplePrimaryIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
   let spacing=cascadeSpacing(0u,lod);
   let grid=position/spacing-vec3f(0.5);
   let cell=vec3i(floor(grid));
-  let fraction=fract(grid);
+  let linearFraction=fract(grid);
+  // C1 surface reconstruction. Linear weights are only C0: a rigid surface
+  // moving through the probe grid crosses a cell boundary somewhere on its
+  // body almost every frame, and each crossing converts the field's spatial
+  // curvature into a second-difference spike of the reconstructed lighting
+  // (measured as ~14% of Lagrangian samples spiking per frame at Sponza mover
+  // speeds). Hermite weights have zero derivative at cell boundaries, so the
+  // same sparse field is C1 along any smooth motion path — for the camera,
+  // for rigid receivers, and for static geometry alike.
+  let fraction=linearFraction*linearFraction*(vec3f(3.0)-2.0*linearFraction);
   let fixedBits=vec3i(floor(position/spacing))-cell;
   let absoluteNormal=abs(normal);
   let allowHistoricalSupport=dynamicPointHistoryValid(position,spacing*1.75);
@@ -922,7 +1270,7 @@ fn samplePrimaryIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
       select(1.0-fraction.z,fraction.z,bits.z==1)
     );
     let spatialWeight=wv.x*wv.y*wv.z;
-    let key=keyFromCellSurface(cell+bits,lod,surfaceClass(normal));
+    let key=keyFromCellSurface(cell+bits,lod,pixelSurfaceClass(normal));
     let probe=lookupProbe(0u,key);
     var irradiance=vec4f(0);
     if(probe!=EMPTY&&probe<PROBE_CAPS[0]){
@@ -964,12 +1312,56 @@ fn samplePrimaryIrradiance(position:vec3f,normal:vec3f)->vec4f{
   // this gather along the normal hides some dark interpolation cases, but it
   // also moves the query into a different trilinear cell and creates a broad
   // bright-leak bias at walls.
-  let fine=samplePrimaryIrradianceLod(position,normal,u32(lods.x));
-  if(u32(lods.y)==u32(lods.x)){return fine;}
-  let coarse=samplePrimaryIrradianceLod(position,normal,u32(lods.y));
-  if(fine.w<0.001){return coarse;}
-  if(coarse.w<0.001){return fine;}
-  return vec4f(mix(fine.xyz,coarse.xyz,lods.z),mix(fine.w,coarse.w,lods.z));
+  let fineLod=u32(lods.x);
+  let coarseLod=u32(lods.y);
+  let fine=samplePrimaryIrradianceLod(position,normal,fineLod);
+  var coarse=vec4f(0);
+  if(coarseLod!=fineLod){
+    coarse=samplePrimaryIrradianceLod(position,normal,coarseLod);
+  }
+  // Keep the path-reference/current-state oracle identical to production
+  // final shading. A selected LOD can be temporarily cold even though an
+  // exact world/sheet field remains resident at another bounded LOD; treating
+  // that as black made the oracle report broad false under-lighting and was
+  // the same abrupt viewport/zoom failure seen at the doorway.
+  var resident=vec4f(0);
+  var residentDistance=5u;
+  for(var candidateLod=0u;candidateLod<4u;candidateLod++){
+    if(candidateLod==fineLod||candidateLod==coarseLod){continue;}
+    let candidate=samplePrimaryIrradianceLod(
+      position,normal,candidateLod
+    );
+    let distance=u32(abs(i32(candidateLod)-i32(fineLod)));
+    if(candidate.w>resident.w+0.001
+      ||(abs(candidate.w-resident.w)<=0.001&&distance<residentDistance)){
+      resident=candidate;
+      residentDistance=distance;
+    }
+  }
+  if(coarseLod==fineLod){
+    if(fine.w<0.001){return resident;}
+    if(resident.w<0.001||fine.w>=0.35){return fine;}
+    let readiness=smoothstep(0.02,0.35,fine.w);
+    return vec4f(
+      mix(resident.xyz,fine.xyz,readiness),
+      mix(resident.w,fine.w,readiness)
+    );
+  }
+  if(fine.w<0.001){
+    if(coarse.w>=0.001){return coarse;}
+    return resident;
+  }
+  if(coarse.w<0.001){
+    if(resident.w<0.001||fine.w>=0.35){return fine;}
+    let readiness=smoothstep(0.02,0.35,fine.w);
+    return vec4f(
+      mix(resident.xyz,fine.xyz,readiness),
+      mix(resident.w,fine.w,readiness)
+    );
+  }
+  return vec4f(
+    mix(fine.xyz,coarse.xyz,lods.z),mix(fine.w,coarse.w,lods.z)
+  );
 }
 
 fn samplePrimaryConeDirectionLod(
@@ -1006,7 +1398,7 @@ fn samplePrimaryConeDirectionLod(
     );
     let weight=wv.x*wv.y*wv.z;
     let probe=lookupProbe(0u,keyFromCellSurface(
-      cell+bits,lod,surfaceClass(normal)
+      cell+bits,lod,pixelSurfaceClass(normal)
     ));
     if(probe!=EMPTY&&probe<PROBE_CAPS[0]){
       let cone=cones[dataIndex(0u,probe,direction)];
@@ -1362,7 +1754,7 @@ fn insertTangentSupport(position:vec3f,normal:vec3f,lod:u32){
       bits.x=i32(corner&1u);
       bits.y=i32((corner>>1u)&1u);
     }
-    insertProbeRaw(0u,keyFromCellSurface(cell+bits,lod,surfaceClass(normal)));
+    insertProbeRaw(0u,keyFromCellSurface(cell+bits,lod,pixelSurfaceClass(normal)));
   }
 }
 
@@ -1377,6 +1769,7 @@ fn insertTangentSupport(position:vec3f,normal:vec3f,lod:u32){
   let world=textureLoad(worldTex,vec2i(gid.xy),0);
   if(world.w<0.5){return;}
   let normal=gbufferNormal(vec2i(gid.xy));
+  setRigidSheetOverride(world,normal);
   let lods=lodSelection(world.xyz);
   let fine=u32(lods.x);
   insertTangentSupport(world.xyz,normal,fine);
@@ -1410,6 +1803,14 @@ fn rayBlockStateIndex(probe:u32,block:u32)->u32{
   return BLOCK_COUNT_OFFSET+probe*rayBlockCount()+block;
 }
 
+fn hazardWinnerIndex(probe:u32,lane:u32)->u32{
+  return HAZARD_WINNER_OFFSET+probe*HAZARD_WINNER_LANES+lane;
+}
+
+fn hazardSecondIndex(probe:u32,lane:u32)->u32{
+  return HAZARD_SECOND_OFFSET+probe*HAZARD_WINNER_LANES+lane;
+}
+
 @compute @workgroup_size(64) fn initHigher(@builtin(global_invocation_id) gid: vec3u) {
   let cascade=passParams.cascade;
   if(cascade==0u||cascade>3u){return;}
@@ -1437,7 +1838,7 @@ fn surfaceClassFromKey(key:u32)->u32{
 }
 
 fn probeMetaBits(info:vec4f)->u32{
-  return bitcast<u32>(info.w);
+  return u32(info.w+0.5);
 }
 
 fn probeLod(info:vec4f)->u32{
@@ -1470,7 +1871,7 @@ fn probeSurfaceClass(info:vec4f)->u32{
   let lod=lodFromKey(key);
   probeMeta[PROBE_OFFSETS[cascade]+compactIndex]=vec4f(
     probePositionFromCell(cellFromKey(key),cascade,lod),
-    bitcast<f32>(lod|(surfaceClassFromKey(key)<<2u))
+    f32(lod|(surfaceClassFromKey(key)<<2u))
   );
 }
 
@@ -1482,7 +1883,8 @@ fn probeSurfaceClass(info:vec4f)->u32{
   let world=textureLoad(worldTex,vec2i(pixel),0);
   if(world.w<0.5){return;}
   let normal=gbufferNormal(vec2i(pixel));
-  let sheet=surfaceClass(normal);
+  setRigidSheetOverride(world,normal);
+  let sheet=pixelSurfaceClass(normal);
   let lods=lodSelection(world.xyz);
   let fine=u32(lods.x);
   let fineProbe=lookupProbe(0u,keyFromCellSurface(probeCell(world.xyz,0u,fine),fine,sheet));
@@ -1520,6 +1922,28 @@ fn probeKeyFromInfo(info:vec4f,cascade:u32)->u32{
   return keyFromCellSurface(
     probeCell(info.xyz,cascade,lod),lod,probeSurfaceClass(info)
   );
+}
+
+@compute @workgroup_size(64) fn resolvePersistentC0(
+  @builtin(global_invocation_id) gid:vec3u
+){
+  let probe=gid.x;
+  if(probe>=PROBE_CAPS[0]){return;}
+  let mapAddress=PERSISTENT_MAP_OFFSET+probe;
+  atomicStore(&persistentIrradiance[mapAddress],EMPTY);
+  let activeCount=min(atomicLoad(&state[0]),PROBE_CAPS[0]);
+  if(probe>=activeCount){return;}
+  // The persistent cold-revisit cache stays a static-scene extension. A
+  // quiescent dynamic scene already accumulates exactly like a static one
+  // (its swept hierarchy is empty), and enabling the contention-arbitrated
+  // cache there made the emitter-step oracle non-repeatable and froze
+  // under-converged cones into the daylight-door field.
+  let persistentEnabled=featureEnabled(8u)&&!featureEnabled(128u)
+    &&!featureEnabled(512u)&&!featureEnabled(16384u);
+  if(!persistentEnabled){return;}
+  let key=probeKeyFromInfo(probeMeta[PROBE_OFFSETS[0]+probe],0u);
+  let slot=resolvePersistentProbeSlot(key);
+  atomicStore(&persistentIrradiance[mapAddress],slot);
 }
 
 fn parentKeyFromInfo(info:vec4f,cascade:u32)->u32{
@@ -1572,25 +1996,61 @@ fn parentKeyFromInfo(info:vec4f,cascade:u32)->u32{
   atomicStore(&state[probeStateIndex(RAY_OFFSET_OFFSET,cascade,gid.x)],prefix);
 }
 
-fn deposit(cascade:u32,probe:u32,direction:u32,radiance:vec3f,beta:f32){
+fn depositWeighted(
+  cascade:u32,probe:u32,direction:u32,radiance:vec3f,beta:f32,weight:u32
+){
   let base=accumIndex(cascade,probe,direction);
   let safe=min(max(radiance,vec3f(0)),vec3f(16));
-  atomicAdd(&accum[base],u32(safe.r*FIXED_SCALE+0.5));
-  atomicAdd(&accum[base+1u],u32(safe.g*FIXED_SCALE+0.5));
-  atomicAdd(&accum[base+2u],u32(safe.b*FIXED_SCALE+0.5));
-  atomicAdd(&accum[base+3u],u32(clamp(beta,0.0,1.0)*FIXED_SCALE+0.5));
-  atomicAdd(&accum[base+4u],1u);
+  let scale=FIXED_SCALE*f32(weight);
+  atomicAdd(&accum[base],u32(safe.r*scale+0.5));
+  atomicAdd(&accum[base+1u],u32(safe.g*scale+0.5));
+  atomicAdd(&accum[base+2u],u32(safe.b*scale+0.5));
+  atomicAdd(&accum[base+3u],u32(clamp(beta,0.0,1.0)*scale+0.5));
+  atomicAdd(&accum[base+4u],weight);
 }
 
-fn mapRaySample(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
+fn deposit(cascade:u32,probe:u32,direction:u32,radiance:vec3f,beta:f32){
+  depositWeighted(cascade,probe,direction,radiance,beta,1u);
+}
+
+fn staticSurfaceCode(world:vec4f,normal:vec3f)->u32{
+  // A hazard representative's priority code is a material identity. For a
+  // rigid instance it must be quantized in OWNER-LOCAL space: a world-space
+  // micro-cell changes for every surface point on every moved frame, which
+  // reshuffles the winning anchor-ray origins and turns smooth rigid motion
+  // into estimator noise. Immutable surfaces keep the world quantization.
+  var canonicalPosition=world.xyz;
+  var canonicalNormal=normal;
+  let owner=packedDynamicOwner(world.w);
+  if(owner!=EMPTY){
+    let instance=triangles[frame.dynamicInfo.y+owner];
+    canonicalPosition=inverseInstanceVector(world.xyz-instance.a.xyz,instance);
+    canonicalNormal=normalize(
+      quaternionRotate(normal,vec4f(-instance.b.xyz,instance.b.w))*instance.c.xyz
+    );
+  }
+  let micro=max(0.001,frame.envBaseSpacing.w/128.0);
+  let cell=vec3i(floor(canonicalPosition/micro));
+  var code=hash32(bitcast<u32>(cell.x)*0x9e3779b9u);
+  code=hash32(code^(bitcast<u32>(cell.y)*0x85ebca6bu));
+  code=hash32(code^(bitcast<u32>(cell.z)*0xc2b2ae35u));
+  code=hash32(code^((u32(world.w+0.5)>>2u)*0x165667b1u));
+  code=hash32(code^(surfaceClass(canonicalNormal)*0x27d4eb2du));
+  return code&0x00ffffffu;
+}
+
+fn mapRaySample(world:vec4f,normal:vec3f,lod:u32,stableSlot:u32){
   let probe=lookupProbe(0u,keyFromCellSurface(
-    probeCell(world,0u,lod),lod,surfaceClass(normal)
+    probeCell(world.xyz,0u,lod),lod,pixelSurfaceClass(normal)
   ));
   if(probe==EMPTY){return;}
   probeMeta[raySampleProbeBase()+stableSlot]=vec4f(
-    bitcast<f32>(probe),
-    bitcast<f32>(passParams.sampleEpoch),
-    0,
+    f32(probe),
+    // A small integer bit-cast to f32 is a subnormal. WebGPU backends may
+    // flush subnormals, which makes the stable-slot validity tag unreliable.
+    // Numeric f32 represents every 24-bit integer exactly.
+    f32(passParams.sampleEpoch&0x00ffffffu),
+    f32(staticSurfaceCode(world,normal)),
     1
   );
   atomicAdd(&state[rayBlockStateIndex(probe,stableSlot/rayBlockSize())],1u);
@@ -1604,11 +2064,12 @@ fn mapRaySample(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
   let world=textureLoad(worldTex,vec2i(pixel),0);
   if(world.w<0.5){return;}
   let normal=gbufferNormal(vec2i(pixel));
+  setRigidSheetOverride(world,normal);
   let lods=lodSelection(world.xyz);
   let sample=sampleIndex(gid);
-  mapRaySample(world.xyz,normal,u32(lods.x),sample);
+  mapRaySample(world,normal,u32(lods.x),sample);
   if(u32(lods.y)!=u32(lods.x)){
-    mapRaySample(world.xyz,normal,u32(lods.y),samplesPerFrame()+sample);
+    mapRaySample(world,normal,u32(lods.y),samplesPerFrame()+sample);
   }
 }
 
@@ -1636,7 +2097,11 @@ fn mapRaySample(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
 
 fn mappedProbe(stableSlot:u32)->u32{
   let entry=probeMeta[raySampleProbeBase()+stableSlot];
-  return select(EMPTY,bitcast<u32>(entry.x),bitcast<u32>(entry.y)==passParams.sampleEpoch);
+  let epoch=u32(entry.y+0.5);
+  return select(
+    EMPTY,u32(entry.x+0.5),
+    epoch==(passParams.sampleEpoch&0x00ffffffu)
+  );
 }
 
 fn deterministicLocalRank(stableSlot:u32,probe:u32)->u32{
@@ -1649,9 +2114,187 @@ fn deterministicLocalRank(stableSlot:u32,probe:u32)->u32{
   return rank;
 }
 
-fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
-  let sheet=surfaceClass(normal);
-  let key0=keyFromCellSurface(probeCell(world,0u,lod),lod,sheet);
+fn packedDynamicOwner(marker:f32)->u32{
+  let code=u32(marker+0.5);
+  if((code&0x800000u)==0u){return EMPTY;}
+  return (code>>14u)&63u;
+}
+fn packedSurfaceIdentity(marker:f32)->u32{
+  return u32(marker+0.5)>>2u;
+}
+fn packedClosedSurface(marker:f32)->bool{
+  return (u32(marker+0.5)&1u)!=0u;
+}
+
+
+
+fn stableStaticProbeDirection(
+  probe:u32,sampleLane:u32,representative:u32,normal:vec3f
+)->vec3f{
+  // Anchor directions are a fixed per-PROBE-KEY R2 sequence. Per-key seeds
+  // decorrelate the fixed quadrature's directional bias between cells, which
+  // matters for energy: a single universal direction set missed the same
+  // narrow transport band everywhere at once and measurably starved
+  // aperture-dominated rooms (the daylight door underlit by a third), while
+  // spatially varied seeds let the four-probe gather average the band back.
+  // The sheet class is excluded from the seed so a rigid rotation crossing
+  // sheet boundaries cannot switch the quadrature.
+  let info=probeMeta[PROBE_OFFSETS[0]+probe];
+  let key=probeKeyFromInfo(info,0u)&0x1fffffffu;
+  let seed=hash32(key^0x6a09e667u);
+  let seed2=hash32(seed^0xbb67ae85u);
+  let base=vec2f(f32(seed&65535u),f32(seed2&65535u))/65536.0;
+  let g=1.324717957244746;
+  let sequence=sampleLane+representative*HAZARD_WINNER_LANES;
+  let uv=fract(
+    base+(f32(sequence)+0.5)*vec2f(1.0/g,1.0/(g*g))
+  );
+  var direction=decodeEqualArea(uv);
+  if(dot(direction,normal)<0.0){direction=-direction;}
+  return direction;
+}
+
+fn staticDirectionNeedsCurrentSample(
+  world:vec4f,direction:vec3f,lod:u32
+)->bool{
+  for(var cascade=0u;cascade<4u;cascade++){
+    let origin=probePositionFromCell(
+      probeCell(world.xyz,cascade,lod),cascade,lod
+    );
+    let directionIndexIn=directionIndex(direction,cascade);
+    // A dynamic-scene cone uses the same fixed current-state estimator in a
+    // stationary pose and in a swept frame. Otherwise the first frame after a
+    // move is compared against a differently sampled warm field, producing a
+    // visible estimator switch even when invalidation is geometrically exact.
+    // Current-TLAS anchoring is localized to cones whose complete support can
+    // see a rigid instance; immutable scenes retain the paper estimator.
+    if(!dynamicConeRootClear(
+      frame.dynamicInfo.x,origin,directionIndexIn,cascade,lod
+    )){return true;}
+    if(!dynamicConeHistoryValid(
+      origin,directionIndexIn,cascade,lod
+    )){return true;}
+  }
+  return false;
+}
+
+
+fn publishHazardCandidate(
+  probe:u32,lane:u32,candidate:u32,second:bool
+){
+  if(second){
+    let first=atomicLoad(&state[hazardWinnerIndex(probe,lane)]);
+    if(candidate!=first){
+      atomicMax(&state[hazardSecondIndex(probe,lane)],candidate);
+    }
+  }else{
+    atomicMax(&state[hazardWinnerIndex(probe,lane)],candidate);
+  }
+}
+
+fn hazardCandidate(probe:u32,lane:u32,stableSlot:u32)->u32{
+  let code=u32(probeMeta[raySampleProbeBase()+stableSlot].z+0.5)
+    &0x00ffffffu;
+  let key=probeKeyFromInfo(probeMeta[PROBE_OFFSETS[0]+probe],0u);
+  let rotation=(lane*0x009e3779u+(hash32(key)&0x00ffffffu))
+    &0x00ffffffu;
+  // State is cleared to zero. Keep zero as the unselected sentinel while the
+  // 24-bit cyclic priority itself remains exactly representable and stable.
+  return ((code+rotation)&0x00ffffffu)+1u;
+}
+
+struct StaticAnchorSelection{
+  needed:u32,
+  direction:vec3f,
+};
+
+fn staticAnchorForLod(
+  world:vec4f,normal:vec3f,lod:u32,lane:u32,stableSlot:u32
+)->StaticAnchorSelection{
+  let probe=lookupProbe(0u,keyFromCellSurface(
+    probeCell(world.xyz,0u,lod),lod,pixelSurfaceClass(normal)
+  ));
+  if(probe==EMPTY){
+    return StaticAnchorSelection(0u,vec3f(0,0,1));
+  }
+  let winner=atomicLoad(&state[hazardWinnerIndex(probe,lane)]);
+  let second=atomicLoad(&state[hazardSecondIndex(probe,lane)]);
+  let candidate=hazardCandidate(probe,lane,stableSlot);
+  if(winner!=candidate&&second!=candidate){
+    return StaticAnchorSelection(0u,vec3f(0,0,1));
+  }
+  let representative=select(1u,0u,winner==candidate);
+  let direction=stableStaticProbeDirection(
+    probe,lane,representative,normal
+  );
+  return StaticAnchorSelection(
+    select(0u,1u,staticDirectionNeedsCurrentSample(world,direction,lod)),
+    direction
+  );
+}
+
+fn selectStaticHazardRepresentative(gid:vec3u,second:bool){
+  let giSize=vec2u(u32(frame.resolution.z),u32(frame.resolution.w));
+  let baseSamples=max(1u,passParams.value);
+  if(any(gid.xy>=giSize)||gid.z>=baseSamples*64u){return;}
+  let fullSize=vec2u(u32(frame.resolution.x),u32(frame.resolution.y));
+  let pixel=min(fullSize-vec2u(1),gid.xy*fullSize/giSize);
+  let world=textureLoad(worldTex,vec2i(pixel),0);
+  if(world.w<0.5){return;}
+  let normal=gbufferNormal(vec2i(pixel));
+  setRigidSheetOverride(world,normal);
+  let lods=lodSelection(world.xyz);
+  let lane=gid.z/baseSamples;
+  let baseGid=vec3u(gid.xy,gid.z%baseSamples);
+  let sample=sampleIndex(baseGid);
+  let sheet=pixelSurfaceClass(normal);
+  let fine=u32(lods.x);
+  let fineProbe=lookupProbe(0u,keyFromCellSurface(
+    probeCell(world.xyz,0u,fine),fine,sheet
+  ));
+  if(fineProbe!=EMPTY){
+    publishHazardCandidate(
+      fineProbe,lane,hazardCandidate(fineProbe,lane,sample),second
+    );
+  }
+  let coarse=u32(lods.y);
+  if(coarse!=fine){
+    let coarseProbe=lookupProbe(0u,keyFromCellSurface(
+      probeCell(world.xyz,0u,coarse),coarse,sheet
+    ));
+    if(coarseProbe!=EMPTY){
+      publishHazardCandidate(
+        coarseProbe,lane,hazardCandidate(
+          coarseProbe,lane,samplesPerFrame()+sample
+        ),second
+      );
+    }
+  }
+}
+
+
+@compute @workgroup_size(8,8) fn selectStaticHazardRepresentatives(
+  @builtin(global_invocation_id) gid:vec3u
+){
+  selectStaticHazardRepresentative(gid,false);
+}
+
+@compute @workgroup_size(8,8) fn selectSecondStaticHazardRepresentatives(
+  @builtin(global_invocation_id) gid:vec3u
+){
+  selectStaticHazardRepresentative(gid,true);
+}
+
+// Rigid receivers use the unified world-field path; the owner-local
+// material-node estimator (32768-slot barycentric lattice, 1024 rays per
+// node per frame) was removed once motion-aware cache invalidation made
+// the shared sparse field temporally stable on moving surfaces.
+fn traceAndSplit(
+  world:vec4f,normal:vec3f,lod:u32,stableSlot:u32,sampleLane:u32,
+  currentStateAnchor:bool,anchorDirection:vec3f
+){
+  let sheet=pixelSurfaceClass(normal);
+  let key0=keyFromCellSurface(probeCell(world.xyz,0u,lod),lod,sheet);
   let baseProbe=lookupProbe(0u,key0);
   if(baseProbe==EMPTY){return;}
   let localRank=deterministicLocalRank(stableSlot,baseProbe);
@@ -1667,23 +2310,32 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
   // every probe that remains visible keeps receiving new samples instead of becoming
   // dependent on the camera/history state at an arbitrary freeze frame.
   let sampleFrame=passParams.sampleFrame;
-  // An odd 32-bit Weyl multiplier is a permutation of all u32 values. Its low
-  // and high halves approximate the paper's two irrational temporal rotations
-  // (0.75488, 0.56984), while the complete 2D pair cannot repeat before the
-  // full 2^32-frame cycle and never loses precision through a large f32 cast.
-  let scrambledFrame=sampleFrame*0x91e1c141u;
+  // Two independent fixed-point Weyl sequences implement the paper's global
+  // temporal R2 rotation. Shifting before f32 conversion preserves all 24
+  // representable mantissa bits, avoids correlated low/high halves, and keeps
+  // deterministic reset/replay across the complete u32 frame cycle.
+  // Swap the two R2 fixed-point components relative to the spatial recurrence.
+  // The same order mostly permutes an existing prefix; this decorrelated global
+  // rotation fills angular gaps as temporal samples accumulate.
+  let temporalX=sampleFrame*0x91e10da5u;
+  let temporalY=sampleFrame*0xc13fa9a9u;
   var jitter=vec2f(
-    f32(scrambledFrame&65535u),
-    f32(scrambledFrame>>16u)
-  )/65536.0;
+    f32(temporalX>>8u),f32(temporalY>>8u)
+  )*(1.0/16777216.0);
   if(!featureEnabled(8u)){
     let temporal=hash32(u32(frame.sunDirTime.w*60.0));
     let temporal2=hash32(temporal^0x9e3779b9u);
     jitter=vec2f(f32(temporal&65535u),f32(temporal2&65535u))/65536.0;
   }
-  let uv=fract(vec2f(0.5)+f32(sequenceIndex+1u)*alpha+jitter);
+  // Immutable and rigid receivers alike retain Algorithm 3's contiguous
+  // hierarchical R2 ranges and the global temporal rotation; the deposit
+  // gate below keeps population-dependent rays out of swept-invalid cones.
+  let stableSequenceIndex=sequenceIndex+sampleLane*samplesPerFrame();
+  var uv=fract(vec2f(0.5)+f32(stableSequenceIndex+1u)*alpha+jitter);
   var direction=decodeEqualArea(uv);
-  if(dot(direction,normal)<0.0){direction=-direction;}
+  if(currentStateAnchor){
+    direction=anchorDirection;
+  }else if(dot(direction,normal)<0.0){direction=-direction;}
 
   let baseLength=frame.envBaseSpacing.w*exp2(f32(lod&3u))*1.6;
   let maxDistance=baseLength*64.0;
@@ -1695,7 +2347,7 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
   // gate. Near emitters are still integrated analytically below, but ordinary
   // near geometry remains part of the unbiased ray-splitting estimator.
   let cMinusOneEnd=0.0;
-  let surfaceOrigin=world+normal*max(0.008,frame.envBaseSpacing.w*0.012);
+  let surfaceOrigin=world.xyz+normal*max(0.008,frame.envBaseSpacing.w*0.012);
   let origin=surfaceOrigin+direction*cMinusOneEnd;
   let remainingDistance=max(0.001,maxDistance-cMinusOneEnd);
   let hit=traceScene(origin,direction,remainingDistance+0.001);
@@ -1740,11 +2392,33 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
   for(var cascade=0u;cascade<4u;cascade++){
     if(cascade>targetCascade){break;}
     let key=keyFromCellSurface(
-      probeCell(world,cascade,lod),lod,sheet
+      probeCell(world.xyz,cascade,lod),lod,sheet
     );
     let probe=lookupProbe(cascade,key);
     if(probe==EMPTY){continue;}
     let dir=directionIndex(direction,cascade);
+    // A swept-invalid cone cannot accumulate: its value each frame is a
+    // fresh estimate, so every sample it receives must be a smooth function
+    // of the scene pose alone. Algorithm 3 rays are not — their rank/count
+    // assignment reshuffles with the visible-pixel population every frame,
+    // which measured as ~5% per-frame luminance churn on exact-key probes
+    // near movers. Population-dependent rays therefore feed only cones that
+    // still accumulate (where churn averages out); swept-invalid cones
+    // resolve purely from the deterministic probe-keyed anchor quadrature.
+    // The gate exists to keep population churn out of cones under CONTINUOUS
+    // motion. On a teleport or radiometric-step frame history is rejected
+    // outright anyway, and the very first fresh estimate should use every
+    // available ray — anchor-only first frames measurably diverged from the
+    // converged state in the round-trip immediate-closure gates.
+    if(!currentStateAnchor&&frame.dynamicInfo.w!=0xffffffffu
+      &&!featureEnabled(2048u)&&!featureEnabled(512u)){
+      let coneOrigin=probePositionFromCell(
+        probeCell(world.xyz,cascade,lod),cascade,lod
+      );
+      if(!dynamicConeRootClear(
+        frame.dynamicInfo.w,coneOrigin,dir,cascade,lod
+      )){continue;}
+    }
     if(cascade<targetCascade){deposit(cascade,probe,dir,vec3f(0),1.0);}
     else {deposit(cascade,probe,dir,radiance,0.0);}
   }
@@ -1752,18 +2426,55 @@ fn traceAndSplit(world:vec3f,normal:vec3f,lod:u32,stableSlot:u32){
 
 @compute @workgroup_size(8,8) fn splitRays(@builtin(global_invocation_id) gid: vec3u) {
   let giSize=vec2u(u32(frame.resolution.z),u32(frame.resolution.w));
-  if(any(gid.xy>=giSize)||gid.z>=max(1u,passParams.value)){return;}
+  let baseSamples=max(1u,passParams.value);
+  if(any(gid.xy>=giSize)||gid.z>=baseSamples*64u){return;}
   let fullSize=vec2u(u32(frame.resolution.x),u32(frame.resolution.y));
   let pixel=min(fullSize-vec2u(1),gid.xy*fullSize/giSize);
   let world=textureLoad(worldTex,vec2i(pixel),0);
   if(world.w<0.5){return;}
   let normal=gbufferNormal(vec2i(pixel));
+  setRigidSheetOverride(world,normal);
   let lods=lodSelection(world.xyz);
   let fine=u32(lods.x);
-  let sample=sampleIndex(gid);
-  traceAndSplit(world.xyz,normal,fine,sample);
+  let laneGroup=gid.z/baseSamples;
+  let baseGid=vec3u(gid.xy,gid.z%baseSamples);
+  let sample=sampleIndex(baseGid);
   let coarse=u32(lods.y);
-  if(coarse!=fine){traceAndSplit(world.xyz,normal,coarse,samplesPerFrame()+sample);}
+  var fineAnchor=StaticAnchorSelection(0u,vec3f(0,0,1));
+  var coarseAnchor=StaticAnchorSelection(0u,vec3f(0,0,1));
+  // Rigid receivers use the identical paper path: their pixels seed the same
+  // world probes, own the same Algorithm 3 ranks, and publish the same
+  // hazard-anchor candidates as static surfaces. Their surface cones overlap
+  // their own swept TLAS, so motion invalidates exactly the history that
+  // depended on the previous pose; a stationary rigid instance accumulates
+  // like any other static geometry.
+  if(laneGroup>0u){
+    fineAnchor=staticAnchorForLod(
+      world,normal,fine,laneGroup,sample
+    );
+    if(coarse!=fine){
+      coarseAnchor=staticAnchorForLod(
+        world,normal,coarse,laneGroup,samplesPerFrame()+sample
+      );
+    }
+    if(fineAnchor.needed==0u&&coarseAnchor.needed==0u){return;}
+  }
+  let baseLane=laneGroup==0u;
+  if(baseLane||fineAnchor.needed!=0u){
+    traceAndSplit(
+      world,normal,fine,sample,gid.z,
+      fineAnchor.needed!=0u,fineAnchor.direction
+    );
+  }
+  // Each selected LOD owns its exact probe key, hazard predicate, and anchor
+  // direction. Sharing a fine trigger with the coarse call (or vice versa)
+  // changed the estimator while crossing the blend band.
+  if(coarse!=fine&&(baseLane||coarseAnchor.needed!=0u)){
+    traceAndSplit(
+      world,normal,coarse,samplesPerFrame()+sample,gid.z,
+      coarseAnchor.needed!=0u,coarseAnchor.direction
+    );
+  }
 }
 
 fn sampleParentDirection(
@@ -1845,13 +2556,47 @@ fn mergedParent(
   let key=probeKeyFromInfo(probeInfo,cascade);
   let previousFrame=(currentFrame()+3u)&3u;
   let previousProbe=lookupProbeFrame(cascade,key,previousFrame);
-  let coneHistoryValid=dynamicConeHistoryValid(
-    probeInfo.xyz,directionFromIndex(direction,cascade),cascade,lod
-  );
-  if(historyWeight()>0.0&&coneHistoryValid
+  // A hard analytic/source-output step rejects all history. Continuous sun or
+  // point-light motion changes the endpoint radiance globally and therefore
+  // uses a bounded responsive EMA. A finite moving mesh emitter or rigid
+  // blocker is different: only cones overlapping its swept TLAS are stale,
+  // and for CONTINUOUS rigid motion that staleness is bounded by how far the
+  // object moved in a frame. Discarding the cone outright replaced a
+  // converged value with a fresh estimator in a single frame — a visible pop
+  // on every invalidation edge. Instead the cone's history keeps
+  // participating with its effective sample count capped low, so the fresh
+  // deterministic estimate takes over within a few frames, smoothly.
+  // Teleports (2048) and radiometric steps (512) still reject outright:
+  // their history describes a state that never smoothly connects to this one.
+  var historySampleCap=65535u;
+  if(featureEnabled(512u)){
+    historySampleCap=0u;
+  }else if(!dynamicConeHistoryValid(
+    probeInfo.xyz,direction,cascade,lod
+  )){
+    historySampleCap=select(12u,0u,featureEnabled(2048u));
+  }
+  if(historyWeight()>0.0&&historySampleCap>0u
     &&previousProbe!=EMPTY&&previousProbe<PROBE_CAPS[cascade]){
     let previousBase=accumIndexFrame(cascade,previousProbe,direction,previousFrame);
-    let previousSamples=atomicLoad(&accum[previousBase+4u]);
+    var previousSamples=atomicLoad(&accum[previousBase+4u]);
+    if(previousSamples>0u){
+      let previousDenominator=FIXED_SCALE*f32(previousSamples);
+      let previousInterval=vec3f(
+        f32(atomicLoad(&accum[previousBase])),
+        f32(atomicLoad(&accum[previousBase+1u])),
+        f32(atomicLoad(&accum[previousBase+2u]))
+      )/previousDenominator;
+      // History that carries radiance embeds direct shading at its hit point.
+      // A mover crossing the light corridor to that endpoint leaves the
+      // receiver cone untouched, so converged history would freeze the stale
+      // shadow in place; cap it to the same graceful window instead.
+      if(max(previousInterval.x,max(previousInterval.y,previousInterval.z))>1e-5
+        &&historySampleCap>12u
+        &&!dynamicEndpointShadingValid(probeInfo.xyz,direction,cascade,lod)){
+        historySampleCap=12u;
+      }
+    }
     if(previousSamples>0u){
       hasInterval=true;
       let previousDenominator=FIXED_SCALE*f32(previousSamples);
@@ -1862,8 +2607,19 @@ fn mergedParent(
       )/previousDenominator;
       let previousBeta=f32(atomicLoad(&accum[previousBase+3u]))/previousDenominator;
       if(samples>0u){
-        if(featureEnabled(32u)){
-          // Moving lighting needs a bounded response time.
+        if(featureEnabled(8192u)&&historySampleCap==65535u){
+          // The converged world-key field is view independent. While a static
+          // camera moves, retain the exact-key value instead of replacing it
+          // with a different screen population. New/disoccluded keys have no
+          // previous probe and therefore still resolve from fresh rays.
+          interval=previousInterval;
+          beta=previousBeta;
+          resolvedSamples=previousSamples;
+        }else if(featureEnabled(16384u)&&historySampleCap==65535u){
+          // Actual source motion needs a bounded response time. The UI's
+          // animation checkbox is not transport state: audits and shareable
+          // frozen-time poses may keep it checked while the source is fixed,
+          // and those frames must retain the paper's exact running average.
           let temporalWeight=intervalHistoryWeight();
           interval=mix(interval,previousInterval,temporalWeight);
           beta=mix(beta,previousBeta,temporalWeight);
@@ -1872,7 +2628,11 @@ fn mergedParent(
           // Section 5.2 accumulates rays for semi-static scenes. Preserve an
           // effective sample count so repeated exact-key probes converge as a
           // true running average instead of a path-dependent fixed EMA.
-          let boundedPrevious=min(previousSamples,16384u);
+          // Fixed-point radiance is clamped to 16 and scaled by 4096. 65,535
+          // samples therefore occupy at most 16*4096*65535 = 4,294,901,760,
+          // still below u32 max. Use that full overflow-safe history window so
+          // one dense frame cannot visibly replace a converged static cone.
+          let boundedPrevious=min(previousSamples,historySampleCap);
           let totalSamples=samples+boundedPrevious;
           interval=(
             interval*f32(samples)+previousInterval*f32(boundedPrevious)
@@ -1880,14 +2640,18 @@ fn mergedParent(
           beta=(
             beta*f32(samples)+previousBeta*f32(boundedPrevious)
           )/f32(max(1u,totalSamples));
-          resolvedSamples=min(16384u,totalSamples);
+          resolvedSamples=min(65535u,totalSamples);
         }
       }else{
         interval=previousInterval;
         beta=previousBeta;
-        resolvedSamples=previousSamples;
+        resolvedSamples=min(previousSamples,historySampleCap);
       }
     }
+  }
+  var persistentSlot=EMPTY;
+  if(cascade==0u){
+    persistentSlot=atomicLoad(&persistentIrradiance[PERSISTENT_MAP_OFFSET+probe]);
   }
   if(hasInterval){
     let safeInterval=clamp(interval,vec3f(0),vec3f(16));
@@ -1905,23 +2669,53 @@ fn mergedParent(
   // light from internal emitters or point sources.
   var distant=vec4f(frame.envBaseSpacing.xyz,2.0);
   if(cascade<3u){distant=mergedParent(cascade,direction,probeInfo.xyz,lod,sheet);}
+  var resolvedCone=vec4f(0);
   if(!hasInterval){
     // Full trilinear support can introduce probes that own no screen ray.
     // They have no measured transmittance, so inheriting a parent environment
     // cone fabricates an escape path through sealed geometry. Keep them
     // invalid; the spatial gather renormalizes over measured same-sheet
     // neighbors, as required for sparse probes in Section 5.
-    cones[index]=vec4f(0);
-    return;
+    resolvedCone=vec4f(0);
+  }else if(beta>0.999&&distant.w<0.5){
+    resolvedCone=vec4f(0);
+  }else{
+    resolvedCone=vec4f(
+      min(vec3f(16.0),interval+clamp(beta,0.0,1.0)*distant.xyz),
+      1.0+clamp(beta,0.0,1.0)*max(0.0,distant.w-1.0)
+    );
   }
-  if(beta>0.999&&distant.w<0.5){
-    cones[index]=vec4f(0);
-    return;
+  // Fixed immutable scenes retain the fully composed c0 directional field,
+  // including parent contribution and validity/transmittance. This is the
+  // world-space transport representation consumed by irradiance prefiltering,
+  // not recursive screen history. During camera motion an existing exact key
+  // is invariant; a cold key publishes its current result immediately.
+  if(cascade==0u&&persistentSlot!=EMPTY){
+    let persistentBase=persistentDirectionBase(persistentSlot,direction);
+    let persistentReady=atomicLoad(&persistentIrradiance[persistentBase+4u]);
+    if(persistentReady!=0u&&featureEnabled(8192u)){
+      resolvedCone=vec4f(
+        bitcast<f32>(atomicLoad(&persistentIrradiance[persistentBase])),
+        bitcast<f32>(atomicLoad(&persistentIrradiance[persistentBase+1u])),
+        bitcast<f32>(atomicLoad(&persistentIrradiance[persistentBase+2u])),
+        bitcast<f32>(atomicLoad(&persistentIrradiance[persistentBase+3u]))
+      );
+    }else if(resolvedCone.w>0.5){
+      atomicStore(&persistentIrradiance[persistentBase],bitcast<u32>(resolvedCone.x));
+      atomicStore(&persistentIrradiance[persistentBase+1u],bitcast<u32>(resolvedCone.y));
+      atomicStore(&persistentIrradiance[persistentBase+2u],bitcast<u32>(resolvedCone.z));
+      atomicStore(&persistentIrradiance[persistentBase+3u],bitcast<u32>(resolvedCone.w));
+      atomicStore(&persistentIrradiance[persistentBase+4u],1u);
+    }else if(persistentReady!=0u){
+      resolvedCone=vec4f(
+        bitcast<f32>(atomicLoad(&persistentIrradiance[persistentBase])),
+        bitcast<f32>(atomicLoad(&persistentIrradiance[persistentBase+1u])),
+        bitcast<f32>(atomicLoad(&persistentIrradiance[persistentBase+2u])),
+        bitcast<f32>(atomicLoad(&persistentIrradiance[persistentBase+3u]))
+      );
+    }
   }
-  cones[index]=vec4f(
-    min(vec3f(16.0),interval+clamp(beta,0.0,1.0)*distant.xyz),
-    1.0+clamp(beta,0.0,1.0)*max(0.0,distant.w-1.0)
-  );
+  cones[index]=resolvedCone;
 }
 
 fn decodeOctahedral(uvIn:vec2f)->vec3f{
@@ -1935,110 +2729,9 @@ fn decodeOctahedral(uvIn:vec2f)->vec3f{
   return normalize(n);
 }
 
-// Tangent support probes are allocated to make sparse trilinear interpolation
-// complete, but Algorithm 3 assigns each screen ray to only its nearest probe.
-// Reconstruct a zero-owner support probe from measured, immediately adjacent
-// probes on the same orientation sheet. This never inherits an environment
-// cone from a coarser cascade and therefore cannot manufacture a path through
-// a sealed wall. The source predicate uses the immutable ray count, so reads
-// cannot chain through writes from this dispatch and the result is deterministic.
-const TANGENT_OFFSETS=array<vec2i,8>(
-  vec2i(-1,0),vec2i(1,0),vec2i(0,-1),vec2i(0,1),
-  vec2i(-1,-1),vec2i(-1,1),vec2i(1,-1),vec2i(1,1)
-);
-
-@compute @workgroup_size(64) fn resolveTangentSupportSources(
+@compute @workgroup_size(64) fn prefilterIrradiance(
   @builtin(global_invocation_id) gid:vec3u
-){
-  let probe=gid.x;
-  let activeCount=min(atomicLoad(&state[0]),PROBE_CAPS[0]);
-  if(probe>=activeCount){return;}
-  if(atomicLoad(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,probe)])>0u){return;}
-  let info=probeMeta[PROBE_OFFSETS[0]+probe];
-  let lod=probeLod(info);
-  let sheet=probeSurfaceClass(info);
-  let cell=probeCell(info.xyz,0u,lod);
-  let normalAxis=sheet/2u;
-  var stored=0u;
-  for(var neighborOffset=0u;neighborOffset<8u;neighborOffset++){
-    let tangent=TANGENT_OFFSETS[neighborOffset];
-    var offset=vec3i(0);
-    if(normalAxis==0u){offset.y=tangent.x;offset.z=tangent.y;}
-    else if(normalAxis==1u){offset.x=tangent.x;offset.z=tangent.y;}
-    else{offset.x=tangent.x;offset.y=tangent.y;}
-    let neighbor=lookupProbe(
-      0u,keyFromCellSurface(cell+offset,lod,sheet)
-    );
-    if(neighbor==EMPTY||neighbor>=PROBE_CAPS[0]){continue;}
-    if(atomicLoad(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,neighbor)])==0u){
-      continue;
-    }
-    atomicStore(
-      &state[SUPPORT_SOURCE_OFFSET+probe*8u+stored],neighbor+1u
-    );
-    stored+=1u;
-  }
-}
-
-@compute @workgroup_size(64) fn resolveTangentSupportIrradiance(
-  @builtin(global_invocation_id) gid:vec3u
-){
-  let probe=gid.x/64u;
-  let texel=gid.x-probe*64u;
-  let activeCount=min(atomicLoad(&state[0]),PROBE_CAPS[0]);
-  if(probe>=activeCount){return;}
-  if(atomicLoad(&state[probeStateIndex(RAY_COUNT_OFFSET,0u,probe)])>0u){return;}
-  var sum=vec3f(0);
-  var valid=0.0;
-  for(var sourceOffset=0u;sourceOffset<8u;sourceOffset++){
-    let encoded=atomicLoad(
-      &state[SUPPORT_SOURCE_OFFSET+probe*8u+sourceOffset]
-    );
-    if(encoded==0u){continue;}
-    let source=irradiance[
-      currentFrame()*IRRADIANCE_FRAME_STRIDE+(encoded-1u)*64u+texel
-    ];
-    if(source.a>0.5){
-      sum+=source.xyz;
-      valid+=1.0;
-    }
-  }
-  if(valid>0.5){
-    var reconstructed=sum/valid;
-    // The exact world/sheet key is the temporal identity of a support probe.
-    // Its measured-neighbor set may change as primary ownership moves between
-    // pixels, even though the support itself has not moved. Blend the complete
-    // eight-neighbor reconstruction with the previous exact-key value, using
-    // the same fixed/moving-light history policy as radiance intervals. This
-    // removes source-set popping while still tracking animated illumination.
-    let info=probeMeta[PROBE_OFFSETS[0]+probe];
-    let key=probeKeyFromInfo(info,0u);
-    let previousFrame=(currentFrame()+3u)&3u;
-    let previousProbe=lookupProbeFrame(0u,key,previousFrame);
-    if(dynamicPointHistoryValid(info.xyz,frame.envBaseSpacing.w*1.75)
-      &&previousProbe!=EMPTY&&previousProbe<PROBE_CAPS[0]){
-      let previous=irradiance[
-        previousFrame*IRRADIANCE_FRAME_STRIDE+previousProbe*64u+texel
-      ];
-      if(previous.a>0.5){
-        reconstructed=mix(reconstructed,previous.xyz,historyWeight());
-      }
-    }
-    let stored=vec4f(reconstructed,1.0);
-    irradiance[
-      currentFrame()*IRRADIANCE_FRAME_STRIDE+probe*64u+texel
-    ]=stored;
-    let x=texel%8u;
-    let y=texel/8u;
-    let tile=vec2u(probe%64u,probe/64u)*8u;
-    textureStore(
-      irradianceAtlasStorage,
-      vec2i(tile+vec2u(x,y)+vec2u(0u,currentFrame()*2048u)),stored
-    );
-  }
-}
-
-@compute @workgroup_size(64) fn prefilterIrradiance(@builtin(global_invocation_id) gid: vec3u) {
+) {
   let probe=gid.x/64u;
   let texel=gid.x-probe*64u;
   let activeCount=min(atomicLoad(&state[0]),PROBE_CAPS[0]);
@@ -2049,27 +2742,33 @@ const TANGENT_OFFSETS=array<vec2i,8>(
   // the one-texel border is equivalent to the paper's seam-copying pass.
   let normal=decodeOctahedral(vec2f((f32(x)-0.5)/6.0,(f32(y)-0.5)/6.0));
   var result=vec3f(0);
-  var validDirections=0u;
+  var cosineWeight=0.0;
   for(var direction=0u;direction<32u;direction++){
     let ray=directionFromIndex(direction,0u);
     let cone=cones[dataIndex(0u,probe,direction)];
     if(cone.w>0.5){
-      result+=cone.xyz*max(0.0,dot(normal,ray));
-      validDirections++;
+      let cosine=max(0.0,dot(normal,ray));
+      result+=cone.xyz*cosine;
+      cosineWeight+=cosine;
     }
   }
-  let filtered=result*(4.0/32.0);
-  let stored=vec4f(filtered,select(0.0,1.0,validDirections>0u));
+  // Sparse RC ignores unfilled directions during merging. Do the same during
+  // the final Lambertian prefilter instead of treating missing angular bins as
+  // black radiance. For complete uniform-sphere coverage cosineWeight is N/4,
+  // so this normalization is identical to the paper's 4/N estimator. Alpha
+  // carries continuous coverage confidence into sparse trilinear shading.
+  let filtered=select(vec3f(0),result/max(cosineWeight,1e-6),cosineWeight>1e-6);
+  let confidence=clamp(cosineWeight*(4.0/32.0),0.0,1.0);
+  let stored=vec4f(filtered,confidence);
   irradiance[currentFrame()*IRRADIANCE_FRAME_STRIDE+probe*64u+texel]=stored;
   let tile=vec2u(probe%64u,probe/64u)*8u;
   let atlasCoordinate=vec2i(tile+vec2u(x,y)+vec2u(0u,currentFrame()*2048u));
   textureStore(irradianceAtlasStorage,atlasCoordinate,stored);
 }
 
-fn resolvedPrimaryIrradiance(
-  world:vec3f,normal:vec3f,closedBackFace:bool
+fn resolvePrimaryIrradianceBase(
+  world:vec3f,normal:vec3f,base:vec3f,closedBackFace:bool
 )->vec3f{
-  let base=samplePrimaryIrradiance(world,normal).xyz;
   let intervalEnd=frame.envBaseSpacing.w;
   let origin=world+normal*max(0.006,intervalEnd*0.012);
   let nearEmission=primaryNearEmissiveIrradiance(
@@ -2084,9 +2783,7 @@ fn resolvedPrimaryIrradiance(
   );
   var ambientWeight=0.0;
   var ambientVisible=0.0;
-  let enclosureGuard=frame.pointColorIntensity.w<=0.0001
-    &&!featureEnabled(64u)&&atomicLoad(&state[8])==0u;
-  if(!enclosureGuard&&!closedBackFace){return base+nearEmission;}
+  if(!closedBackFace){return base+nearEmission;}
   // The ambient-form optimization avoids Section 7.1's expensive directional
   // gather. One deterministic visibility sample per already-filtered c0 cone
   // is sufficient because the result is a single hemispherical ratio, not 32
@@ -2098,11 +2795,6 @@ fn resolvedPrimaryIrradiance(
     ambientWeight+=cosine;
     let hit=traceScene(origin,direction,visibilityGuardEnd+0.001);
     var visible=hit.t>=visibilityGuardEnd;
-    if(visible&&enclosureGuard){
-      let farEnd=max(intervalEnd,frame.sceneBounds.w*1.001);
-      let farHit=traceScene(origin,direction,farEnd+0.001);
-      visible=farHit.t>=farEnd;
-    }
     if(visible){ambientVisible+=cosine;}
   }
   // Section 7.1 explicitly proposes this ambient-form production path for
@@ -2114,6 +2806,14 @@ fn resolvedPrimaryIrradiance(
     ambientWeight>1e-7
   );
   return base*visibilityCorrection+nearEmission;
+}
+
+fn resolvedPrimaryIrradiance(
+  world:vec3f,normal:vec3f,closedBackFace:bool
+)->vec3f{
+  return resolvePrimaryIrradianceBase(
+    world,normal,samplePrimaryIrradiance(world,normal).xyz,closedBackFace
+  );
 }
 
 // Deterministic one-bounce ground-truth gate. Each low-resolution validation
@@ -2133,16 +2833,21 @@ fn resolvedPrimaryIrradiance(
   // radiance is dominated by the separately known emission term and is not a
   // meaningful irradiance-reconstruction error sample.
   let packedNormal=textureLoad(normalTex,vec2i(pixel),0);
-  if(world.w>1.5||max(packedNormal.z,packedNormal.w)>1e-5){return;}
+  if((u32(world.w+0.5)&2u)!=0u
+    ||max(packedNormal.z,packedNormal.w)>1e-5){return;}
   let normal=gbufferNormal(vec2i(pixel));
+  setRigidSheetOverride(world,normal);
   let base=(gid.y*outputSize.x+gid.x)*8u;
   if(gid.z==0u){
-    let current=clamp(
-      resolvedPrimaryIrradiance(
-        world.xyz,normal,fract(world.w)>0.125
-      ),
-      vec3f(0),vec3f(16)
+    // Rigid receivers consume the same sparse world field as static
+    // surfaces, so the oracle evaluates the identical reconstruction for
+    // every pixel; the sheet override above already keys mover pixels by
+    // their owner-canonical class. (The former material-node audit texture
+    // is gone — reading it mislabeled the entire door leaf as black.)
+    var current=resolvedPrimaryIrradiance(
+      world.xyz,normal,packedClosedSurface(world.w)
     );
+    current=clamp(current,vec3f(0),vec3f(16));
     atomicStore(&accum[base+3u],u32(current.r*65536.0+0.5));
     atomicStore(&accum[base+4u],u32(current.g*65536.0+0.5));
     atomicStore(&accum[base+5u],u32(current.b*65536.0+0.5));
@@ -2241,8 +2946,8 @@ fn sampleSunShadowAuditCascade(world:vec3f,normal:vec3f,cascade:u32)->f32{
   let size=vec2f(textureDimensions(sunShadowAuditTex));
   var result=0.0;
   var total=0.0;
-  for(var y=-2;y<=2;y++){
-    for(var x=-2;x<=2;x++){
+  for(var y=-1;y<=1;y++){
+    for(var x=-1;x<=1;x++){
       let weight=(3.0-abs(f32(x)))*(3.0-abs(f32(y)));
       result+=weight*textureSampleCompareLevel(
         sunShadowAuditTex,sunShadowAuditSampler,
@@ -2325,6 +3030,8 @@ struct FrameUniforms {
   controls: vec4f,
   sceneBounds: vec4f,
   dynamicInfo: vec4u,
+  previousViewProj: mat4x4<f32>,
+  lodCamera: vec4f,
 };
 struct SunShadowUniforms {
   matrices: array<mat4x4<f32>,4>,
@@ -2361,6 +3068,7 @@ struct ShortHit { t:f32, normal:vec3f, albedo:vec3f, emissive:vec3f };
 @group(0) @binding(18) var shortAlbedoSampler:sampler;
 @group(0) @binding(19) var<storage,read> emissiveBvhNodes:array<BvhNode>;
 @group(0) @binding(20) var<storage,read> emissiveTriangles:array<Triangle>;
+@group(0) @binding(21) var dynamicReceiverIrradiance:texture_2d<f32>;
 
 fn gbufferNormal(pixel:vec2i)->vec3f{
   let oct=textureLoad(normalTex,pixel,0).xy;
@@ -2442,6 +3150,29 @@ fn surfaceClass(normalIn:vec3f)->u32{
   else if(a.y>=a.z){axis=1u;component=normal.y;}
   return axis*2u+select(0u,1u,component>=0.0);
 }
+
+// Mirror of the compute module's rigid sheet override: rigid pixels key their
+// probe lookups by the owner-canonical normal so rotation cannot swap the
+// interpolation support mid-tumble. 8 means "no override" (static pixel).
+var<private> rigidSheetOverride:u32=8u;
+
+fn pixelSurfaceClass(normalIn:vec3f)->u32{
+  return select(
+    surfaceClass(normalIn),rigidSheetOverride,rigidSheetOverride!=8u
+  );
+}
+
+fn setFinalRigidSheetOverride(owner:u32,normal:vec3f){
+  rigidSheetOverride=8u;
+  if(owner==0xffffffffu){return;}
+  let instance=shortTriangles[frame.dynamicInfo.y+owner];
+  let canonicalNormal=normalize(
+    shortQuaternionRotate(normal,vec4f(-instance.b.xyz,instance.b.w))
+    *instance.c.xyz
+  );
+  rigidSheetOverride=surfaceClass(canonicalNormal);
+}
+
 fn keyFromCellSurface(cellIn:vec3i,lod:u32,surfaceClassValue:u32)->u32{
   if(any(cellIn<vec3i(-256))||any(cellIn>vec3i(255))){return EMPTY;}
   let c=cellIn+vec3i(256);
@@ -2465,8 +3196,25 @@ fn lookupProbeCascade(cascade:u32,key:u32)->u32{
   );
 }
 fn lookupProbe(key:u32)->u32{return lookupProbeCascade(0u,key);}
+fn loadFinalAtlasIrradianceBilinear(
+  probe:u32,frameIndex:u32,localIn:vec2f
+)->vec4f{
+  let local=clamp(localIn,vec2f(0),vec2f(7));
+  let low=vec2i(floor(local));
+  let high=min(low+vec2i(1),vec2i(7));
+  let fraction=local-vec2f(low);
+  let tile=vec2i(
+    i32(probe%64u)*8,
+    i32(probe/64u)*8+i32(frameIndex)*2048
+  );
+  let v00=textureLoad(irradianceAtlas,tile+vec2i(low.x,low.y),0);
+  let v10=textureLoad(irradianceAtlas,tile+vec2i(high.x,low.y),0);
+  let v01=textureLoad(irradianceAtlas,tile+vec2i(low.x,high.y),0);
+  let v11=textureLoad(irradianceAtlas,tile+high,0);
+  return mix(mix(v00,v10,fraction.x),mix(v01,v11,fraction.x),fraction.y);
+}
 fn lodDistance(position:vec3f)->f32{
-  let delta=abs(position-frame.cameraPos.xyz);
+  let delta=abs(position-frame.lodCamera.xyz);
   return max(delta.x,max(delta.y,delta.z));
 }
 fn levelOfDetail(position:vec3f)->u32{
@@ -2478,7 +3226,7 @@ fn lodSelection(position:vec3f)->vec3f{
   if(fine>=3u){return vec3f(f32(fine),f32(fine),0.0);}
   let baseRange=max(0.001,frame.envBaseSpacing.w*18.0);
   let boundary=baseRange*exp2(f32(fine+1u));
-  let start=boundary*0.9;
+  let start=boundary*0.75;
   let blend=clamp((lodDistance(position)-start)/max(0.001,boundary-start),0.0,1.0);
   let coarse=select(fine,fine+1u,blend>0.0);
   return vec3f(f32(fine),f32(coarse),blend);
@@ -2494,11 +3242,59 @@ fn octIndex(normalIn:vec3f)->u32{
   let xy=vec2u(floor(uv*6.0));
   return xy.x+xy.y*6u;
 }
+// Directional band-limit for the current receiver, set once per fragment.
+// Zero keeps the exact octahedral lookup; one converges the lookup toward the
+// probe's ambient mean. It is the directional analogue of texture mip
+// selection: a rigid surface only a few pixels across cannot support
+// per-normal directional detail, because raster coverage re-picks the sampled
+// normal every frame and the 6x6 octahedral gradient would turn that churn
+// into lighting flicker on the whole object.
+var<private> directionalSpread:f32=0.0;
+
+fn tileAmbientMean(probe:u32,frameIndex:u32)->vec4f{
+  // Normal-independent estimate of the probe's direction-averaged field:
+  // four bilinear taps tile the 6x6 octahedral interior uniformly. Texels
+  // facing into geometry legitimately carry no data; weighting by their
+  // confidence keeps unpopulated directions from dragging the mean to black
+  // (and their per-frame coverage churn out of the estimate).
+  var value=vec3f(0);
+  var confidence=0.0;
+  for(var tap=0u;tap<4u;tap++){
+    let coordinate=vec2f(
+      select(2.5,4.5,(tap&1u)!=0u),
+      select(2.5,4.5,(tap>>1u)!=0u)
+    );
+    let sampleValue=loadFinalAtlasIrradianceBilinear(
+      probe,frameIndex,coordinate
+    );
+    value+=sampleValue.xyz*sampleValue.a;
+    confidence+=sampleValue.a;
+  }
+  if(confidence<1e-4){return vec4f(0);}
+  return vec4f(value/confidence,confidence*0.25);
+}
+
+fn filteredFinalAtlasSample(
+  probe:u32,frameIndex:u32,octCoordinate:vec2f
+)->vec4f{
+  let base=loadFinalAtlasIrradianceBilinear(probe,frameIndex,octCoordinate);
+  if(directionalSpread<=0.001){return base;}
+  return mix(base,tileAmbientMean(probe,frameIndex),directionalSpread);
+}
+
 fn sampleIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
   let spacing=frame.envBaseSpacing.w*exp2(f32(lod));
   let grid=position/spacing-vec3f(0.5);
   let cell=vec3i(floor(grid));
-  let fraction=fract(grid);
+  let linearFraction=fract(grid);
+  // C1 surface reconstruction. Linear weights are only C0: a rigid surface
+  // moving through the probe grid crosses a cell boundary somewhere on its
+  // body almost every frame, and each crossing converts the field's spatial
+  // curvature into a second-difference spike of the reconstructed lighting.
+  // Hermite weights have zero derivative at cell boundaries, so the same
+  // sparse field is C1 along any smooth motion path — for rigid receivers,
+  // for the camera, and for static geometry alike.
+  let fraction=linearFraction*linearFraction*(vec3f(3.0)-2.0*linearFraction);
   let fixedBits=vec3i(floor(position/spacing))-cell;
   let absoluteNormal=abs(normal);
   var normalAxis=2u;
@@ -2507,10 +3303,19 @@ fn sampleIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
   }else if(absoluteNormal.y>=absoluteNormal.z){
     normalAxis=1u;
   }
+  // Rigid receivers drop the tangent-axis machinery entirely: the dominant
+  // axis and the normal-axis weight are raster-derived and flip continuously
+  // on curved or tumbling instances, swapping the interpolation pattern
+  // per frame. The full eight-corner trilinear needs neither — cells with no
+  // probes renormalize away naturally — so the support set is a pure function
+  // of the query position, and the canonical sheet key still separates the
+  // instance's opposite faces.
+  let rigidReceiver=rigidSheetOverride!=8u;
   var normalWeight=0.0;
   if(normalAxis==0u){normalWeight=select(1.0-fraction.x,fraction.x,fixedBits.x==1);}
   if(normalAxis==1u){normalWeight=select(1.0-fraction.y,fraction.y,fixedBits.y==1);}
   if(normalAxis==2u){normalWeight=select(1.0-fraction.z,fraction.z,fixedBits.z==1);}
+  if(rigidReceiver){normalWeight=1.0;}
   var octNormal=normalize(normal);
   octNormal/=max(1e-6,abs(octNormal.x)+abs(octNormal.y)+abs(octNormal.z));
   var oct=octNormal.xy;
@@ -2522,12 +3327,19 @@ fn sampleIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
   }
   let octCoordinate=clamp((oct*0.5+0.5)*6.0+vec2f(0.5),vec2f(0),vec2f(7));
   let frameIndex=u32(floor(frame.controls.w))&3u;
-  let allowHistoricalSupport=finalDynamicPointHistoryValid(position,spacing*1.75);
+  // Residency continuity is independent from radiometric source history. A
+  // one-to-three-frame exact-key fallback is valid during continuous analytic
+  // light motion and prevents a cold LOD from turning a lit receiver black.
+  let allowHistoricalSupport=!finalFeatureEnabled(512u)
+    &&finalDynamicPointHistoryValid(position,spacing*1.75);
   var value=vec3f(0);
   var total=0.0;
-  for(var corner=0u;corner<4u;corner++){
+  let cornerCount=select(4u,8u,rigidReceiver);
+  for(var corner=0u;corner<cornerCount;corner++){
     var bits=fixedBits;
-    if(normalAxis==0u){
+    if(rigidReceiver){
+      bits=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    }else if(normalAxis==0u){
       bits.y=i32(corner&1u);bits.z=i32((corner>>1u)&1u);
     }else if(normalAxis==1u){
       bits.x=i32(corner&1u);bits.z=i32((corner>>1u)&1u);
@@ -2540,27 +3352,21 @@ fn sampleIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
       select(1.0-fraction.z,fraction.z,bits.z==1)
     );
     let spatialWeight=wv.x*wv.y*wv.z;
-    let key=keyFromCellSurface(cell+bits,lod,surfaceClass(normal));
+    let key=keyFromCellSurface(cell+bits,lod,pixelSurfaceClass(normal));
     let probe=lookupProbe(key);
     var irradiance=vec4f(0);
     if(probe!=EMPTY&&probe<16384u){
-      let tile=vec2f(f32(probe%64u)*8.0,f32(probe/64u)*8.0+f32(frameIndex)*2048.0);
-      let atlasUv=(tile+octCoordinate+vec2f(0.5))/vec2f(512.0,8192.0);
-      irradiance=textureSampleLevel(irradianceAtlas,irradianceSampler,atlasUv,0.0);
+      irradiance=filteredFinalAtlasSample(
+        probe,frameIndex,octCoordinate
+      );
     }
     if(irradiance.a<0.001&&allowHistoricalSupport){
       for(var age=1u;age<4u;age++){
         let historyFrame=(frameIndex+4u-age)&3u;
         let historyProbe=lookupProbeCascadeFrame(0u,key,historyFrame);
         if(historyProbe!=EMPTY&&historyProbe<16384u){
-          let historyTile=vec2f(
-            f32(historyProbe%64u)*8.0,
-            f32(historyProbe/64u)*8.0+f32(historyFrame)*2048.0
-          );
-          let historyUv=(historyTile+octCoordinate+vec2f(0.5))
-            /vec2f(512.0,8192.0);
-          let historyIrradiance=textureSampleLevel(
-            irradianceAtlas,irradianceSampler,historyUv,0.0
+          let historyIrradiance=filteredFinalAtlasSample(
+            historyProbe,historyFrame,octCoordinate
           );
           if(historyIrradiance.a>0.001){
             irradiance=historyIrradiance;
@@ -2580,12 +3386,52 @@ fn sampleIrradianceLod(position:vec3f,normal:vec3f,lod:u32)->vec4f{
 }
 fn sampleIrradiance(position:vec3f,normal:vec3f)->vec4f{
   let lods=lodSelection(position);
-  let fine=sampleIrradianceLod(position,normal,u32(lods.x));
-  if(u32(lods.y)==u32(lods.x)){return fine;}
-  let coarse=sampleIrradianceLod(position,normal,u32(lods.y));
-  if(fine.w<0.001){return coarse;}
-  if(coarse.w<0.001){return fine;}
-  return vec4f(mix(fine.xyz,coarse.xyz,lods.z),mix(fine.w,coarse.w,lods.z));
+  let fineLod=u32(lods.x);
+  let coarseLod=u32(lods.y);
+  let fine=sampleIrradianceLod(position,normal,fineLod);
+  var coarse=vec4f(0);
+  if(coarseLod!=fineLod){
+    coarse=sampleIrradianceLod(position,normal,coarseLod);
+  }
+  // Search every bounded LOD for the best still-resident exact-key field.
+  // This is used only while an incoming selected field is cold; it does not
+  // change steady-state LOD choice or invent radiance for a disocclusion.
+  var resident=vec4f(0);
+  var residentDistance=5u;
+  for(var candidateLod=0u;candidateLod<4u;candidateLod++){
+    if(candidateLod==fineLod||candidateLod==coarseLod){continue;}
+    let candidate=sampleIrradianceLod(position,normal,candidateLod);
+    let distance=u32(abs(i32(candidateLod)-i32(fineLod)));
+    if(candidate.w>resident.w+0.001
+      ||(abs(candidate.w-resident.w)<=0.001&&distance<residentDistance)){
+      resident=candidate;
+      residentDistance=distance;
+    }
+  }
+  if(coarseLod==fineLod){
+    if(fine.w<0.001){return resident;}
+    if(resident.w<0.001||fine.w>=0.35){return fine;}
+    let readiness=smoothstep(0.02,0.35,fine.w);
+    return vec4f(
+      mix(resident.xyz,fine.xyz,readiness),
+      mix(resident.w,fine.w,readiness)
+    );
+  }
+  if(fine.w<0.001){
+    if(coarse.w>=0.001){return coarse;}
+    return resident;
+  }
+  if(coarse.w<0.001){
+    if(resident.w<0.001||fine.w>=0.35){return fine;}
+    let readiness=smoothstep(0.02,0.35,fine.w);
+    return vec4f(
+      mix(resident.xyz,fine.xyz,readiness),
+      mix(resident.w,fine.w,readiness)
+    );
+  }
+  return vec4f(
+    mix(fine.xyz,coarse.xyz,lods.z),mix(fine.w,coarse.w,lods.z)
+  );
 }
 fn sampleConeDirectionLod(
   position:vec3f,normal:vec3f,lod:u32,direction:u32
@@ -2621,7 +3467,7 @@ fn sampleConeDirectionLod(
     );
     let weight=wv.x*wv.y*wv.z;
     let probe=lookupProbe(keyFromCellSurface(
-      cell+bits,lod,surfaceClass(normal)
+      cell+bits,lod,pixelSurfaceClass(normal)
     ));
     if(probe!=EMPTY&&probe<16384u){
       let cone=cones[dataIndex(0u,probe,direction)];
@@ -2721,9 +3567,13 @@ fn sampleSunShadowCascade(world:vec3f,normal:vec3f,cascade:u32)->f32{
   let size=vec2f(textureDimensions(shadowTex));
   var result=0.0;
   var total=0.0;
-  for(var y=-2;y<=2;y++){
-    for(var x=-2;x<=2;x++){
-      let weight=(3.0-abs(f32(x)))*(3.0-abs(f32(y)));
+  // Hardware comparison filtering plus a deterministic 3x3 tent gives a
+  // smooth 6x6 effective footprint. The former 5x5 kernel could issue fifty
+  // comparison samples in a cascade blend and dominated the entire Sponza
+  // frame without improving temporal stability.
+  for(var y=-1;y<=1;y++){
+    for(var x=-1;x<=1;x++){
+      let weight=(2.0-abs(f32(x)))*(2.0-abs(f32(y)));
       result+=weight*textureSampleCompareLevel(
         shadowTex,shadowSampler,uv+vec2f(f32(x),f32(y))/size,
         i32(cascade),ndc.z-0.00008
@@ -3169,8 +4019,7 @@ fn outgoingAtShortHit(hitWorld:vec3f,hit:ShortHit)->vec3f{
     // intentionally return visible outside their atlas, which is unsuitable
     // for indirect visibility and leaks sunlight into sealed rooms. Resolve
     // these secondary rays against the same exact, watertight scene BVH.
-    if(frame.pointColorIntensity.w<=0.0001&&!finalFeatureEnabled(64u)
-      &&atomicLoad(&frameState[8])==0u){
+    if(frame.pointColorIntensity.w<=0.0001&&!finalFeatureEnabled(64u)){
       let sunOrigin=hitWorld+hit.normal*max(0.006,frame.envBaseSpacing.w*0.01);
       let sunBlocker=traceShortRangeWatertight(
         sunOrigin,lightDirection,frame.sceneBounds.w*1.001
@@ -3379,7 +4228,7 @@ fn nearEmissiveIrradiance(
       stackSize+=2u;
     }
   }
-  if(frame.dynamicInfo.z!=0xffffffffu){
+  if(frame.dynamicInfo.z!=0xffffffffu&&!finalFeatureEnabled(4096u)){
     var dynamicStack:array<u32,32>;
     var dynamicStackSize=1u;
     dynamicStack[0]=frame.dynamicInfo.z;
@@ -3399,18 +4248,53 @@ fn nearEmissiveIrradiance(
             frame.dynamicInfo.y+firstInstance+instanceOffset
           ];
           if((instance.normalOct.w&1u)==0u){continue;}
-          for(var triangleOffset=0u;triangleOffset<instance.normalOct.z;triangleOffset++){
-            let localTriangle=shortTriangles[instance.normalOct.y+triangleOffset];
-            let worldTriangle=Triangle(
-              vec4f(shortInstancePoint(localTriangle.a.xyz,instance),0),
-              vec4f(shortInstancePoint(localTriangle.b.xyz,instance),0),
-              vec4f(shortInstancePoint(localTriangle.c.xyz,instance),0),
-              vec4f(0),vec4f(instance.emissive.xyz,0),
-              vec4f(0),vec4f(0),vec4u(0)
-            );
-            result+=emissiveTriangleIrradiance(
-              origin,normal,worldTriangle,radius
-            );
+          // The TLAS leaf identifies an emissive instance; traverse that
+          // asset's reusable BLAS in local space instead of brute-forcing all
+          // of its triangles for every receiver pixel. Radius/minScale is a
+          // conservative enclosing sphere under non-uniform scale, so this
+          // cannot cull a contributing world-space triangle.
+          let inverseRotation=vec4f(-instance.b.xyz,instance.b.w);
+          let localOrigin=shortQuaternionRotate(
+            origin-instance.a.xyz,inverseRotation
+          )/max(instance.c.xyz,vec3f(1e-6));
+          let minimumScale=max(1e-6,min(
+            abs(instance.c.x),min(abs(instance.c.y),abs(instance.c.z))
+          ));
+          let localRadius=radius/minimumScale;
+          let localRadiusSquared=localRadius*localRadius;
+          var blasStack:array<u32,64>;
+          var blasStackSize=1u;
+          blasStack[0]=instance.normalOct.x;
+          loop{
+            if(blasStackSize==0u){break;}
+            blasStackSize-=1u;
+            let blasNode=shortBvhNodes[blasStack[blasStackSize]];
+            if(pointAabbDistanceSquared(
+              localOrigin,blasNode.minMeta.xyz,blasNode.maxMeta.xyz
+            )>localRadiusSquared){continue;}
+            let blasLeft=bitcast<u32>(blasNode.minMeta.w);
+            let blasRight=bitcast<u32>(blasNode.maxMeta.w);
+            if((blasLeft&0x80000000u)!=0u){
+              let firstTriangle=blasLeft&0x7fffffffu;
+              for(var triangleOffset=0u;triangleOffset<blasRight;triangleOffset++){
+                let localTriangle=shortTriangles[firstTriangle+triangleOffset];
+                let worldTriangle=Triangle(
+                  vec4f(shortInstancePoint(localTriangle.a.xyz,instance),0),
+                  vec4f(shortInstancePoint(localTriangle.b.xyz,instance),0),
+                  vec4f(shortInstancePoint(localTriangle.c.xyz,instance),0),
+                  vec4f(0),vec4f(instance.emissive.xyz,0),
+                  vec4f(0),vec4f(0),vec4u(0)
+                );
+                result+=emissiveTriangleIrradiance(
+                  origin,normal,worldTriangle,radius
+                );
+              }
+            }else{
+              if(blasStackSize>61u){break;}
+              blasStack[blasStackSize]=blasLeft;
+              blasStack[blasStackSize+1u]=blasRight;
+              blasStackSize+=2u;
+            }
           }
         }
       }else{
@@ -3462,19 +4346,14 @@ fn cMinusOneIrradiance(
   // receiver change estimators as silhouettes move through the G-buffer.
   var ambientWeight=0.0;
   var ambientVisible=0.0;
-  let enclosureGuard=frame.pointColorIntensity.w<=0.0001
-    &&!finalFeatureEnabled(64u)&&atomicLoad(&frameState[8])==0u;
   // Open receivers retain the smooth paper cascade field. The exact ambient
   // visibility resolve is reserved for topology-classified enclosures and
   // explicitly closed-mesh back faces, where it prevents real environment
   // leakage rather than adding a sparse high-frequency AO term.
-  if(!enclosureGuard&&!closedBackFace){
+  if(!closedBackFace){
     return baseIrradiance+nearEmission;
   }
-  let visibilityGuardEnd=select(
-    intervalEnd,max(intervalEnd,frame.sceneBounds.w*1.001),
-    enclosureGuard||closedBackFace
-  );
+  let visibilityGuardEnd=max(intervalEnd,frame.sceneBounds.w*1.001);
   for(var directionIndexValue=0u;directionIndexValue<14u;directionIndexValue++){
     let direction=C_MINUS_DIRECTIONS[directionIndexValue];
     let cosine=max(0.0,dot(normal,direction));
@@ -3487,7 +4366,7 @@ fn cMinusOneIrradiance(
     // either the receiver or blocker crosses t_-1, without screen coordinates,
     // random noise, or a scene-dependent threshold.
     var visibility=smoothstep(0.0,intervalEnd,shortHit.t);
-    if((enclosureGuard||closedBackFace)&&visibility>0.0){
+    if(visibility>0.0){
       let farHit=traceShortRangeWatertight(
         origin,direction,visibilityGuardEnd+0.001
       );
@@ -3510,50 +4389,487 @@ fn cMinusOneIrradiance(
   let uv=vec2f(f32((index<<1u)&2u),f32(index&2u));
   return vec4f(uv*2.0-1.0,0.0,1.0);
 }
-@fragment fn finalFS(@builtin(position) position:vec4f)->@location(0) vec4f{
+// (owner-guarded 5x5 filtering lives in the temporal pass; the unused
+// final-pass variant was removed with the material-node estimator.)
+fn finalPackedOwner(marker:f32)->u32{
+  let code=u32(marker+0.5);
+  if((code&0x800000u)==0u){return 0xffffffffu;}
+  return (code>>14u)&63u;
+}
+fn finalClosedSurface(marker:f32)->bool{
+  return (u32(marker+0.5)&1u)!=0u;
+}
+fn exactPrimarySunVisibility(world:vec3f,normal:vec3f,direction:vec3f)->f32{
+  // Shadow-map depth bias and PCF can classify a thin jamb or moving door as
+  // visible even when the current scene BVH is blocked. Primary direct light
+  // uses the same watertight static+dynamic traversal as GI endpoints; twice
+  // the scene radius reaches the opposite side from every receiver.
+  let maxDistance=max(1.0,frame.sceneBounds.w*2.05);
+  let origin=world+normal*max(0.006,frame.envBaseSpacing.w*0.01);
+  let blocker=traceShortRangeWatertight(origin,direction,maxDistance);
+  return select(0.0,1.0,blocker.t>=maxDistance);
+}
+struct CurrentLightingOut{
+  // Linear irradiance is the only temporally reconstructed quantity.
+  @location(0) irradiance:vec4f,
+  // Direct/emission remains current. Debug modes use this as a display-ready
+  // bypass so temporal reconstruction cannot alter diagnostic truth.
+  @location(1) directOrDebug:vec4f,
+};
+@fragment fn finalFS(@builtin(position) position:vec4f)->CurrentLightingOut{
   let pixel=vec2i(position.xy);
   let world=textureLoad(worldTex,pixel,0);
   let uv=position.xy/frame.resolution.xy;
   if(world.w<0.5){
     let sky=mix(frame.envBaseSpacing.xyz*0.35,frame.envBaseSpacing.xyz*1.5,clamp(1.0-uv.y,0.0,1.0));
-    return vec4f(displayEncode(sky*frame.controls.y),1.0);
+    return CurrentLightingOut(
+      vec4f(0),vec4f(displayEncode(sky*frame.controls.y),1.0)
+    );
   }
   let albedoData=textureLoad(albedoTex,pixel,0);
   let albedo=albedoData.xyz;
   let normal=gbufferNormal(pixel);
   let mode=u32(frame.controls.z+0.5);
-  let sample=sampleIrradiance(world.xyz,normal);
-  if(mode==3u){return vec4f(normal*0.5+0.5,1.0);}
-  if(mode==4u){
-    return vec4f(mix(vec3f(0.35,0.025,0.015),vec3f(0.05,1.0,0.55),sample.w),1.0);
+  let dynamicOwner=finalPackedOwner(world.w);
+  // Rigid receivers reconstruct from the same sparse world field as static
+  // surfaces. Motion is handled where it belongs: cones whose support
+  // overlaps the swept-change TLAS reject history and re-resolve from the
+  // deterministic anchored current estimate, so a moving surface reads a
+  // smooth current-state field and a stationary one reads the converged
+  // accumulation — with no separate receiver estimator to switch to.
+  setFinalRigidSheetOverride(dynamicOwner,normal);
+  directionalSpread=0.0;
+  var sample=vec4f(0);
+  if(dynamicOwner!=0xffffffffu){
+    // Band-limit the reconstruction to the instance's PROJECTED size. On an
+    // instance a few pixels across, rasterization re-picks the sampled
+    // surface point and normal every frame, so neither the per-point spatial
+    // gather nor the per-normal octahedral lookup is a stable function of the
+    // object's pose. As the projection shrinks, blend the per-pixel
+    // directional sample toward the ambient (direction-averaged) field
+    // evaluated at the instance center: the same sparse field, read at the
+    // scale it can actually support — the reconstruction analogue of mip
+    // selection, not a separate estimator. The limit derives only from the
+    // rigid transform and the camera, so it is C1 along any smooth motion.
+    let instance=shortTriangles[frame.dynamicInfo.y+dynamicOwner];
+    let objectRadius=2.0*max(instance.c.x,max(instance.c.y,instance.c.z));
+    let viewDistance=max(0.05,length(world.xyz-frame.cameraPos.xyz));
+    let projectedRadiusPixels=objectRadius/viewDistance*frame.lodCamera.w;
+    directionalSpread=1.0-smoothstep(6.0,26.0,projectedRadiusPixels);
+    sample=sampleIrradiance(world.xyz,normal);
+  }else{
+    sample=sampleIrradiance(world.xyz,normal);
   }
-  if(mode==5u){return vec4f(albedo,1.0);}
+  if(mode==3u){
+    return CurrentLightingOut(vec4f(0),vec4f(normal*0.5+0.5,1.0));
+  }
+  if(mode==4u){
+    // Coverage is a validity predicate. Fractional cosine weight is estimator
+    // confidence and naturally changes as directional bins accumulate;
+    // displaying that weight as coverage falsely suggested validity toggles.
+    let covered=select(0.0,1.0,sample.w>0.001);
+    return CurrentLightingOut(
+      vec4f(0),
+      vec4f(mix(vec3f(0.35,0.025,0.015),vec3f(0.05,1.0,0.55),covered),1.0)
+    );
+  }
+  if(mode==5u){return CurrentLightingOut(vec4f(0),vec4f(albedo,1.0));}
   // Test-only mode 7 isolates the pre-C(-1) cascade gather and deliberately
   // returns before the short-interval resolve so its timing is independently
   // measurable.
   if(mode==7u){
-    return vec4f(displayEncode(sample.xyz*frame.controls.y),1.0);
+    return CurrentLightingOut(
+      vec4f(0),vec4f(displayEncode(sample.xyz*frame.controls.y),1.0)
+    );
   }
   let resolvedIrradiance=cMinusOneIrradiance(
-    world.xyz,normal,sample.xyz,fract(world.w)>0.125
+    world.xyz,normal,sample.xyz,finalClosedSurface(world.w)
   );
-  let indirect=albedo*resolvedIrradiance*frame.controls.x;
   let L=normalize(-frame.sunDirTime.xyz);
-  let sun=albedo*frame.sunColorIntensity.xyz*frame.sunColorIntensity.w*max(0.0,dot(normal,L))*shadowVisibility(world.xyz,normal);
+  let sunCosine=max(0.0,dot(normal,L));
+  let sunVisibility=select(
+    0.0,exactPrimarySunVisibility(world.xyz,normal,L),sunCosine>0.0
+  );
+  let sun=albedo*frame.sunColorIntensity.xyz*frame.sunColorIntensity.w
+    *sunCosine*sunVisibility;
   let toPoint=frame.pointPosRange.xyz-world.xyz;
   let distance=length(toPoint);
   let pointWindow=max(0.0,1.0-distance/frame.pointPosRange.w);
   let point=albedo*frame.pointColorIntensity.xyz*frame.pointColorIntensity.w*max(0.0,dot(normal,toPoint/max(distance,1e-4)))*pointWindow*pointWindow/(1.0+0.06*distance*distance)*pointShadowVisibility(world.xyz,normal);
   let emissive=surfaceEmission(pixel);
   let direct=sun+point+emissive;
-  var color=direct+indirect;
-  if(mode==1u){color=indirect;}
-  if(mode==2u){color=direct;}
-  // Test-only mode 6 removes material color from the comparison so the
-  // motion gate measures the reconstructed irradiance field itself.
-  if(mode==6u){color=resolvedIrradiance;}
+  // Negative confidence is a conservative local transport hazard. The
+  // temporal pass then uses the deterministic current estimate immediately
+  // rather than retaining radiance beside a swept mover.
+  // A mover necessarily overlaps its own swept hierarchy. Exact owner-local
+  // reprojection in the next pass is the correct validity test for that
+  // receiver; the local swept guard applies only to immutable receivers.
+  let safeHistory=finalPackedOwner(world.w)!=0xffffffffu
+    ||finalDynamicPointHistoryValid(
+      world.xyz,max(0.02,frame.envBaseSpacing.w*2.25)
+    );
+  let signedConfidence=select(-sample.w,sample.w,safeHistory);
+  return CurrentLightingOut(
+    vec4f(max(resolvedIrradiance,vec3f(0)),signedConfidence),
+    vec4f(max(direct,vec3f(0)),1.0)
+  );
+}
+`;
+
+// Motion-aware reconstruction is an explicitly separate dynamic-geometry
+// extension. The paper's world-space radiance-cascade history remains the
+// estimator; this pass stabilizes only its linear indirect irradiance and
+// never filters current direct light or visible emission.
+export const temporalShader = /* wgsl */`
+struct FrameUniforms {
+  viewProj: mat4x4<f32>,
+  sunViewProj: mat4x4<f32>,
+  cameraPos: vec4f,
+  sunDirTime: vec4f,
+  sunColorIntensity: vec4f,
+  pointPosRange: vec4f,
+  pointColorIntensity: vec4f,
+  envBaseSpacing: vec4f,
+  resolution: vec4f,
+  controls: vec4f,
+  sceneBounds: vec4f,
+  dynamicInfo: vec4u,
+  previousViewProj: mat4x4<f32>,
+  lodCamera: vec4f,
+};
+struct Triangle {
+  a:vec4f, b:vec4f, c:vec4f, albedo:vec4f, emissive:vec4f,
+  uvAB:vec4f, uvCMaterial:vec4f, normalOct:vec4u,
+};
+@group(0) @binding(0) var<uniform> frame:FrameUniforms;
+@group(0) @binding(1) var currentIrradiance:texture_2d<f32>;
+@group(0) @binding(2) var currentDirect:texture_2d<f32>;
+@group(0) @binding(3) var currentWorld:texture_2d<f32>;
+@group(0) @binding(4) var currentNormal:texture_2d<f32>;
+@group(0) @binding(5) var previousIrradiance:texture_2d<f32>;
+@group(0) @binding(6) var previousWorld:texture_2d<f32>;
+@group(0) @binding(7) var previousNormal:texture_2d<f32>;
+@group(0) @binding(8) var currentAlbedo:texture_2d<f32>;
+@group(0) @binding(9) var<storage,read> instanceRecords:array<Triangle>;
+
+fn feature(bit:u32)->bool{return (u32(frame.cameraPos.w+0.5)&bit)!=0u;}
+fn decodeNormal(texture:texture_2d<f32>,pixel:vec2i)->vec3f{
+  let oct=textureLoad(texture,pixel,0).xy;
+  var normal=vec3f(oct,1.0-abs(oct.x)-abs(oct.y));
+  if(normal.z<0.0){
+    let old=normal.xy;
+    normal.x=(1.0-abs(old.y))*select(-1.0,1.0,old.x>=0.0);
+    normal.y=(1.0-abs(old.x))*select(-1.0,1.0,old.y>=0.0);
+  }
+  return normalize(normal);
+}
+fn rotate(vector:vec3f,q:vec4f)->vec3f{
+  let doubled=2.0*cross(q.xyz,vector);
+  return vector+q.w*doubled+cross(q.xyz,doubled);
+}
+fn owner(marker:f32)->u32{
+  let code=u32(marker+0.5);
+  if((code&0x800000u)==0u){return 0xffffffffu;}
+  return (code>>14u)&63u;
+}
+fn sameSide(a:f32,b:f32)->bool{
+  return (u32(a+0.5)&1u)==(u32(b+0.5)&1u);
+}
+fn samePrimitive(a:f32,b:f32)->bool{
+  return (u32(a+0.5)>>2u)==(u32(b+0.5)>>2u);
+}
+fn compatibleTemporalSurface(a:f32,b:f32)->bool{
+  if(!sameSide(a,b)){return false;}
+  let ownerA=owner(a);
+  let ownerB=owner(b);
+  if(ownerA!=0xffffffffu||ownerB!=0xffffffffu){
+    // A rigid owner is the topology identity. Tight expected-world and normal
+    // tests below provide the material-point identity across tessellation
+    // edges, where requiring the same raster primitive would reject almost all
+    // history on a moving sphere or detailed production mesh.
+    return ownerA!=0xffffffffu&&ownerA==ownerB;
+  }
+  return samePrimitive(a,b);
+}
+fn compatibleTemporalHistorySurface(a:f32,b:f32)->bool{
+  if(!compatibleTemporalSurface(a,b)){return false;}
+  // Owner identity permits surface-aware spatial filtering, but temporal
+  // bilinear taps must represent the same material triangle. Otherwise a
+  // small rotating sphere/torus can pull last frame's irradiance from an
+  // adjacent face and turn subpixel raster motion into a bright flash.
+  return samePrimitive(a,b);
+}
+fn expectedPrevious(world:vec3f,normal:vec3f,marker:f32)->array<vec3f,2>{
+  let id=owner(marker);
+  if(id==0xffffffffu){return array<vec3f,2>(world,normal);}
+  let current=instanceRecords[frame.dynamicInfo.y+id];
+  let previous=instanceRecords[frame.dynamicInfo.y+64u+id];
+  let local=rotate(world-current.a.xyz,vec4f(-current.b.xyz,current.b.w))
+    /max(current.c.xyz,vec3f(1e-6));
+  let localNormal=rotate(normal,vec4f(-current.b.xyz,current.b.w))*current.c.xyz;
+  let oldWorld=previous.a.xyz+rotate(local*previous.c.xyz,previous.b);
+  let oldNormal=normalize(rotate(
+    localNormal/max(previous.c.xyz,vec3f(1e-6)),previous.b
+  ));
+  return array<vec3f,2>(oldWorld,oldNormal);
+}
+fn sameCurrentSurface(
+  centerWorld:vec4f,centerNormal:vec3f,pixel:vec2i,normalFloor:f32
+)->bool{
+  let sampleWorld=textureLoad(currentWorld,pixel,0);
+  if(sampleWorld.w<0.5
+    ||!compatibleTemporalSurface(sampleWorld.w,centerWorld.w)){return false;}
+  let sampleNormal=decodeNormal(currentNormal,pixel);
+  if(dot(sampleNormal,centerNormal)<normalFloor){return false;}
+  let delta=sampleWorld.xyz-centerWorld.xyz;
+  let radius=max(0.02,frame.envBaseSpacing.w*1.4);
+  // The plane guard is meaningful only at directional-detail scales. When the
+  // receiver's footprint approaches the probe spacing, its whole body is one
+  // material patch at this resolution and curvature must not reject support.
+  let planeLimit=mix(
+    max(0.006,frame.envBaseSpacing.w*0.04),
+    radius,
+    clamp(1.0-(normalFloor-0.55)/0.41,0.0,1.0)
+  );
+  return dot(delta,delta)<=radius*radius
+    &&abs(dot(delta,centerNormal))<=planeLimit;
+}
+fn validPreviousTap(
+  pixel:vec2i,expectedWorld:vec3f,expectedNormal:vec3f,currentMarker:f32,
+  worldTolerance:f32
+)->bool{
+  let dimensions=vec2i(textureDimensions(previousWorld));
+  if(any(pixel<vec2i(0))||any(pixel>=dimensions)){return false;}
+  let oldWorld=textureLoad(previousWorld,pixel,0);
+  if(oldWorld.w<0.5
+    ||!compatibleTemporalHistorySurface(oldWorld.w,currentMarker)){return false;}
+  let delta=oldWorld.xyz-expectedWorld;
+  if(dot(delta,delta)>worldTolerance*worldTolerance){return false;}
+  let normalThreshold=select(0.98,0.96,owner(currentMarker)!=0xffffffffu);
+  return dot(decodeNormal(previousNormal,pixel),expectedNormal)>=normalThreshold;
+}
+fn displayEncode(color:vec3f)->vec3f{
+  let mapped=max(color,vec3f(0));
+  let filmic=(mapped*(2.51*mapped+0.03))/(mapped*(2.43*mapped+0.59)+0.14);
+  return pow(clamp(filmic,vec3f(0),vec3f(1)),vec3f(1.0/2.2));
+}
+@vertex fn temporalVS(@builtin(vertex_index) index:u32)->@builtin(position) vec4f{
+  let uv=vec2f(f32((index<<1u)&2u),f32(index&2u));
+  return vec4f(uv*2.0-1.0,0.0,1.0);
+}
+struct TemporalOut{
+  @location(0) composite:vec4f,
+  @location(1) irradiance:vec4f,
+};
+@fragment fn temporalFS(@builtin(position) position:vec4f)->TemporalOut{
+  let pixel=vec2i(position.xy);
+  let dimensions=vec2i(textureDimensions(currentWorld));
+  let world=textureLoad(currentWorld,pixel,0);
+  let directOrDebug=textureLoad(currentDirect,pixel,0).xyz;
+  if(world.w<0.5){return TemporalOut(vec4f(directOrDebug,1),vec4f(0));}
+  let mode=u32(frame.controls.z+0.5);
+  let currentSample=textureLoad(currentIrradiance,pixel,0);
+  let normal=decodeNormal(currentNormal,pixel);
+  let currentOwner=owner(world.w);
+  let dynamicReceiver=currentOwner!=0xffffffffu;
+  // Static receivers preserve the paper-path cross reconstruction. Rigid
+  // receivers need a wider surface-bilateral footprint because the exact
+  // material point moves continuously while raster pixel centers change
+  // discretely; indirect irradiance is low-frequency, but edges remain guarded
+  // by sameCurrentSurface's owner, side, normal, world, and plane tests.
+  let dynamicSpatial=currentOwner!=0xffffffffu;
+  // Footprint-adaptive support: when a rigid receiver's projected material
+  // footprint approaches the probe spacing, its whole body is one material
+  // patch at this sampling rate, so curvature (normal) differences between
+  // taps are sub-resolution detail and must not shrink the filter support.
+  var spatialNormalFloor=0.96;
+  var smallProjection=false;
+  if(dynamicSpatial){
+    // Pose-smooth band limit by the instance's projected size (see finalFS):
+    // raster-neighbor footprints are population-dependent and flicker on
+    // instances a few pixels across.
+    let instance=instanceRecords[frame.dynamicInfo.y+currentOwner];
+    let objectRadius=2.0*max(instance.c.x,max(instance.c.y,instance.c.z));
+    let viewDistance=max(0.05,length(world.xyz-frame.cameraPos.xyz));
+    let projectedRadiusPixels=objectRadius/viewDistance*frame.lodCamera.w;
+    spatialNormalFloor=mix(
+      0.96,0.55,
+      1.0-smoothstep(6.0,26.0,projectedRadiusPixels)
+    );
+    // Below the sampling limit the whole instance is one displayed feature;
+    // averaging every one of its pixels is the only stable estimate raster
+    // can express.
+    smallProjection=projectedRadiusPixels<16.0;
+  }
+  let centerWeight=select(3.0,1.0,dynamicSpatial);
+  var currentSum=max(currentSample.xyz,vec3f(0))*centerWeight;
+  var currentWeight=centerWeight;
+  var neighborhoodMin=max(currentSample.xyz,vec3f(0));
+  var neighborhoodMax=neighborhoodMin;
+  let tapRadius=select(2,3,smallProjection);
+  for(var y=-3;y<=3;y++){
+    for(var x=-3;x<=3;x++){
+      if(x==0&&y==0){continue;}
+      if(abs(x)>tapRadius||abs(y)>tapRadius){continue;}
+      if(!dynamicSpatial&&(abs(x)>1||abs(y)>1||abs(x)+abs(y)>1)){continue;}
+      let tap=clamp(pixel+vec2i(x,y),vec2i(0),dimensions-vec2i(1));
+      if(!sameCurrentSurface(world,normal,tap,spatialNormalFloor)){continue;}
+      let value=max(textureLoad(currentIrradiance,tap,0).xyz,vec3f(0));
+      neighborhoodMin=min(neighborhoodMin,value);
+      neighborhoodMax=max(neighborhoodMax,value);
+      let weight=exp(select(-0.5,select(-0.32,-0.18,smallProjection),dynamicSpatial)*f32(x*x+y*y));
+      currentSum+=value*weight;
+      currentWeight+=weight;
+    }
+  }
+  // Rigid receivers read the shared sparse field, whose per-pixel gather has
+  // per-frame variance where motion rejects history. The wider owner-guarded
+  // 5x5 world-bilateral loop above is a pure current-frame filter: owner,
+  // side, normal, world, and plane tests keep it from crossing silhouettes,
+  // so it removes sparse-ray variance without any temporal state.
+  let current=currentSum/currentWeight;
+  var history=vec3f(0);
+  var historyWeight=0.0;
+  // Negative confidence is the explicit swept-transport hazard produced by
+  // finalFS. Source changes are globally influential, so neither condition may
+  // reuse old screen irradiance even when the visible surface reprojects.
+  // Every immutable receiver uses only the authoritative paper-path world-
+  // cone result: recursive screen history could hide a camera-dependent field
+  // defect or trail a blocker. A rigid
+  // receiver is different—its exact owner-local transform provides material-
+  // point reprojection. Reuse is still rejected by owner, side, expected
+  // world, normal, teleport, source-step, and neighborhood tests below.
+  let expected=expectedPrevious(world.xyz,normal,world.w);
+  // A discontinuity belongs to the receiver that made it.  The CPU flag is a
+  // conservative scene-wide signal (one large mover can raise it for every
+  // owner), so using it here discarded exact reprojection on unrelated rigid
+  // objects.  Measure this material point against its own previous transform;
+  // ordinary rigid motion remains valid while a true owner jump is rejected.
+  let ownerDiscontinuity=dynamicReceiver&&feature(2048u)
+    &&length(world.xyz-expected[0])>max(0.025,frame.envBaseSpacing.w*0.25);
+  // A dynamic result must be a pure function of the current scene. Previous
+  // screen lighting is never consulted: this prevents lag, ghost trails, and
+  // stale light when a hidden material point becomes visible again.
+  let temporalValid=false;
+  let baseTolerance=max(0.002,frame.envBaseSpacing.w*0.02);
+  var projectedFootprint=0.0;
+  var historyWorldTolerance=baseTolerance;
+  if(currentOwner!=0xffffffffu){
+    let footprintX=textureLoad(currentWorld,clamp(
+      pixel+vec2i(1,0),vec2i(0),dimensions-vec2i(1)
+    ),0);
+    let footprintY=textureLoad(currentWorld,clamp(
+      pixel+vec2i(0,1),vec2i(0),dimensions-vec2i(1)
+    ),0);
+    projectedFootprint=max(
+      select(0.0,length(footprintX.xyz-world.xyz),owner(footprintX.w)==currentOwner),
+      select(0.0,length(footprintY.xyz-world.xyz),owner(footprintY.w)==currentOwner)
+    );
+    // A subpixel material point is surrounded by four previous pixel-center
+    // samples, so a fixed sub-pixel world epsilon rejects valid history as
+    // soon as a curved mover rotates. Derivatives provide the projected
+    // material footprint; owner, side, and 0.98 normal tests still prevent
+    // this adaptive tolerance from crossing a silhouette or thin wall.
+    historyWorldTolerance=max(
+      baseTolerance,
+        min(frame.envBaseSpacing.w,projectedFootprint*2.25)
+    );
+  }
+  if(temporalValid){
+    let clip=frame.previousViewProj*vec4f(expected[0],1);
+    if(clip.w>1e-6){
+      let ndc=clip.xy/clip.w;
+      let previousPixel=vec2f(
+        (ndc.x*0.5+0.5)*f32(dimensions.x),
+        (0.5-ndc.y*0.5)*f32(dimensions.y)
+      )-vec2f(0.5);
+      if(dynamicReceiver){
+        // Reconstruct a rigid material point from a small world-bilateral
+        // footprint. Four bilinear pixel centers are discontinuous when a
+        // subpixel rotating primitive gains or loses one covered tap; the
+        // object-local/world/normal/primitive gates make this wider gather a
+        // stable approximation of the same low-frequency material irradiance.
+        let center=vec2i(floor(previousPixel+vec2f(0.5)));
+        for(var oy=-2;oy<=2;oy++){
+          for(var ox=-2;ox<=2;ox++){
+            let tap=center+vec2i(ox,oy);
+            if(!validPreviousTap(
+              tap,expected[0],expected[1],world.w,historyWorldTolerance
+            )){continue;}
+            let oldWorld=textureLoad(previousWorld,tap,0).xyz;
+            let worldRatio=dot(oldWorld-expected[0],oldWorld-expected[0])
+              /max(1e-8,historyWorldTolerance*historyWorldTolerance);
+            let screenDelta=vec2f(tap)+vec2f(0.5)-previousPixel;
+            let weight=exp(-0.32*dot(screenDelta,screenDelta)-1.25*worldRatio);
+            history+=max(textureLoad(previousIrradiance,tap,0).xyz,vec3f(0))*weight;
+            historyWeight+=weight;
+          }
+        }
+      }else{
+        let base=vec2i(floor(previousPixel));
+        let fraction=fract(previousPixel);
+        for(var tapIndex=0u;tapIndex<4u;tapIndex++){
+          let offset=vec2i(i32(tapIndex&1u),i32((tapIndex>>1u)&1u));
+          let tap=base+offset;
+          if(!validPreviousTap(
+            tap,expected[0],expected[1],world.w,historyWorldTolerance
+          )){continue;}
+          let weight=select(1.0-fraction.x,fraction.x,offset.x==1)
+            *select(1.0-fraction.y,fraction.y,offset.y==1);
+          history+=max(textureLoad(previousIrradiance,tap,0).xyz,vec3f(0))*weight;
+          historyWeight+=weight;
+        }
+      }
+    }
+  }
+  var resolved=current;
+  var appliedHistoryBlend=0.0;
+  let requiredHistoryWeight=select(0.999,0.45,currentOwner!=0xffffffffu);
+  if(historyWeight>requiredHistoryWeight){
+    history/=historyWeight;
+    let span=neighborhoodMax-neighborhoodMin;
+    let clipExpansion=select(0.25,2.0,dynamicReceiver);
+    let clipped=clamp(
+      history,neighborhoodMin-span*clipExpansion,neighborhoodMax+span*clipExpansion
+    );
+    let currentLength=max(0.02,length(current));
+    let residual=length(clipped-current)/currentLength;
+    var blend=0.95*(1.0-smoothstep(0.25,1.0,residual));
+    if(dynamicReceiver){
+      // Exact owner-local correspondence is materially stronger than a
+      // screen-space residual. A sparse-current outlier must not disable the
+      // very filter intended to remove it. Current-neighborhood clipping above
+      // bounds the reused value, and every topology/source/disocclusion test
+      // has already run, so keep a stable EMA floor for rigid material points.
+      // Continuously changing sources use a more responsive floor.
+      let sourceMoving=feature(16384u)||feature(4096u);
+      blend=max(blend,select(0.68,0.90,!sourceMoving));
+    }
+    // Actual continuously moving sources need a stable estimator, not a UI
+    // checkbox-dependent cap. Topology, owner, disocclusion, and neighborhood
+    // clipping have already validated this sample, so retain a responsive but
+    // high-history floor that suppresses per-frame ray-population noise.
+    if(feature(16384u)||feature(4096u)){blend=max(blend,0.96);}
+    resolved=mix(current,max(clipped,vec3f(0)),blend);
+    appliedHistoryBlend=blend;
+  }
+  // A sealed current neighborhood is authoritative and exactly cancels any
+  // bright history. This is both a leak guard and the closed-door invariant.
+  if(max(neighborhoodMax.x,max(neighborhoodMax.y,neighborhoodMax.z))<1e-7){
+    resolved=vec3f(0);
+    appliedHistoryBlend=0.0;
+  }
+  let albedo=textureLoad(currentAlbedo,pixel,0).xyz;
+  var color=directOrDebug+albedo*resolved*frame.controls.x;
+  if(mode==1u){color=albedo*resolved*frame.controls.x;}
+  if(mode==2u){color=directOrDebug;}
+  if(mode==6u){color=resolved;}
   if(mode<=2u||mode==6u){color=displayEncode(color*frame.controls.y);}
-  return vec4f(color,1.0);
+  if(mode==3u||mode==4u||mode==5u||mode==7u){color=directOrDebug;}
+  // Alpha is audit-only metadata; history consumes RGB exclusively. Keeping
+  // the actually applied blend makes temporal acceptance measurable without
+  // shader atomics or a production hot-path readback.
+  return TemporalOut(vec4f(color,1),vec4f(resolved,appliedHistoryBlend));
 }
 `;
 

@@ -5,6 +5,7 @@ import test from "node:test";
 const engine = await readFile(new URL("../public/rc/engine.js", import.meta.url), "utf8");
 const shaders = await readFile(new URL("../public/rc/shaders.js", import.meta.url), "utf8");
 const scenes = await readFile(new URL("../public/rc/scenes.js", import.meta.url), "utf8");
+const dynamic = await readFile(new URL("../public/rc/dynamic.js", import.meta.url), "utf8");
 const app = await readFile(new URL("../app/radiance-cascades-lab.tsx", import.meta.url), "utf8");
 const standalone = await readFile(new URL("../standalone/index.html", import.meta.url), "utf8");
 
@@ -28,6 +29,9 @@ test("production audit gates camera motion, moving lights, floor loops, and sun 
   assert.match(engine, /runMovingLightResponseAudit/);
   assert.match(engine, /responseRatio <= 0\.72/);
   assert.match(engine, /movingLights: true/);
+  assert.match(engine, /movingLights: true,[\s\S]*animateCamera: false/);
+  assert.match(engine, /accelerations\.length === frames - 2/);
+  assert.match(engine, /percentile\(0\.99\) <= 6/);
   assert.match(engine, /runFloorRoundTripAudit/);
   assert.match(engine, /leg: direction > 0 \? "forward" : "backward"/);
   assert.match(engine, /const coverageExact = debugMode === 4/);
@@ -53,8 +57,25 @@ test("production audit gates camera motion, moving lights, floor loops, and sun 
   assert.match(engine, /r\.enclosureLeak && !r\.enclosureLeak\.passed/);
   assert.match(engine, /runDoorZoomContinuityAudit/);
   assert.match(engine, /automaticTest === "door-zoom"/);
+  assert.match(shaders, /let overlapStart = boundary \* 0\.75/);
+  assert.match(shaders, /let start=boundary\*0\.75/);
+  assert.match(shaders, /for\(var candidateLod=0u;candidateLod<4u;candidateLod\+\+\)/);
+  assert.match(shaders, /if\(fine\.w<0\.001\)\{return resident;\}/);
   assert.match(engine, /samples\.every\(\(sample\) => sample\.environmentAccess\)/);
+  assert.match(engine, /wheel -120/);
+  assert.match(engine, /wheel \+240 reversal/);
+  assert.match(engine, /teleport inward/);
+  assert.match(engine, /immediateToConverged: this\.compareFinalFrames/);
+  assert.match(engine, /event\.immediateToConverged\.p99ByteDelta <= 6/);
+  assert.match(engine, /&& lodResidency\.passed/);
   assert.match(engine, /closedDoor\.luminance\.maximumLuminanceByte <= 1/);
+  assert.match(engine, /componentDollies\.every\(\(dolly\) => dolly\.passed\)/);
+  assert.match(engine, /const openIndirectReference = await this\.runPathTracedReferenceAudit/);
+  assert.match(engine, /&& openIndirectReference\.passed/);
+  assert.match(shaders, /fn exactPrimarySunVisibility/);
+  assert.match(engine, /openIndirectReference\.p99Absolute <= 0\.12/);
+  assert.match(engine, /openSpatialReferencesPassed/);
+  assert.match(engine, /const dollyPath = \[\.\.\.distances, \.\.\.distances\.slice\(0, -1\)\.reverse\(\)\]/);
   assert.match(engine, /r\.doorZoomContinuity && !r\.doorZoomContinuity\.passed/);
   assert.match(engine, /classificationMismatchRatio <= 0\.06/);
   assert.match(engine, /pointFaceCoverageRequired = this\.sceneIndex === 10/);
@@ -65,10 +86,27 @@ test("production audit gates camera motion, moving lights, floor loops, and sun 
   assert.match(engine, /select\.replaceChildren\(\)/);
   assert.match(engine, /globalThis\.__splitRCLoaderGeneration !== loaderGeneration/);
   assert.match(engine, /if \(this\.destroyed\) return false/);
-  assert.match(engine, /this\.animateLights[\s\S]*\? 0\.965/);
+  assert.match(shaders, /else if\(featureEnabled\(16384u\)&&historySampleCap==65535u\)/);
+  assert.match(engine, /analyticSourceMoving \? 16384 : 0/);
+  assert.match(engine, /const pointPosition = add3\(this\.scene\.target/);
+  assert.doesNotMatch(engine, /const pointPosition = add3\(this\.camera\.target/);
+  assert.match(engine, /queue\.writeBuffer\([\s\S]*this\.emptyPersistentIrradiance\.subarray/);
+  assert.match(engine, /persistent world-key c0 resolved-cone cache[\s\S]*GPU\.STORAGE \| GPU\.COPY_SRC \| GPU\.COPY_DST/);
+  assert.doesNotMatch(shaders, /featureEnabled\(32u\)\|\|featureEnabled\(16384u\)/);
+  assert.doesNotMatch(shaders, /feature\(32u\)\|\|feature\(16384u\)/);
+  assert.match(engine, /transportSourceMoving[\s\S]*\? 0\.992/);
   assert.doesNotMatch(engine, /multibounce|roughSpecular|cMinusOne/);
   assert.match(engine, /animate-lights[\s\S]*this\.resetProbeHistory\(\)/);
-  assert.doesNotMatch(engine, /retainProbes|retainPreviousProbes|temporalPipeline|historyTextures|previousWorldTexture/);
+  // Dynamic rigid geometry is an explicitly separate extension. It may use
+  // exact motion reconstruction, but direct light and emission must remain
+  // current and the paper's probe estimator must not retain screen history.
+  assert.doesNotMatch(engine, /retainProbes|retainPreviousProbes|historyTextures/);
+  assert.match(engine, /motion-aware indirect reconstruction/);
+  assert.match(engine, /previousWorldTexture/);
+  assert.match(engine, /current unfiltered direct lighting/);
+  assert.match(shaders, /previousViewProj/);
+  assert.match(shaders, /current same-surface range|sameCurrentSurface/);
+  assert.match(shaders, /if\(mode==2u\)\{color=directOrDebug;\}/);
 });
 
 test("quality presets preserve Algorithm 3's one-ray-per-screen-pixel assignment", () => {
@@ -98,7 +136,7 @@ test("path-reference gate classifies dark spots and bright leaks", () => {
   assert.match(engine, /report\.paperSceneStrictPassed/);
   assert.match(engine, /report\.nrmse <= 0\.25/);
   assert.match(engine, /report\.p99Absolute <= 0\.10/);
-  assert.match(engine, /width = 64, height = 36, samples = 512/);
+  assert.match(engine, /width = 64,[\s\S]*height = 36,[\s\S]*samples = 512/);
   assert.match(engine, /warmup: 192/);
   assert.match(engine, /renderReferenceComparison/);
   // Analytic C(-1) and stochastic c0 must partition the same receiver-to-
@@ -119,6 +157,28 @@ test("sampling epochs replay deterministically without stale ray-map tags", () =
   assert.match(engine, /this\.sampleFrameIndex = \(this\.sampleFrameIndex \+ 1\) >>> 0/);
   assert.match(engine, /this\.sampleEpoch = \(\(this\.sampleEpoch \+ 1\) >>> 0\) \|\| 1/);
   assert.doesNotMatch(engine, /sampleEpoch & 0xffff/);
+  assert.match(shaders, /\*alpha\+jitter/);
+  assert.match(shaders, /sampleFrame\*0xc13fa9a9u/);
+  assert.match(shaders, /sampleFrame\*0x91e10da5u/);
+  assert.match(shaders, /fn staticAnchorForLod/);
+  assert.match(shaders, /fn staticDirectionNeedsCurrentSample/);
+  assert.match(shaders, /selectStaticHazardRepresentatives/);
+  assert.match(shaders, /selectSecondStaticHazardRepresentatives/);
+  assert.match(shaders, /atomicMax\(&state\[hazardWinnerIndex/);
+  assert.match(shaders, /fineAnchor=staticAnchorForLod/);
+  assert.match(shaders, /coarseAnchor=staticAnchorForLod/);
+  assert.match(engine, /select deterministic static transport hazard representatives/);
+  assert.match(engine, /select second deterministic static transport representatives/);
+  assert.match(shaders, /fineAnchor\.needed==0u&&coarseAnchor\.needed==0u/);
+  assert.match(engine, /start,immediateReturned,\{ surfaceOnly: true \}/);
+  assert.match(engine, /immediateClosure\.matchedPixelRatio >= 0\.98/);
+  assert.match(engine, /immediateClosure\.maxByteDelta <= 24/);
+  assert.match(engine, /dynamicImmediateClosure\.matchedPixelRatio >= 0\.9/);
+  assert.match(engine, /dynamicImmediateClosure\.maxByteDelta <= 32/);
+  assert.match(shaders, /stableSequenceIndex=sequenceIndex\+sampleLane\*samplesPerFrame\(\)/);
+  assert.doesNotMatch(shaders, /jitter=vec2f\(0\)/);
+  assert.match(shaders, /result\/max\(cosineWeight,1e-6\)/);
+  assert.match(shaders, /let confidence=clamp\(cosineWeight\*\(4\.0\/32\.0\),0\.0,1\.0\)/);
 });
 
 test("presentation preserves shadow detail and height fields use smooth normals", () => {
@@ -131,7 +191,7 @@ test("presentation preserves shadow detail and height fields use smooth normals"
 });
 
 test("production module graph uses a release cache key", () => {
-  const releaseKey = "v=2026-08-01-dynamic-tlas10";
+  const releaseKey = "v=2026-08-02-unified-dynamics1";
   assert.ok(app.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(standalone.includes(`/rc/engine.js?${releaseKey}`));
   assert.ok(engine.includes(`./math.js?${releaseKey}`));
@@ -144,14 +204,79 @@ test("dynamic geometry uses two-level traversal and motion-local history rejecti
   assert.match(engine, /createDynamicScene/);
   assert.match(engine, /dynamicUploadBytes < 65536/);
   assert.match(engine, /runDynamicRoundTripAudit/);
+  assert.match(engine, /compareDynamicTemporalAcceleration/);
+  assert.match(engine, /dynamicAccelerationMatchedPixelRatioMin/);
+  assert.match(engine, /dynamicAccelerationP999Max/);
+  assert.match(engine, /dynamicAccelerationP95Max <= 4/);
+  assert.match(engine, /dynamicAccelerationP999Max <= 12/);
+  assert.match(engine, /dynamicRawTransportAcceleration\.max <= 0\.10/);
+  assert.match(engine, /detail\.historyBlendCoverage === 0/);
+  assert.match(engine, /historyAcceptedPixels === 0/);
+  assert.match(engine, /p999Delta <= limits\.p999/);
+  assert.match(engine, /historyBlendCoverage/);
+  assert.match(engine, /if \(this\.dynamicScene && !movingLights\) this\.dynamicScene\.emissionScale = 0/);
   assert.match(engine, /runDynamicEmitterResponseAudit/);
   assert.match(engine, /pointApplicable = this\.pointShadowsEnabled/);
   assert.match(engine, /sceneParams\.has\("time"\)/);
   assert.match(shaders, /fn traceDynamicInstance/);
   assert.match(shaders, /fn traceShortDynamicInstance/);
   assert.match(shaders, /fn dynamicConeHistoryValid/);
+  assert.match(shaders, /fn dynamicConeRootClear/);
+  assert.match(shaders, /frame\.dynamicInfo\.x,origin,directionIndexIn,cascade,lod/);
+  assert.match(shaders, /fn staticSurfaceCode/);
+  assert.match(shaders, /fn hazardCandidate/);
+  assert.match(shaders, /lane\*0x009e3779u/);
   assert.match(shaders, /frame\.dynamicInfo\.w/);
+  assert.match(shaders, /cascadeSpacing\(cascade,lod\)\*0\.8660254\+angularRadius/);
+  assert.match(shaders, /minimumCosine=min\(minimumCosine,dot\(direction,decodeEqualArea\(cornerUv\)\)\)/);
+  assert.match(shaders, /!dynamicConeHistoryValid\(/);
+  assert.match(shaders, /historySampleCap=0u/);
+  assert.doesNotMatch(shaders, /if\(featureEnabled\(1024u\)\)\{\s*historySampleCap=65535u/);
   assert.match(shaders, /fn finalDynamicPointHistoryValid/);
+  // The owner-local material-node estimator is fully removed: rigid
+  // receivers seed, trace, and reconstruct through the shared world field.
+  assert.doesNotMatch(shaders, /fn traceDynamicCurrentRadiance/);
+  assert.doesNotMatch(shaders, /fn dynamicMaterialStencil/);
+  assert.doesNotMatch(shaders, /fn collectDynamicMaterialNodes/);
+  assert.doesNotMatch(shaders, /fn traceDynamicMaterialNodes/);
+  assert.doesNotMatch(shaders, /fn shadeDynamicMaterialNodes/);
+  assert.doesNotMatch(shaders, /DYNAMIC_NODE_DIRECTION_SAMPLES/);
+  // Rigid receivers use the unified world-field path: the owner-local
+  // material-node passes must NOT be dispatched.
+  assert.doesNotMatch(engine, /collect visible owner-local material nodes/);
+  assert.doesNotMatch(engine, /trace current-state owner-local material nodes/);
+  assert.match(engine, /runDynamicStaleShadowAudit/);
+  assert.match(engine, /dynamic-simultaneous/);
+  assert.match(engine, /DYNAMIC_MOTION_AUDIT_POSE/);
+  assert.match(shaders, /historySampleCap=select\(12u,0u,featureEnabled\(2048u\)\)/);
+  assert.match(shaders, /rigidSheetOverride/);
+  assert.match(shaders, /dynamicEndpointShadingValid/);
+  assert.match(shaders, /fn samplePrimaryIrradiance[\s\S]*residentDistance=5u/);
+  assert.match(shaders, /fn exactPrimarySunVisibility/);
+  assert.match(shaders, /sunCosine\*sunVisibility/);
+  assert.match(engine, /runDynamicFieldCoverageAudit/);
+  assert.match(engine, /rawIrradiancePixels\[index \+ 3\]/);
+  assert.match(dynamic, /orderedSourceIndices/);
+  assert.match(shaders, /let temporalValid=false/);
+  assert.doesNotMatch(shaders, /temporalValid=feature\(8u\)&&feature\(256u\)&&dynamicReceiver/);
+  assert.match(shaders, /appliedHistoryBlend/);
+  // Unified-path stability mechanisms.
+  assert.match(shaders, /pixelSurfaceClass/);
+  assert.match(shaders, /setRigidSheetOverride/);
+  assert.match(shaders, /fn tileAmbientMean/);
+  assert.match(shaders, /directionalSpread/);
+  assert.match(shaders, /let fraction=linearFraction\*linearFraction\*\(vec3f\(3\.0\)-2\.0\*linearFraction\)/);
+  assert.match(dynamic, /SWEEP_WINDOW = 12/);
+  assert.match(shaders, /resolvePersistentProbeSlot/);
+  assert.match(shaders, /persistentEnabled=featureEnabled\(8u\)&&!featureEnabled\(128u\)/);
+  assert.match(engine, /\(!this\.dynamicScene \|\| this\.dynamicQuiescent\)/);
+  assert.match(engine, /if \(movedNow && this\.dynamicQuiescent\)/);
+  assert.match(engine, /this\.dynamicQuiescent = !movedNow/);
+  assert.match(shaders, /persistentDirectionBase/);
+  assert.match(engine, /persistent world-key c0 resolved-cone cache/);
+  assert.match(shaders, /compatibleTemporalHistorySurface/);
+  assert.match(shaders, /let dynamicSpatial=currentOwner!=0xffffffffu/);
+  assert.match(shaders, /worldRatio=dot\(oldWorld-expected\[0\]/);
   assert.match(shaders, /dynamicGbufferVS/);
   assert.match(shaders, /dynamicShadowVS/);
 });
