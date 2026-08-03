@@ -103,8 +103,11 @@ population-dependent screen rays feed only cones that still accumulate. A
 light-corridor test additionally retires converged history whose stored
 radiance embeds direct shading that a mover's sweep could have changed, so
 indirect mover shadows cannot be frozen into the field. A dynamic object that
-stops moving drains out of the swept hierarchy and becomes exactly static —
-the persistent fixed-transport cache re-engages. Sub-probe-scale and
+stops moving drains out of the swept hierarchy and becomes exactly static:
+its cones resume full exact-key accumulation and the preserved-cone camera
+path re-engages. (The persistent cold-revisit c0 cache remains a
+static-scene-only extension; its contention-arbitrated slot claims are not
+replay-exact enough for the dynamic oracles.) Sub-probe-scale and
 sub-pixel instances read a projected-size band-limited field, because neither
 the probe grid nor the rasterizer supports directional detail below their
 sampling limits. Moving emitters keep a compact emissive TLAS, and the
